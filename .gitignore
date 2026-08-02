@@ -1,0 +1,10 @@
+# compiled binaries
+/prover
+/verifier
+/cheating_prover
+mc_*
+# scratch experiment artifacts
+/scratch/
+*.o
+# generated data/plots are kept as baseline for now; ignore future /tmp spills
+/tmp/
