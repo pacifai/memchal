@@ -110,3 +110,85 @@ def diff(a: Agg, b: Agg, sigmas: float = 2.0) -> Diff:
     error = math.hypot(a.sem, b.sem)
     obs = abs(value) / error if error > 0 else float("inf")
     return Diff(value, error, obs, obs >= sigmas)
+
+
+def paired_diff(a_list: list, b_list: list, sigmas: float = 2.0) -> Diff:
+    """Element-wise differences d_i = a_list[i] - b_list[i], then aggregate.
+
+    Uses paired subtraction to cancel per-cycle drift (e.g. VM performance level
+    shifting between cycles). The lists must be the same length and ordered by cycle.
+    """
+    if len(a_list) != len(b_list):
+        raise ValueError(f"paired_diff: lists must be equal length ({len(a_list)} vs {len(b_list)})")
+    diffs = [float(a) - float(b) for a, b in zip(a_list, b_list)]
+    agg = aggregate(diffs)
+    # For a single element, use 0 error (can't compute SEM from 1 sample).
+    error = agg.sem if agg.n > 1 else 0.0
+    obs = abs(agg.mean) / error if error > 0 else float("inf")
+    return Diff(agg.mean, error, obs, obs >= sigmas)
+
+
+@dataclass
+class Ratio:
+    """Ratio of two aggregate means with propagated relative error."""
+    value: float
+    rel_error: float
+    error: float
+
+    def __str__(self) -> str:
+        return f"{self.value:.2f}x ± {self.error:.2f}"
+
+
+def ratio(a: Agg, b: Agg) -> Ratio:
+    """a.mean / b.mean with propagated error from standard errors of the means."""
+    if b.mean == 0:
+        return Ratio(float("inf"), float("inf"), float("inf"))
+    v = a.mean / b.mean
+    # Relative error propagation: (sem_a/mean_a)^2 + (sem_b/mean_b)^2
+    rel_a = (a.sem / a.mean) if a.mean != 0 else 0.0
+    rel_b = (b.sem / b.mean) if b.mean != 0 else 0.0
+    rel_err = math.sqrt(rel_a ** 2 + rel_b ** 2)
+    err = v * rel_err
+    return Ratio(v, rel_err, err)
+
+
+def trend(values: list) -> dict:
+    """Split ordered values into first and last thirds, compare with diff().
+
+    Returns {"first": Agg, "last": Agg, "diff": Diff, "drifted": bool,
+             "insufficient_data": bool}.
+    A separable first-vs-last difference means the baseline drifted within the session.
+    When each third has fewer than 2 elements, SEMs are zero and separability cannot
+    be assessed; drifted is False and insufficient_data is True in that case.
+    """
+    vals = [float(v) for v in values]
+    n = len(vals)
+    third = max(1, n // 3)
+    first_agg = aggregate(vals[:third])
+    last_agg = aggregate(vals[n - third:])
+    insufficient = first_agg.n < 2 or last_agg.n < 2
+    d = diff(last_agg, first_agg)
+    # If SEM is 0 on both sides, diff() returns inf sigma (spurious). Suppress.
+    drifted = d.separable and not insufficient
+    return {"first": first_agg.__dict__, "last": last_agg.__dict__,
+            "diff": d.__dict__, "drifted": drifted,
+            "insufficient_data": insufficient}
+
+
+def step_change(values: list, rel_threshold: float = 0.25) -> dict:
+    """Find the largest relative jump between consecutive values.
+
+    Returns {"max_rel_jump": float, "at_index": int, "flag": bool}.
+    """
+    vals = [float(v) for v in values]
+    max_rel = 0.0
+    at_idx = 0
+    for i in range(1, len(vals)):
+        mid = (vals[i] + vals[i - 1]) / 2.0
+        if mid == 0:
+            continue
+        rel = abs(vals[i] - vals[i - 1]) / mid
+        if rel > max_rel:
+            max_rel = rel
+            at_idx = i
+    return {"max_rel_jump": max_rel, "at_index": at_idx, "flag": max_rel >= rel_threshold}

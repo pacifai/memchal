@@ -1,38 +1,56 @@
 #!/usr/bin/env python3
-"""Repeat-trials driver for the memory-challenge PoC.
+"""Repeat-trials driver for the memory-challenge PoC — interleaved-cycle edition.
 
-Runs each prover mode R independent times (each run = a fresh verifier connection,
-which triggers a fresh upload + fresh alloc/mlock/file-spill on the server), reads
-the verifier's JSON summary (never its printf text), and reports central tendency
-AND run-to-run spread. Percentiles the sample size can't support are withheld, not
-printed as if they were real.
+All prover servers are started ONCE at session open and kept alive for the whole
+session. Modes are run in INTERLEAVED CYCLES (one run of every mode per cycle,
+in a shuffled order that is reproducible from --shuffle-seed) so that
+between-cycle VM-level latency drift cancels in within-session comparisons.
 
-Environment (VM vs bare-metal, page size, cpus, memory limit) is stamped into the
-output so nobody later mistakes a VM number for a bare-metal one.
+Absolute latencies are NOT portable across sessions (Apple Silicon P/E-core
+placement is fixed for a whole VM session, causing ~1.6x between-session swings).
+Only within-session ratios and paired differences are trustworthy.
 
 Usage (inside the container, after `make`):
-    python3 scripts/run_trials.py --repeats 10 --n 3000 --k 4096 --mb 64 \\
-        --modes honest,disk,partial,fake --out results/trials.json
+    python3 scripts/run_trials.py --repeats 3 --n 1500 \\
+        --modes floor,honest,disk,fake --shuffle-seed 42 \\
+        --out results/trials.json
 """
 from __future__ import annotations
-import argparse, subprocess, time, socket, os, sys, json, platform
+import argparse, subprocess, time, socket, os, sys, json, platform, random, csv, math
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mc_stats as m
 
-# mode -> how to launch its server. {port} is substituted at run time.
-# honest uses the real honest server (prover.cpp); cheats use cheating_prover.
-MODE_SERVERS = {
-    "honest":   ["./prover", "{port}"],
-    "disk":     ["./cheating_prover", "--port", "{port}", "--mode", "disk"],
-    "partial":  ["./cheating_prover", "--port", "{port}", "--mode", "partial", "--frac", "0.5"],
-    "fake":     ["./cheating_prover", "--port", "{port}", "--mode", "fake", "--frac", "0.5"],
+# ---------------------------------------------------------------------------
+# Mode definitions
+# ---------------------------------------------------------------------------
+# "floor" uses the honest server but k=0 (transport-floor measurement).
+# All cheating modes use cheating_prover with their own port.
+MODE_MAP = {
+    "floor":   {"server": "prover",          "k_override": 0,    "cheat_mode": None},
+    "honest":  {"server": "prover",          "k_override": None, "cheat_mode": None},
+    "disk":    {"server": "cheating_prover", "k_override": None, "cheat_mode": "disk"},
+    "partial": {"server": "cheating_prover", "k_override": None, "cheat_mode": "partial"},
+    "fake":    {"server": "cheating_prover", "k_override": None, "cheat_mode": "fake"},
+}
+
+# Port offsets per mode from the base --port
+PORT_OFFSET = {
+    "floor":   0,   # shares honest prover
+    "honest":  0,   # same prover instance
+    "disk":    1,
+    "partial": 2,
+    "fake":    3,
 }
 
 PCTLS = ["min", "p50", "p90", "p99", "p99.9", "max"]
 
 
-def wait_port(port: int, timeout: float = 10.0) -> bool:
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def wait_port(port: int, timeout: float = 15.0) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         with socket.socket() as s:
@@ -54,7 +72,6 @@ def detect_env() -> dict:
         "online_cpus": os.sysconf("SC_NPROCESSORS_ONLN") if hasattr(os, "sysconf") else None,
         "page_size": os.sysconf("SC_PAGESIZE") if hasattr(os, "sysconf") else None,
     }
-    # cgroup v2 limits (set by run.sh via --cpus/--memory)
     try:
         with open("/sys/fs/cgroup/cpu.max") as f:
             raw = f.read().strip()
@@ -71,56 +88,34 @@ def detect_env() -> dict:
     return env
 
 
-def run_one(port: int, a, out_json: str) -> dict:
+def build_server_cmd(mode: str, port: int, args) -> list[str]:
+    """Build the subprocess command to launch the server for a given mode."""
+    cfg = MODE_MAP[mode]
+    if cfg["server"] == "prover":
+        return ["./prover", str(port)]
+    else:
+        cmd = ["./cheating_prover", "--port", str(port), "--mode", cfg["cheat_mode"]]
+        if cfg["cheat_mode"] in ("partial", "fake"):
+            cmd += ["--frac", "0.5"]
+        return cmd
+
+
+def run_one(port: int, k: int, a, out_json: str) -> dict:
     """One verifier run against an already-listening server; returns parsed JSON."""
     cmd = ["./verifier", "--host", "127.0.0.1", "--port", str(port),
-           "--mb", str(a.mb), "--k", str(a.k), "--lanes", str(a.lanes),
+           "--mb", str(a.mb), "--k", str(k), "--lanes", str(a.lanes),
            "--n", str(a.n), "--warmup", str(a.warmup), "--sweep", "0",
            "--csv", "/dev/null", "--json", out_json, "--label", a.label]
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
     return m.load_json(out_json)
 
 
-def run_mode(mode: str, port: int, a) -> dict:
-    server = [tok.format(port=port) for tok in MODE_SERVERS[mode]]
-    proc = subprocess.Popen(server, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    try:
-        if not wait_port(port):
-            raise RuntimeError(f"server for mode '{mode}' did not come up on port {port}")
-        runs = []
-        for i in range(a.repeats):
-            j = run_one(port, a, f"{a.tmp}/{mode}_run{i}.json")
-            runs.append(j)
-            print(f"    {mode} run {i+1}/{a.repeats}: "
-                  f"p50={j['result']['percentiles_us']['p50']['value']:.1f}us "
-                  f"errors={j['result']['errors']} "
-                  f"locked={j['prover']['locked']}", flush=True)
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-
-    # aggregate across runs
-    n_samples = runs[0]["result"]["samples"]
-    pct_aggs = {name: m.aggregate([r["result"]["percentiles_us"][name]["value"] for r in runs])
-                for name in PCTLS}
-    return {
-        "mode": mode,
-        "repeats": a.repeats,
-        "n_per_run": n_samples,
-        "all_locked": all(r["prover"]["locked"] for r in runs),
-        "any_errors": any(r["result"]["errors"] for r in runs),
-        "errors_per_run": [r["result"]["errors"] for r in runs],
-        "percentiles": {name: pct_aggs[name].__dict__ for name in PCTLS},
-        "p50_runs": [r["result"]["percentiles_us"]["p50"]["value"] for r in runs],
-    }
-
-
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--modes", default="honest,disk,partial,fake")
+    ap.add_argument("--modes", default="floor,honest,disk,partial,fake")
     ap.add_argument("--repeats", type=int, default=10)
     ap.add_argument("--n", type=int, default=3000)
     ap.add_argument("--k", type=int, default=4096)
@@ -131,58 +126,326 @@ def main():
     ap.add_argument("--label", default="")
     ap.add_argument("--tmp", default="/tmp/mc_trials")
     ap.add_argument("--out", default="results/trials.json")
-    a = ap.parse_args()
-    os.makedirs(a.tmp, exist_ok=True)
-    os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
+    ap.add_argument("--shuffle-seed", type=int, default=None,
+                    help="Seed for within-cycle mode shuffle (default: random).")
+    args = ap.parse_args()
+
+    os.makedirs(args.tmp, exist_ok=True)
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+
+    # Resolve shuffle seed
+    if args.shuffle_seed is None:
+        args.shuffle_seed = random.randint(0, 2**31 - 1)
+    shuffle_seed = args.shuffle_seed
+
+    # Session ID
+    session_id = (time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+                  + f"-{random.randint(0, 9999):04d}")
 
     env = detect_env()
-    if not a.label:
-        a.label = ("container" if env["in_container"] else "host") + \
-                  f"/{env['machine']}/{env.get('cpus','?')}cpu/{env['page_size']}Bpage"
+    if not args.label:
+        args.label = ("container" if env["in_container"] else "host") + \
+                     f"/{env['machine']}/{env.get('cpus','?')}cpu/{env['page_size']}Bpage"
+
+    print(f"session_id: {session_id}")
+    print(f"shuffle_seed: {shuffle_seed}")
     print(f"env: {env}")
-    print(f"config: modes={a.modes} repeats={a.repeats} n={a.n} k={a.k} "
-          f"lanes={a.lanes} mb={a.mb} warmup={a.warmup}")
-    print(f"label: {a.label}\n")
+    print(f"config: modes={args.modes} repeats={args.repeats} n={args.n} k={args.k} "
+          f"lanes={args.lanes} mb={args.mb} warmup={args.warmup}")
+    print(f"label: {args.label}\n")
 
-    results = []
-    for mode in a.modes.split(","):
-        mode = mode.strip()
-        if mode not in MODE_SERVERS:
-            print(f"  SKIP unknown mode '{mode}'"); continue
-        print(f"  === mode: {mode} ===", flush=True)
-        results.append(run_mode(mode, a.port, a))
+    modes = [m_.strip() for m_ in args.modes.split(",") if m_.strip() in MODE_MAP]
+    unknown = [m_.strip() for m_ in args.modes.split(",") if m_.strip() not in MODE_MAP]
+    for u in unknown:
+        print(f"  SKIP unknown mode '{u}'")
 
-    report = {"schema": "memchal.trials.v1", "env": env, "label": a.label,
-              "config": {"repeats": a.repeats, "n": a.n, "k": a.k, "lanes": a.lanes,
-                         "mb": a.mb, "warmup": a.warmup},
-              "modes": results}
-    with open(a.out, "w") as f:
-        json.dump(report, f, indent=2)
+    if not modes:
+        print("No valid modes; exiting.")
+        return
 
-    print_table(report)
-    print(f"\nwrote {a.out}")
+    # Determine which physical ports/servers we need.
+    # "floor" and "honest" share the same prover on args.port; other modes each get
+    # their own port.
+    need_prover = any(MODE_MAP[md]["server"] == "prover" for md in modes)
+    ports = {}  # mode -> port
+    for md in modes:
+        if MODE_MAP[md]["server"] == "prover":
+            ports[md] = args.port
+        else:
+            ports[md] = args.port + PORT_OFFSET[md]
 
+    # Start servers — one prover (shared by floor+honest), one per cheat mode.
+    procs = {}  # tag -> Popen (tag = "prover" or mode name for cheats)
+    session_start = time.time()
 
-def print_table(report: dict):
-    n = report["config"]["n"]
-    print(f"\n=== repeat-trials summary  (per-run p50 across {report['config']['repeats']} runs; "
-          f"n={n} samples/run; k={report['config']['k']}; {report['label']}) ===")
-    print(f"{'mode':<9} {'p50 mean±sd (us)':<22} {'p99 (us)':<18} "
-          f"{'p99.9':<14} {'locked':<7} {'errors/run'}")
-    for r in report["modes"]:
-        p50 = m.Agg(**r["percentiles"]["p50"])
-        p50s = f"{p50.mean:.1f} ± {p50.sd:.1f}"
-        # inner percentiles: withhold if the sample size can't support them
-        def cell(name):
-            if not m.reliable(float(name[1:]) if name != "min" and name != "max" else 0, n):
-                return f"n/a (n={n})"
-            a_ = m.Agg(**r["percentiles"][name])
-            return f"{a_.mean:.1f}±{a_.sd:.1f}"
-        p99 = cell("p99")
-        p999 = cell("p99.9")
-        errs = "/".join(str(e) for e in r["errors_per_run"])
-        print(f"{r['mode']:<9} {p50s:<22} {p99:<18} {p999:<14} "
-              f"{str(r['all_locked']):<7} {errs}")
+    def start_servers():
+        if need_prover:
+            cmd = ["./prover", str(args.port)]
+            print(f"  starting prover on port {args.port}: {cmd}")
+            procs["prover"] = subprocess.Popen(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if not wait_port(args.port):
+                raise RuntimeError(f"prover did not come up on port {args.port}")
+            print(f"  prover ready on port {args.port}")
+
+        for md in modes:
+            if MODE_MAP[md]["server"] == "cheating_prover":
+                port = ports[md]
+                cmd = build_server_cmd(md, port, args)
+                print(f"  starting {md} server on port {port}: {cmd}")
+                procs[md] = subprocess.Popen(
+                    cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if not wait_port(port):
+                    raise RuntimeError(f"server for '{md}' did not come up on port {port}")
+                print(f"  {md} server ready on port {port}")
+
+    def stop_servers():
+        for tag, proc in procs.items():
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+    # Per-run rows for CSV
+    rows = []          # list of row dicts
+    seq = 0            # global incrementing counter
+    executed_orders = []  # list of mode-order lists per cycle
+
+    try:
+        start_servers()
+        print()
+
+        for cycle in range(args.repeats):
+            # Shuffle mode order reproducibly: seed advances per cycle so each
+            # cycle has a different (but reproducible) permutation.
+            rng = random.Random(shuffle_seed + cycle)
+            order = list(modes)
+            rng.shuffle(order)
+            executed_orders.append(order)
+            print(f"--- cycle {cycle+1}/{args.repeats}  order: {order} ---", flush=True)
+
+            for md in order:
+                port = ports[md]
+                k = 0 if MODE_MAP[md]["k_override"] == 0 else args.k
+                out_json = f"{args.tmp}/{md}_cycle{cycle}_seq{seq}.json"
+                t_rel = time.time() - session_start
+
+                j = run_one(port, k, args, out_json)
+
+                p50 = j["result"]["percentiles_us"]["p50"]["value"]
+                p90 = j["result"]["percentiles_us"]["p90"]["value"]
+                p99 = j["result"]["percentiles_us"]["p99"]["value"]
+                errors = j["result"]["errors"]
+                locked = j["prover"]["locked"]
+
+                print(f"  cycle={cycle+1} seq={seq:3d} t={t_rel:6.1f}s  "
+                      f"{md:<8}  p50={p50:.1f}us  p90={p90:.1f}us  "
+                      f"errors={errors}  locked={locked}", flush=True)
+
+                rows.append({
+                    "session_id": session_id,
+                    "cycle": cycle,
+                    "seq": seq,
+                    "t_rel_s": round(t_rel, 3),
+                    "mode": md,
+                    "p50_us": p50,
+                    "p90_us": p90,
+                    "p99_us": p99,
+                    "errors": errors,
+                    "locked": locked,
+                })
+                seq += 1
+
+    finally:
+        stop_servers()
+
+    print()
+
+    # -----------------------------------------------------------------------
+    # Aggregation
+    # -----------------------------------------------------------------------
+    # Collect p50 values per mode, ordered by cycle (i.e. by cycle index).
+    mode_p50 = {}   # mode -> list of p50 (one per cycle, in cycle order)
+    mode_p90 = {}
+    mode_p99 = {}
+    for md in modes:
+        cycle_rows = sorted([r for r in rows if r["mode"] == md], key=lambda r: r["cycle"])
+        mode_p50[md] = [r["p50_us"] for r in cycle_rows]
+        mode_p90[md] = [r["p90_us"] for r in cycle_rows]
+        mode_p99[md] = [r["p99_us"] for r in cycle_rows]
+
+    aggs = {md: m.aggregate(mode_p50[md]) for md in modes}
+
+    # Paired memory-time: honest − floor (per cycle, so drift cancels)
+    memory_time_diff = None
+    if "honest" in modes and "floor" in modes:
+        memory_time_diff = m.paired_diff(mode_p50["honest"], mode_p50["floor"])
+
+    # Ratios vs honest
+    ratios = {}
+    if "honest" in modes:
+        honest_agg = aggs["honest"]
+        for md in modes:
+            if md not in ("honest", "floor"):
+                ratios[md] = m.ratio(aggs[md], honest_agg)
+
+    # Drift detection on honest p50 ordered by seq (not cycle) if present
+    drift_result = None
+    step_result = None
+    if "honest" in modes:
+        honest_rows_by_seq = sorted([r for r in rows if r["mode"] == "honest"],
+                                    key=lambda r: r["seq"])
+        honest_p50_by_seq = [r["p50_us"] for r in honest_rows_by_seq]
+        if len(honest_p50_by_seq) >= 3:
+            drift_result = m.trend(honest_p50_by_seq)
+            step_result = m.step_change(honest_p50_by_seq)
+
+    # -----------------------------------------------------------------------
+    # Print summary
+    # -----------------------------------------------------------------------
+    n_per_run = args.n
+
+    print(f"=== repeat-trials summary  (per-run p50 across {args.repeats} interleaved cycles; "
+          f"n={n_per_run} samples/run; k={args.k}; {args.label}) ===")
+    print(f"session_id: {session_id}  "
+          f"[absolute us illustrative for THIS session only; compare within-session only]")
+    print()
+    print(f"shuffle_seed: {shuffle_seed}")
+    print("executed cycle orders:")
+    for i, order in enumerate(executed_orders):
+        print(f"  cycle {i+1}: {order}")
+    print()
+
+    # p99.9 reliability
+    p999_ok = m.reliable(99.9, n_per_run)
+
+    print(f"{'mode':<9} {'p50 mean±sd (us)':<24} {'p90 mean±sd (us)':<22} "
+          f"{'p99 (us)':<20} {'p99.9':<14} {'notes'}")
+    print("-" * 105)
+    for md in modes:
+        agg = aggs[md]
+        p50s = f"{agg.mean:.1f} ± {agg.sd:.1f}"
+
+        p90_agg = m.aggregate(mode_p90[md])
+        p90s = f"{p90_agg.mean:.1f} ± {p90_agg.sd:.1f}"
+
+        if m.reliable(99, n_per_run):
+            p99_agg = m.aggregate(mode_p99[md])
+            p99s = f"{p99_agg.mean:.1f} ± {p99_agg.sd:.1f}"
+        else:
+            p99s = f"n/a (n={n_per_run})"
+
+        if p999_ok:
+            # Would need to collect p99.9 per run; for now note it's reliable
+            p999s = "(see raw JSON)"
+        else:
+            p999s = f"n/a (n={n_per_run})"
+
+        notes = []
+        error_counts = [r["errors"] for r in rows if r["mode"] == md]
+        total_errors = sum(error_counts)
+        if total_errors > 0:
+            notes.append(f"errors≈{total_errors//len(error_counts)}/run")
+        if md == "floor":
+            notes.append("k=0 transport floor")
+        print(f"{md:<9} {p50s:<24} {p90s:<22} {p99s:<20} {p999s:<14} {', '.join(notes)}")
+
+    print()
+    print("--- memory-time (honest−floor, paired by cycle) ---")
+    if memory_time_diff is not None:
+        tag = "" if memory_time_diff.separable else "  [NOT SEPARABLE]"
+        print(f"  honest−floor: {memory_time_diff}{tag}")
+    else:
+        print("  (need both 'honest' and 'floor' modes)")
+
+    print()
+    print("--- ratios vs honest ---")
+    if ratios:
+        for md, r_ in ratios.items():
+            print(f"  {md}/honest: {r_}  (rel_err={r_.rel_error:.3f})")
+    else:
+        print("  (no comparison modes)")
+
+    print()
+    print("--- drift verdict (honest p50 sequence) ---")
+    if drift_result is not None:
+        d = m.Diff(**drift_result["diff"])
+        first_agg = m.Agg(**drift_result["first"])
+        last_agg = m.Agg(**drift_result["last"])
+        drifted = drift_result["drifted"]
+        insuff = drift_result.get("insufficient_data", False)
+        print(f"  first-third mean: {first_agg.mean:.1f}us   last-third mean: {last_agg.mean:.1f}us")
+        print(f"  trend diff (last−first): {d}")
+        if insuff:
+            print(f"  DRIFT FLAG: undetermined (each third has <2 points; need more cycles for reliable assessment)")
+        else:
+            print(f"  DRIFT FLAG: {'YES — baseline shifted within session' if drifted else 'no significant drift detected'}")
+        if step_result:
+            print(f"  step change: max_rel_jump={step_result['max_rel_jump']:.3f} "
+                  f"at_index={step_result['at_index']} "
+                  f"flag={'YES' if step_result['flag'] else 'no'}")
+    else:
+        print("  (need 'honest' mode with ≥3 cycles for drift analysis)")
+
+    # -----------------------------------------------------------------------
+    # Write CSV
+    # -----------------------------------------------------------------------
+    os.makedirs("results", exist_ok=True)
+    csv_path = f"results/session_{session_id}.csv"
+    csv_fields = ["session_id", "cycle", "seq", "t_rel_s", "mode",
+                  "p50_us", "p90_us", "p99_us", "errors", "locked"]
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=csv_fields)
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"\nwrote CSV: {csv_path}")
+
+    # -----------------------------------------------------------------------
+    # Write aggregate JSON
+    # -----------------------------------------------------------------------
+    non_portability_note = (
+        "Absolute latencies are NOT comparable across sessions "
+        "(Apple Silicon P/E-core placement is fixed per VM session; "
+        "~1.6x between-session swing observed). "
+        "Use within-session ratios/differences only."
+    )
+
+    out_doc = {
+        "schema": "memchal.trials.v2",
+        "session_id": session_id,
+        "absolute_latencies_portable_across_sessions": False,
+        "note": non_portability_note,
+        "env": env,
+        "label": args.label,
+        "config": {
+            "repeats": args.repeats,
+            "n": n_per_run,
+            "k": args.k,
+            "lanes": args.lanes,
+            "mb": args.mb,
+            "warmup": args.warmup,
+            "shuffle_seed": shuffle_seed,
+        },
+        "executed_orders": executed_orders,
+        "modes": {
+            md: {
+                "agg_p50": aggs[md].__dict__,
+                "p50_by_cycle": mode_p50[md],
+            }
+            for md in modes
+        },
+        "memory_time": memory_time_diff.__dict__ if memory_time_diff is not None else None,
+        "ratios": {md: r_.__dict__ for md, r_ in ratios.items()},
+        "drift": {
+            "trend": drift_result,
+            "step_change": step_result,
+        },
+    }
+
+    with open(args.out, "w") as f:
+        json.dump(out_doc, f, indent=2)
+    print(f"wrote JSON: {args.out}")
 
 
 if __name__ == "__main__":
