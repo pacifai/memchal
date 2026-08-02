@@ -37,7 +37,7 @@ if [ "$#" -eq 0 ]; then
     make
     ./prover 9099 >/tmp/smoke_prover.log 2>&1 &
     PP=$!; sleep 0.5
-    ./verifier --port 9099 --mb 8 --k 1024 --lanes 8 --n 50 --warmup 10 --sweep 0 --csv /dev/null
+    ./verifier --port 9099 --mb 8 --k 1024 --lanes 8 --n 50 --warmup 10 --csv /dev/null
     kill -9 $PP 2>/dev/null || true
     echo "[run] smoke test OK"'
 fi

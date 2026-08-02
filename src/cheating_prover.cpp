@@ -1,5 +1,5 @@
-// cheating_prover.cpp — a prover that does NOT honestly hold the data resident,
-// used to show what each cheat does to the latency profile / correctness.
+// cheating_prover.cpp — a prover that does NOT honestly hold the data resident;
+// demonstrates what each cheat does to the latency profile / correctness.
 //
 // Modes (--mode):
 //   honest   full buffer pinned in RAM (baseline; same as prover.cpp)

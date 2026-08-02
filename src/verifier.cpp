@@ -56,7 +56,6 @@ struct Args {
     uint32_t lanes = 64;       // parallel lanes (GPU-thread analog)
     uint32_t n = 2000;         // measured challenges
     uint32_t warmup = 200;     // unmeasured warmup challenges
-    int sweep = 1;             // run a K sweep at the end
     const char* csv = "latency.csv";
     const char* json = nullptr;  // machine-readable summary (scripts consume this)
     const char* label = "";      // free-form environment/run label, copied into JSON
@@ -74,7 +73,6 @@ static Args parse(int argc, char** argv) {
         else if (!strcmp(k, "--lanes"))  a.lanes = (uint32_t)strtoul(v, nullptr, 10);
         else if (!strcmp(k, "--n"))      a.n = (uint32_t)strtoul(v, nullptr, 10);
         else if (!strcmp(k, "--warmup")) a.warmup = (uint32_t)strtoul(v, nullptr, 10);
-        else if (!strcmp(k, "--sweep"))  a.sweep = atoi(v);
         else if (!strcmp(k, "--csv"))    a.csv = v;
         else if (!strcmp(k, "--json"))   a.json = v;
         else if (!strcmp(k, "--label"))  a.label = v;
@@ -146,7 +144,6 @@ int main(int argc, char** argv) {
     std::vector<double> lat; lat.reserve(a.n);
     uint64_t errors = 0;
     run_batch(fd, buf, num_words, a.k, a.lanes, a.n, base, &lat, &errors);
-    base += a.n;
 
     // Stats.
     std::vector<double> s = lat; std::sort(s.begin(), s.end());
@@ -224,22 +221,6 @@ int main(int argc, char** argv) {
             printf("[verifier] wrote %s\n", a.json);
         } else {
             fprintf(stderr, "[verifier] WARNING: could not write JSON to %s\n", a.json);
-        }
-    }
-
-    // Optional sweep: median latency vs samples-per-challenge. Shows the
-    // memory-bound scaling — the core evidence that answers require real probes.
-    if (a.sweep) {
-        printf("\n=== K sweep (median latency vs samples) ===\n");
-        printf("   %10s  %12s  %14s\n", "k", "median_us", "probes/us");
-        uint32_t ks[] = { 1024, 4096, 16384, 65536, 262144, 1048576 };
-        for (uint32_t kk : ks) {
-            std::vector<double> sl; uint64_t e = 0;
-            run_batch(fd, buf, num_words, kk, a.lanes, 300, base, &sl, &e);
-            base += 300;
-            std::sort(sl.begin(), sl.end());
-            double med = pctile(sl, 50);
-            printf("   %10u  %12.2f  %14.2f\n", kk, med / 1000.0, kk / (med / 1000.0));
         }
     }
 

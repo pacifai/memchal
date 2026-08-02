@@ -46,7 +46,7 @@ echo "=== INVARIANT TESTS ==="
 
 # Common verifier flags for all invariant runs.
 # Small: 8 MiB buffer, 2048 samples, 16 lanes, 100 measured, 20 warmup.
-VERIFIER_ARGS="--mb 8 --k 2048 --lanes 16 --n 100 --warmup 20 --sweep 0 --csv /dev/null"
+VERIFIER_ARGS="--mb 8 --k 2048 --lanes 16 --n 100 --warmup 20 --csv /dev/null"
 JSON=/tmp/inv.json
 
 # Helper: read errors and samples from the JSON written by the verifier.

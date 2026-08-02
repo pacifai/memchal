@@ -106,7 +106,7 @@ def run_one(port: int, k: int, a, out_json: str) -> dict:
     """One verifier run against an already-listening server; returns parsed JSON."""
     cmd = ["./verifier", "--host", "127.0.0.1", "--port", str(port),
            "--mb", str(a.mb), "--k", str(k), "--lanes", str(a.lanes),
-           "--n", str(a.n), "--warmup", str(a.warmup), "--sweep", "0",
+           "--n", str(a.n), "--warmup", str(a.warmup),
            "--csv", "/dev/null", "--json", out_json, "--label", a.label]
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
     return m.load_json(out_json)
@@ -319,12 +319,12 @@ def main():
         print(f"  cycle {i+1}: {order}")
     print()
 
-    # p99.9 reliability
-    p999_ok = m.reliable(99.9, n_per_run)
-
+    # p99 is withheld unless the per-run sample size supports it (see mc_stats.reliable).
+    # p99.9 is deliberately not reported: it needs n>=10000 samples/run, far above
+    # what these runs use, and the driver only collects p50/p90/p99 per run.
     print(f"{'mode':<9} {'p50 mean±sd (us)':<24} {'p90 mean±sd (us)':<22} "
-          f"{'p99 (us)':<20} {'p99.9':<14} {'notes'}")
-    print("-" * 105)
+          f"{'p99 (us)':<20} {'notes'}")
+    print("-" * 92)
     for md in modes:
         agg = aggs[md]
         p50s = f"{agg.mean:.1f} ± {agg.sd:.1f}"
@@ -338,12 +338,6 @@ def main():
         else:
             p99s = f"n/a (n={n_per_run})"
 
-        if p999_ok:
-            # Would need to collect p99.9 per run; for now note it's reliable
-            p999s = "(see raw JSON)"
-        else:
-            p999s = f"n/a (n={n_per_run})"
-
         notes = []
         error_counts = [r["errors"] for r in rows if r["mode"] == md]
         total_errors = sum(error_counts)
@@ -351,7 +345,7 @@ def main():
             notes.append(f"errors≈{total_errors//len(error_counts)}/run")
         if md == "floor":
             notes.append("k=0 transport floor")
-        print(f"{md:<9} {p50s:<24} {p90s:<22} {p99s:<20} {p999s:<14} {', '.join(notes)}")
+        print(f"{md:<9} {p50s:<24} {p90s:<22} {p99s:<20} {', '.join(notes)}")
 
     print()
     print("--- memory-time (honest−floor, paired by cycle) ---")
@@ -378,10 +372,10 @@ def main():
         drifted = drift_result["drifted"]
         insuff = drift_result.get("insufficient_data", False)
         print(f"  first-third mean: {first_agg.mean:.1f}us   last-third mean: {last_agg.mean:.1f}us")
-        print(f"  trend diff (last−first): {d}")
         if insuff:
-            print(f"  DRIFT FLAG: undetermined (each third has <2 points; need more cycles for reliable assessment)")
+            print(f"  DRIFT FLAG: undetermined (each third has <2 points; run >=6 cycles for a reliable verdict)")
         else:
+            print(f"  trend diff (last−first): {d}")
             print(f"  DRIFT FLAG: {'YES — baseline shifted within session' if drifted else 'no significant drift detected'}")
         if step_result:
             print(f"  step change: max_rel_jump={step_result['max_rel_jump']:.3f} "

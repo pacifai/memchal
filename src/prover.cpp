@@ -3,9 +3,11 @@
 // word buffer plus the pure functions in common.hpp.
 //
 // Memory pinning: we mmap an anonymous region, prefault every page, and mlock()
-// it so the kernel may never swap it out. On a box without CAP_IPC_LOCK / a high
-// `ulimit -l`, mlock() fails and we continue unlocked (still correct, just no
-// anti-swap guarantee) after printing why.
+// it so the kernel may never swap it out. We do not trust mlock()'s return value
+// — we verify the lock actually took by reading VmLck from /proc/self/status. If
+// the buffer is not genuinely pinned the prover REFUSES to run (an unpinned
+// honest baseline is meaningless); --allow-unlocked overrides and stamps the
+// result locked=false. Needs CAP_IPC_LOCK / a high `ulimit -l` (run.sh grants both).
 //
 // GPU note: the on-GPU analog of mlock is simply cudaMalloc — VRAM is not
 // swappable. For host staging use cudaHostAlloc(cudaHostAllocDefault) pinned

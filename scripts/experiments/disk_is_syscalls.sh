@@ -84,7 +84,7 @@ run_scenario() {
     # Run verifier
     ./verifier --host 127.0.0.1 --port "$port" \
         --mb "$MB" --k "$K" --lanes "$LANES" \
-        --n "$N" --warmup "$WARMUP" --sweep 0 \
+        --n "$N" --warmup "$WARMUP" \
         --csv /dev/null --json "$out_json" \
         >/dev/null 2>&1 || true
 
@@ -129,7 +129,7 @@ sleep 0.2
 HONEST_JSON="$TMPDIR_MC/honest.json"
 ./verifier --host 127.0.0.1 --port "$HONEST_PORT" \
     --mb "$MB" --k "$K" --lanes "$LANES" \
-    --n "$N" --warmup "$WARMUP" --sweep 0 \
+    --n "$N" --warmup "$WARMUP" \
     --csv /dev/null --json "$HONEST_JSON" \
     >/dev/null 2>&1 || true
 
