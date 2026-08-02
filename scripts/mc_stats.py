@@ -1,14 +1,13 @@
 """Shared statistics + IO for the memory-challenge harness.
 
-Single source of truth for:
-  - percentile logic (mirrors verifier.cpp: nearest-rank + the tail-support rule),
-  - error propagation across repeated runs.
-
-Used by the repeat-trials driver, the transport-floor subtraction, and both plot
-scripts, so the numbers in the README cannot drift from the numbers on the charts.
+Single source of truth for the percentile tail-support rule (which percentiles the
+sample size can trust) and for error propagation across repeated runs. Used by the
+repeat-trials driver and the plot script so the numbers in the README cannot drift
+from the numbers on the charts. Raw percentile *values* are computed in verifier.cpp
+and consumed here from its JSON, so they are computed in exactly one place.
 """
 from __future__ import annotations
-import json, math, csv
+import json, math
 from dataclasses import dataclass
 
 # Must match kMinTail in verifier.cpp: a percentile with fewer than this many
@@ -16,14 +15,7 @@ from dataclasses import dataclass
 MIN_TAIL = 10
 
 
-# --- percentiles (identical convention to verifier.cpp) ----------------------
-def pctile(sorted_xs, p: float) -> float:
-    if not sorted_xs:
-        return 0.0
-    idx = int(p / 100.0 * (len(sorted_xs) - 1))
-    return sorted_xs[idx]
-
-
+# --- percentile tail-support rule (mirrors verifier.cpp) ---------------------
 def tail_count(p: float, n: int) -> int:
     return max(0, round((1.0 - p / 100.0) * n))
 
@@ -39,14 +31,6 @@ def reliable(p: float, n: int) -> bool:
 def load_json(path: str) -> dict:
     with open(path) as f:
         return json.load(f)
-
-
-def load_latencies_csv(path: str) -> list[float]:
-    xs = []
-    with open(path) as f:
-        for row in csv.DictReader(f):
-            xs.append(float(row["latency_us"]))
-    return xs
 
 
 # --- aggregation across repeated runs ----------------------------------------
