@@ -9,6 +9,9 @@
 //            slow misses). Tail grows as --frac shrinks. A pure timing detector.
 //   fake     keep a fraction --frac in RAM; for misses, fabricate a value ->
 //            fast but WRONG -> verification errors. A pure correctness detector.
+//   mmapdisk data on disk (page-cache DONTNEED'd), read via a mmap'd view — NO
+//            per-probe pread syscall. Answers at ~honest speed for buffers that
+//            fit in RAM; behaviour above RAM size is unmeasured.
 //
 // All modes reuse answer_challenge_t() from common.hpp, so a correct answer is
 // byte-identical to the verifier's local recomputation — only latency (disk/
@@ -23,9 +26,12 @@
 
 using namespace mc;
 
-enum Mode { HONEST, DISK, PARTIAL, FAKE };
+enum Mode { HONEST, DISK, PARTIAL, FAKE, MMAP_DISK };
 
 static long g_page = 4096;
+
+// Count of pread() calls made in disk_word(); instrumentation only.
+static uint64_t g_preads = 0;
 
 static void* alloc_pinned(size_t bytes, int* locked) {
     *locked = 0;
@@ -61,6 +67,7 @@ static int make_listener(uint16_t port) {
 // Read one 64-bit word from the file at word-index idx (0 on failure).
 static inline uint64_t disk_word(int fd, uint64_t idx) {
     uint64_t w = 0;
+    ++g_preads;
     ssize_t got = pread(fd, &w, sizeof(w), (off_t)(idx * 8));
     (void)got; // best-effort; a failed probe just folds in 0
     return w;
@@ -135,19 +142,91 @@ static void serve(int cfd, Mode mode, double frac, const char* datafile) {
     Ready rd{ kMagic, (uint32_t)locked, 0 };
     send_all(cfd, &rd, sizeof(rd));
 
-    if (mode == DISK) {
+    if (mode == MMAP_DISK) {
+        // ADVERSARY: data on disk (page-cache DONTNEED'd), but read via a
+        // memory-mapped view -> NO per-probe syscall. Falsification test: if
+        // this answers at ~honest speed, the "disk" timing signal was syscall
+        // overhead, not storage distance. (For buffers that fit in RAM;
+        // behaviour above RAM size is unmeasured.)
+        mname = "mmapdisk";
+        uint64_t* map = (uint64_t*)mmap(nullptr, bytes, PROT_READ, MAP_PRIVATE, fd, 0);
+        if (map == MAP_FAILED) { perror("mmap file"); close(fd); return; }
+        madvise(map, bytes, MADV_RANDOM); // no readahead; fault on demand
+        printf("[cheat:mmapdisk] 0%% pinned; probes read a mmap'd file view (no pread syscall)\n");
+
+        size_t io0 = io_read_bytes();
+        g_preads = 0;
+        challenge_loop(cfd, [map](uint64_t idx){ return map[idx]; }, num_words, mname);
+        size_t io1 = io_read_bytes();
+
+        if (io0 == (size_t)-1 || io1 == (size_t)-1) {
+            printf("[cheat:mmapdisk] instrumentation: preads=%llu  read_bytes_delta=unavailable (bytes fetched from block layer)\n",
+                   (unsigned long long)g_preads);
+        } else {
+            size_t delta = io1 - io0;
+            printf("[cheat:mmapdisk] instrumentation: preads=%llu  read_bytes_delta=%zu (bytes fetched from block layer)\n",
+                   (unsigned long long)g_preads, delta);
+            if (g_preads > 0) {
+                size_t expected = g_preads * 4096;
+                if (delta < expected / 10) {
+                    printf("  => reads are PAGE-CACHE HITS after warmup; latency is syscall/page-cache overhead, NOT storage distance\n");
+                }
+            }
+        }
+
+        munmap(map, bytes); close(fd); unlink(datafile);
+        return;
+    } else if (mode == DISK) {
         mname = "disk";
         printf("[cheat:disk] 0%% resident; every probe hits disk\n");
+
+        size_t io0 = io_read_bytes();
+        g_preads = 0;
         challenge_loop(cfd, [fd](uint64_t idx){
             return disk_word(fd, idx);
         }, num_words, mname);
+        size_t io1 = io_read_bytes();
+
+        if (io0 == (size_t)-1 || io1 == (size_t)-1) {
+            printf("[cheat:disk] instrumentation: preads=%llu  read_bytes_delta=unavailable (bytes fetched from block layer)\n",
+                   (unsigned long long)g_preads);
+        } else {
+            size_t delta = io1 - io0;
+            printf("[cheat:disk] instrumentation: preads=%llu  read_bytes_delta=%zu (bytes fetched from block layer)\n",
+                   (unsigned long long)g_preads, delta);
+            if (g_preads > 0) {
+                size_t expected = g_preads * 4096;
+                if (delta < expected / 10) {
+                    printf("  => reads are PAGE-CACHE HITS after warmup; latency is syscall/page-cache overhead, NOT storage distance\n");
+                }
+            }
+        }
     } else if (mode == PARTIAL) {
         mname = "partial";
         printf("[cheat:partial] %.0f%% resident, rest on disk (correct, bimodal)\n", frac * 100.0);
+
+        size_t io0 = io_read_bytes();
+        g_preads = 0;
         challenge_loop(cfd, [ram, resident_words, fd](uint64_t idx){
             if (idx < resident_words) return ram[idx];
             return disk_word(fd, idx);
         }, num_words, mname);
+        size_t io1 = io_read_bytes();
+
+        if (io0 == (size_t)-1 || io1 == (size_t)-1) {
+            printf("[cheat:partial] instrumentation: preads=%llu  read_bytes_delta=unavailable (bytes fetched from block layer)\n",
+                   (unsigned long long)g_preads);
+        } else {
+            size_t delta = io1 - io0;
+            printf("[cheat:partial] instrumentation: preads=%llu  read_bytes_delta=%zu (bytes fetched from block layer)\n",
+                   (unsigned long long)g_preads, delta);
+            if (g_preads > 0) {
+                size_t expected = g_preads * 4096;
+                if (delta < expected / 10) {
+                    printf("  => reads are PAGE-CACHE HITS after warmup; latency is syscall/page-cache overhead, NOT storage distance\n");
+                }
+            }
+        }
     } else { // FAKE
         mname = "fake";
         printf("[cheat:fake] %.0f%% resident, misses fabricated (fast, WRONG)\n", frac * 100.0);
@@ -172,17 +251,18 @@ int main(int argc, char** argv) {
         if      (!strcmp(argv[i], "--port")  && i + 1 < argc) port = (uint16_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--mode")  && i + 1 < argc) {
             const char* m = argv[++i];
-            if      (!strcmp(m, "honest"))  mode = HONEST;
-            else if (!strcmp(m, "disk"))    mode = DISK;
-            else if (!strcmp(m, "partial")) mode = PARTIAL;
-            else if (!strcmp(m, "fake"))    mode = FAKE;
+            if      (!strcmp(m, "honest"))   mode = HONEST;
+            else if (!strcmp(m, "disk"))     mode = DISK;
+            else if (!strcmp(m, "partial"))  mode = PARTIAL;
+            else if (!strcmp(m, "fake"))     mode = FAKE;
+            else if (!strcmp(m, "mmapdisk")) mode = MMAP_DISK;
         }
         else if (!strcmp(argv[i], "--frac") && i + 1 < argc) frac = atof(argv[++i]);
         else if (!strcmp(argv[i], "--datafile") && i + 1 < argc) datafile = argv[++i];
     }
 
     int lfd = make_listener(port);
-    const char* names[] = { "honest", "disk", "partial", "fake" };
+    const char* names[] = { "honest", "disk", "partial", "fake", "mmapdisk" };
     printf("[cheat] listening on 0.0.0.0:%u  mode=%s frac=%.2f\n", port, names[mode], frac);
     for (;;) {
         sockaddr_in ca{}; socklen_t cl = sizeof(ca);

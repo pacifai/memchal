@@ -28,20 +28,22 @@ import mc_stats as m
 # "floor" uses the honest server but k=0 (transport-floor measurement).
 # All cheating modes use cheating_prover with their own port.
 MODE_MAP = {
-    "floor":   {"server": "prover",          "k_override": 0,    "cheat_mode": None},
-    "honest":  {"server": "prover",          "k_override": None, "cheat_mode": None},
-    "disk":    {"server": "cheating_prover", "k_override": None, "cheat_mode": "disk"},
-    "partial": {"server": "cheating_prover", "k_override": None, "cheat_mode": "partial"},
-    "fake":    {"server": "cheating_prover", "k_override": None, "cheat_mode": "fake"},
+    "floor":    {"server": "prover",          "k_override": 0,    "cheat_mode": None},
+    "honest":   {"server": "prover",          "k_override": None, "cheat_mode": None},
+    "disk":     {"server": "cheating_prover", "k_override": None, "cheat_mode": "disk"},
+    "partial":  {"server": "cheating_prover", "k_override": None, "cheat_mode": "partial"},
+    "fake":     {"server": "cheating_prover", "k_override": None, "cheat_mode": "fake"},
+    "mmapdisk": {"server": "cheating_prover", "k_override": None, "cheat_mode": "mmapdisk"},
 }
 
 # Port offsets per mode from the base --port
 PORT_OFFSET = {
-    "floor":   0,   # shares honest prover
-    "honest":  0,   # same prover instance
-    "disk":    1,
-    "partial": 2,
-    "fake":    3,
+    "floor":    0,   # shares honest prover
+    "honest":   0,   # same prover instance
+    "disk":     1,
+    "partial":  2,
+    "fake":     3,
+    "mmapdisk": 4,
 }
 
 PCTLS = ["min", "p50", "p90", "p99", "p99.9", "max"]
