@@ -9,3 +9,6 @@
 /tmp/
 # generated results (CSVs/plots) — regenerate with ./run.sh; summaries live in docs
 /results/
+# python bytecode
+__pycache__/
+*.pyc
