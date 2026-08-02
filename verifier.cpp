@@ -36,6 +36,18 @@ static double pctile(const std::vector<double>& sorted, double p) {
     return sorted[i]; // nearest-rank (good enough for a profile)
 }
 
+// How many samples lie in the tail at or beyond percentile p, i.e. how many
+// observations actually support the estimate. p99.9 from n=300 has ~0 tail
+// samples, so it is essentially one draw and must not be reported as a number.
+static size_t tail_count(double p, size_t n) {
+    double t = (1.0 - p / 100.0) * (double)n;
+    return t < 0 ? 0 : (size_t)(t + 0.5);
+}
+// A percentile is trustworthy only if at least this many samples fall in its
+// tail. Below it, we print the value but flag it UNRELIABLE (and mark it so in
+// JSON) rather than letting a single sample masquerade as a percentile.
+static constexpr size_t kMinTail = 10;
+
 struct Args {
     const char* host = "127.0.0.1";
     uint16_t port = kDefaultPort;
@@ -46,6 +58,8 @@ struct Args {
     uint32_t warmup = 200;     // unmeasured warmup challenges
     int sweep = 1;             // run a K sweep at the end
     const char* csv = "latency.csv";
+    const char* json = nullptr;  // machine-readable summary (scripts consume this)
+    const char* label = "";      // free-form environment/run label, copied into JSON
     uint64_t seed = 0xABCDEF0123456789ULL;
 };
 
@@ -62,6 +76,8 @@ static Args parse(int argc, char** argv) {
         else if (!strcmp(k, "--warmup")) a.warmup = (uint32_t)strtoul(v, nullptr, 10);
         else if (!strcmp(k, "--sweep"))  a.sweep = atoi(v);
         else if (!strcmp(k, "--csv"))    a.csv = v;
+        else if (!strcmp(k, "--json"))   a.json = v;
+        else if (!strcmp(k, "--label"))  a.label = v;
         else if (!strcmp(k, "--seed"))   a.seed = strtoull(v, nullptr, 0);
     }
     return a;
@@ -139,15 +155,24 @@ int main(int argc, char** argv) {
     double var  = lat.empty() ? 0 : sq / lat.size() - mean * mean;
     double sd   = var > 0 ? std::sqrt(var) : 0;
 
+    // Percentiles to report. Each carries the number of samples in its tail so
+    // the reader can see how much evidence stands behind it.
+    struct Pctl { const char* name; double p; };
+    const Pctl pctls[] = { {"min",0}, {"p50",50}, {"p90",90}, {"p99",99},
+                           {"p99.9",99.9}, {"max",100} };
+    size_t n = lat.size();
+
     printf("\n=== latency profile (%zu samples, %llu errors) ===\n",
-           lat.size(), (unsigned long long)errors);
-    printf("  min    %10.2f us\n", pctile(s, 0)   / 1000.0);
-    printf("  p50    %10.2f us\n", pctile(s, 50)  / 1000.0);
-    printf("  p90    %10.2f us\n", pctile(s, 90)  / 1000.0);
-    printf("  p99    %10.2f us\n", pctile(s, 99)  / 1000.0);
-    printf("  p99.9  %10.2f us\n", pctile(s, 99.9)/ 1000.0);
-    printf("  max    %10.2f us\n", pctile(s, 100) / 1000.0);
-    printf("  mean   %10.2f us   stddev %8.2f us\n", mean / 1000.0, sd / 1000.0);
+           n, (unsigned long long)errors);
+    for (const Pctl& q : pctls) {
+        size_t tail = tail_count(q.p, n);
+        // For min/max "tail" is degenerate; only flag the high inner percentiles.
+        bool inner = (q.p > 0 && q.p < 100);
+        bool weak  = inner && tail < kMinTail;
+        printf("  %-6s %10.2f us   [tail n=%zu]%s\n", q.name, pctile(s, q.p) / 1000.0,
+               tail, weak ? "  UNRELIABLE: n too small for this percentile" : "");
+    }
+    printf("  %-6s %10.2f us   stddev %8.2f us\n", "mean", mean / 1000.0, sd / 1000.0);
     if (mean > 0)
         printf("  throughput: %.2f probes/us (%u probes/challenge)\n", a.k / (mean / 1000.0), a.k);
 
@@ -157,6 +182,49 @@ int main(int argc, char** argv) {
         for (size_t i = 0; i < lat.size(); ++i) fprintf(f, "%zu,%.4f\n", i, lat[i] / 1000.0);
         fclose(f);
         printf("[verifier] wrote %s\n", a.csv);
+    }
+
+    // Machine-readable summary. Scripts consume THIS, never the printf text, so a
+    // formatting change can't silently turn a result into an empty string.
+    if (a.json) {
+        if (FILE* f = fopen(a.json, "w")) {
+            long page = sysconf(_SC_PAGESIZE);
+            long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+            fprintf(f, "{\n");
+            fprintf(f, "  \"schema\": \"memchal.verifier.v1\",\n");
+            fprintf(f, "  \"label\": \"%s\",\n", a.label);
+            fprintf(f, "  \"env\": {\"page_size\": %ld, \"online_cpus\": %ld, \"clock\": \"steady_clock\"},\n",
+                    page, ncpu);
+            fprintf(f, "  \"params\": {\"mb\": %.6g, \"k\": %u, \"lanes\": %u, \"n\": %u, "
+                       "\"warmup\": %u, \"seed\": \"0x%llx\", \"host\": \"%s\", \"port\": %u},\n",
+                    a.mb, a.k, a.lanes, a.n, a.warmup, (unsigned long long)a.seed, a.host, a.port);
+            fprintf(f, "  \"prover\": {\"locked\": %s},\n", ready.locked ? "true" : "false");
+            fprintf(f, "  \"upload\": {\"bytes\": %zu, \"seconds\": %.6f, \"gib_per_s\": %.4f},\n",
+                    bytes, up_s, up_s > 0 ? bytes / 1073741824.0 / up_s : 0.0);
+            fprintf(f, "  \"result\": {\n");
+            fprintf(f, "    \"samples\": %zu,\n    \"errors\": %llu,\n",
+                    n, (unsigned long long)errors);
+            fprintf(f, "    \"mean_us\": %.4f,\n    \"stddev_us\": %.4f,\n",
+                    mean / 1000.0, sd / 1000.0);
+            fprintf(f, "    \"throughput_probes_per_us\": %.4f,\n",
+                    mean > 0 ? a.k / (mean / 1000.0) : 0.0);
+            fprintf(f, "    \"percentiles_us\": {");
+            bool first = true;
+            for (const Pctl& q : pctls) {
+                size_t tail = tail_count(q.p, n);
+                bool inner = (q.p > 0 && q.p < 100);
+                bool reliable = !inner || tail >= kMinTail;
+                fprintf(f, "%s\n      \"%s\": {\"value\": %.4f, \"tail_n\": %zu, \"reliable\": %s}",
+                        first ? "" : ",", q.name, pctile(s, q.p) / 1000.0, tail,
+                        reliable ? "true" : "false");
+                first = false;
+            }
+            fprintf(f, "\n    }\n  }\n}\n");
+            fclose(f);
+            printf("[verifier] wrote %s\n", a.json);
+        } else {
+            fprintf(stderr, "[verifier] WARNING: could not write JSON to %s\n", a.json);
+        }
     }
 
     // Optional sweep: median latency vs samples-per-challenge. Shows the

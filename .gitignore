@@ -1,8 +1,7 @@
-# compiled binaries
+# compiled binaries (repo root)
 /prover
 /verifier
 /cheating_prover
-mc_*
 # scratch experiment artifacts
 /scratch/
 *.o
