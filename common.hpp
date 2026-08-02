@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
+#include <cstdio>
 #include <cerrno>
 #include <unistd.h>
 #include <sys/socket.h>
@@ -160,6 +161,21 @@ static inline bool write_all(int fd, const void* p, size_t n) {
 static inline void fill_random(uint64_t* buf, uint64_t num_words, uint64_t seed) {
     uint64_t s = seed ? seed : 0xDEADBEEFCAFEF00DULL;
     for (uint64_t i = 0; i < num_words; ++i) buf[i] = splitmix64(s);
+}
+
+// Bytes this process currently has locked (wired), as reported by the OS, so we
+// can VERIFY mlock took effect instead of trusting its return value. Returns
+// (size_t)-1 if it cannot be determined (e.g. no /proc, as on macOS). On Linux
+// it reads VmLck from /proc/self/status.
+static inline size_t locked_bytes() {
+    FILE* f = fopen("/proc/self/status", "r");
+    if (!f) return (size_t)-1;
+    char line[256]; unsigned long kb = 0; bool found = false;
+    while (fgets(line, sizeof line, f)) {
+        if (sscanf(line, "VmLck: %lu kB", &kb) == 1) { found = true; break; }
+    }
+    fclose(f);
+    return found ? (size_t)kb * 1024 : (size_t)-1;
 }
 
 } // namespace mc

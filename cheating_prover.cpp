@@ -35,7 +35,16 @@ static void* alloc_pinned(size_t bytes, int* locked) {
     if (p == MAP_FAILED) { perror("mmap"); return nullptr; }
     volatile char* vp = (volatile char*)p;
     for (size_t off = 0; off < bytes; off += (size_t)g_page) vp[off] = 0;
-    if (mlock(p, bytes) == 0) *locked = 1;
+    int mlock_rc = mlock(p, bytes);
+    // VERIFY the lock rather than trusting mlock's return value.
+    size_t lb = locked_bytes();
+    bool verified;
+    if (lb != (size_t)-1) {
+        verified = (lb >= bytes);
+    } else {
+        verified = (mlock_rc == 0);
+    }
+    *locked = verified ? 1 : 0;
     return p;
 }
 

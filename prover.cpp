@@ -20,6 +20,7 @@
 using namespace mc;
 
 static long g_page = 4096;
+static bool g_allow_unlocked = false;
 
 // Allocate `bytes`, prefault, and try to lock it resident. Sets *locked.
 static void* alloc_pinned(size_t bytes, int* locked) {
@@ -36,13 +37,31 @@ static void* alloc_pinned(size_t bytes, int* locked) {
     volatile char* vp = (volatile char*)p;
     for (size_t off = 0; off < bytes; off += (size_t)g_page) vp[off] = 0;
 
-    if (mlock(p, bytes) == 0) {
-        *locked = 1;
-    } else {
-        fprintf(stderr, "[prover] mlock failed (%s); continuing UNLOCKED. "
-                        "Raise `ulimit -l` or grant CAP_IPC_LOCK for anti-swap.\n",
-                strerror(errno));
+    int mlock_rc = mlock(p, bytes);
+    if (mlock_rc != 0) {
+        fprintf(stderr, "[prover] mlock failed (%s)\n", strerror(errno));
     }
+
+    // VERIFY the lock rather than trusting mlock's return value.
+    size_t lb = locked_bytes();
+    bool verified;
+    if (lb != (size_t)-1) {
+        // Linux: /proc/self/status VmLck is authoritative.
+        verified = (lb >= bytes);
+        if (verified) {
+            printf("[prover] memory LOCKED and VERIFIED (VmLck=%.1f MiB >= required %.1f MiB)\n",
+                   (double)lb / 1048576.0, (double)bytes / 1048576.0);
+        } else {
+            printf("[prover] mlock did NOT take effect (VmLck=%.1f MiB < required %.1f MiB)\n",
+                   (double)lb / 1048576.0, (double)bytes / 1048576.0);
+        }
+    } else {
+        // macOS / no /proc: fall back to trusting the mlock return value.
+        verified = (mlock_rc == 0);
+        printf("[prover] mlock rc ok but lock UNVERIFIED (no /proc; trusting return value)\n");
+    }
+    *locked = verified ? 1 : 0;
+
     mlockall(MCL_CURRENT | MCL_FUTURE); // best effort, also pins stacks/future maps
     return p;
 }
@@ -78,7 +97,35 @@ static void serve(int cfd) {
     uint64_t* buf = (uint64_t*)raw;
 
     if (!recv_all(cfd, buf, bytes)) { fprintf(stderr, "[prover] short data\n"); munmap(raw, bytes); return; }
-    printf("[prover] buffer resident; memory %s.\n", locked ? "LOCKED (mlock ok)" : "NOT locked");
+    printf("[prover] buffer resident; memory %s.\n", locked ? "LOCKED (verified)" : "NOT locked");
+
+    if (!locked) {
+        if (!g_allow_unlocked) {
+            fprintf(stderr,
+                "\n"
+                "########## FATAL: MEMORY NOT LOCKED IN RAM ##########\n"
+                "[prover] mlock verification failed — the buffer is NOT pinned in RAM.\n"
+                "[prover] Running unlocked would make the honest baseline meaningless:\n"
+                "[prover]   pages can be swapped out, undermining the anti-swap guarantee.\n"
+                "[prover] To fix: grant CAP_IPC_LOCK, raise `ulimit -l unlimited`, or\n"
+                "[prover]   use run.sh which sets up the required privileges.\n"
+                "[prover] To override (records locked=false in output): pass --allow-unlocked\n"
+                "######################################################\n"
+                "\n");
+            exit(1);
+        } else {
+            const char* banner =
+                "\n"
+                "########## WARNING: RUNNING UNLOCKED — honest baseline is NOT pinned in RAM ##########\n"
+                "[prover] --allow-unlocked flag set: continuing despite failed lock verification.\n"
+                "[prover] locked=false will be reported to the verifier.\n"
+                "[prover] Results do NOT reflect a genuine anti-swap memory residency guarantee.\n"
+                "####################################################################################\n"
+                "\n";
+            fprintf(stdout, "%s", banner);
+            fprintf(stderr, "%s", banner);
+        }
+    }
 
     Ready ready{ kMagic, (uint32_t)locked, 0 };
     if (!send_all(cfd, &ready, sizeof(ready))) { munmap(raw, bytes); return; }
@@ -102,7 +149,14 @@ int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IOLBF, 0); // line-buffered logs
     long ps = sysconf(_SC_PAGESIZE); if (ps > 0) g_page = ps;
     uint16_t port = kDefaultPort;
-    if (argc > 1) port = (uint16_t)atoi(argv[1]);
+    for (int i = 1; i < argc; ++i) {
+        if (!strcmp(argv[i], "--allow-unlocked")) {
+            g_allow_unlocked = true;
+        } else {
+            int p = atoi(argv[i]);
+            if (p > 0) port = (uint16_t)p;
+        }
+    }
 
     int lfd = make_listener(port);
     printf("[prover] listening on 0.0.0.0:%u (page=%ld)\n", port, g_page);
