@@ -24,7 +24,7 @@ cd /work
 
 echo "=== BUILD ==="
 make
-g++ -O3 -std=c++17 -I/work -o tests/kat tests/kat.cpp
+g++ -O3 -std=c++17 -I/work/src -o tests/kat tests/kat.cpp
 echo "Build complete."
 
 # ---------------------------------------------------------------------------

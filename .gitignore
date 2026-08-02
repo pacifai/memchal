@@ -2,6 +2,8 @@
 /prover
 /verifier
 /cheating_prover
+# compiled test binary
+/tests/kat
 # scratch experiment artifacts
 /scratch/
 *.o

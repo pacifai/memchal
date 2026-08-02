@@ -5,16 +5,16 @@ CXXFLAGS ?= -O3 -std=c++17 -Wall -Wextra -pthread
 
 all: prover verifier cheating_prover
 
-prover: prover.cpp common.hpp
-	$(CXX) $(CXXFLAGS) -o $@ prover.cpp
+prover: src/prover.cpp src/common.hpp
+	$(CXX) $(CXXFLAGS) -o $@ src/prover.cpp
 
-verifier: verifier.cpp common.hpp
-	$(CXX) $(CXXFLAGS) -o $@ verifier.cpp
+verifier: src/verifier.cpp src/common.hpp
+	$(CXX) $(CXXFLAGS) -o $@ src/verifier.cpp
 
-cheating_prover: cheating_prover.cpp common.hpp
-	$(CXX) $(CXXFLAGS) -o $@ cheating_prover.cpp
+cheating_prover: src/cheating_prover.cpp src/common.hpp
+	$(CXX) $(CXXFLAGS) -o $@ src/cheating_prover.cpp
 
 clean:
-	rm -f prover verifier cheating_prover
+	rm -f prover verifier cheating_prover tests/kat
 
 .PHONY: all clean
