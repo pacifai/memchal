@@ -10,8 +10,11 @@
 //   fake     keep a fraction --frac in RAM; for misses, fabricate a value ->
 //            fast but WRONG -> verification errors. A pure correctness detector.
 //   mmapdisk data on disk (page-cache DONTNEED'd), read via a mmap'd view — NO
-//            per-probe pread syscall. Answers at ~honest speed for buffers that
-//            fit in RAM; behaviour above RAM size is unmeasured.
+//            per-probe pread syscall. Answers at ~honest speed *when it has the
+//            RAM to cache the file* (the page cache is then holding the data, so
+//            it really is resident); with a memory budget smaller than the buffer
+//            it claims, probes fault through to storage and it is ~1000x honest.
+//            See scripts/experiments/mmap_needs_ram.sh.
 //
 // All modes reuse answer_challenge_t() from common.hpp, so a correct answer is
 // byte-identical to the verifier's local recomputation — only latency (disk/
@@ -32,6 +35,10 @@ static long g_page = 4096;
 
 // Count of pread() calls made in disk_word(); instrumentation only.
 static uint64_t g_preads = 0;
+
+// Total probes requested across all challenges served (sum of ch.k). Accumulated
+// once per challenge, never in the probe loop, so it costs nothing measurable.
+static uint64_t g_probes_total = 0;
 
 static void* alloc_pinned(size_t bytes, int* locked) {
     *locked = 0;
@@ -73,6 +80,37 @@ static inline uint64_t disk_word(int fd, uint64_t idx) {
     return w;
 }
 
+// Print the per-run I/O instrumentation for a disk-backed mode: bytes actually
+// fetched from the block layer and major faults taken (probes that could not be
+// served from the page cache). The line is stable and greppable — the experiment
+// scripts parse it. `probes` is the number of probes that went to the file.
+static void report_io(const char* name, uint64_t probes,
+                      size_t io0, size_t io1, size_t mf0, size_t mf1) {
+    bool have_io = (io0 != (size_t)-1 && io1 != (size_t)-1);
+    bool have_mf = (mf0 != (size_t)-1 && mf1 != (size_t)-1);
+    size_t io_delta = have_io ? io1 - io0 : 0;
+    size_t mf_delta = have_mf ? mf1 - mf0 : 0;
+
+    printf("[cheat:%s] io: probes=%llu read_bytes_delta=", name, (unsigned long long)probes);
+    if (have_io) printf("%zu", io_delta); else printf("unavailable");
+    printf(" majflt_delta=");
+    if (have_mf) printf("%zu\n", mf_delta); else printf("unavailable\n");
+
+    if (!have_io || probes == 0) return;
+    // One uncached probe costs at least one 4 KiB page from storage. Far less
+    // than that means the probes were served from RAM.
+    size_t uncached_floor = probes * 4096;
+    if (io_delta < uncached_floor / 10) {
+        printf("[cheat:%s] io: => probes were served from the PAGE CACHE (%.1f%% of the "
+               "uncached floor); any latency here is syscall/page-cache overhead, "
+               "NOT storage distance\n", name, 100.0 * (double)io_delta / (double)uncached_floor);
+    } else {
+        printf("[cheat:%s] io: => probes genuinely went to STORAGE (%.1f%% of the "
+               "uncached floor); the page cache could not hold this file\n",
+               name, 100.0 * (double)io_delta / (double)uncached_floor);
+    }
+}
+
 // Run the challenge loop with a given word loader (no std::function, so the
 // loader is inlined and doesn't distort the timing we're trying to expose).
 template <typename Load>
@@ -82,6 +120,7 @@ static void challenge_loop(int cfd, Load&& load, uint64_t num_words, const char*
         Challenge ch{};
         if (!recv_all(cfd, &ch, sizeof(ch))) break;
         if (ch.flags & kFlagTerminate) break;
+        g_probes_total += ch.k;
         Response r{ answer_challenge_t(load, num_words, ch.nonce, ch.k, ch.lanes) };
         if (!send_all(cfd, &r, sizeof(r))) break;
         ++served;
@@ -99,18 +138,14 @@ static void serve(int cfd, Mode mode, double frac, const char* datafile) {
     size_t bytes = ((size_t)hello.buffer_bytes + 7) & ~size_t(7);
     uint64_t num_words = bytes / 8;
 
-    // Always receive the data over the socket first.
-    uint64_t* recvbuf = (uint64_t*)malloc(bytes);
-    if (!recvbuf) { fprintf(stderr, "[cheat] malloc failed\n"); return; }
-    if (!recv_all(cfd, recvbuf, bytes)) { fprintf(stderr, "[cheat] short data\n"); free(recvbuf); return; }
-
     int locked = 0;
     const char* mname = "honest";
 
     if (mode == HONEST) {
         int lk = 0; uint64_t* buf = (uint64_t*)alloc_pinned(bytes, &lk);
-        if (!buf) { free(recvbuf); return; }
-        memcpy(buf, recvbuf, bytes); free(recvbuf); locked = lk;
+        if (!buf) return;
+        if (!recv_all(cfd, buf, bytes)) { fprintf(stderr, "[cheat] short data\n"); munmap(buf, bytes); return; }
+        locked = lk;
         printf("[cheat:honest] resident+%s\n", lk ? "LOCKED" : "unlocked");
         Ready rd{ kMagic, (uint32_t)locked, 0 }; send_all(cfd, &rd, sizeof(rd));
         challenge_loop(cfd, [buf](uint64_t idx){ return buf[idx]; }, num_words, "honest");
@@ -118,13 +153,13 @@ static void serve(int cfd, Mode mode, double frac, const char* datafile) {
         return;
     }
 
-    // Disk-backed modes: spill the buffer to a file.
+    // Disk-backed modes: stream the buffer straight from the socket to a file in
+    // chunks, so this process NEVER holds a full-size anonymous copy. That is
+    // what a real adversary would do, and it is what lets the cheater run in a
+    // memory budget smaller than the buffer it claims to hold (the regime where
+    // the mmap trick can no longer hide behind the page cache).
     int fd = open(datafile, O_RDWR | O_CREAT | O_TRUNC, 0600);
-    if (fd < 0) { perror("open datafile"); free(recvbuf); return; }
-    if (!write_all(fd, recvbuf, bytes)) { fprintf(stderr, "[cheat] file write failed\n"); }
-    fsync(fd);
-    posix_fadvise(fd, 0, bytes, POSIX_FADV_RANDOM);   // no readahead
-    posix_fadvise(fd, 0, bytes, POSIX_FADV_DONTNEED); // try to evict page cache
+    if (fd < 0) { perror("open datafile"); return; }
 
     uint64_t resident_words = 0;
     uint64_t* ram = nullptr;
@@ -134,10 +169,47 @@ static void serve(int cfd, Mode mode, double frac, const char* datafile) {
         resident_words = (uint64_t)(frac * (double)num_words);
         if (resident_words) {
             int lk = 0; ram = (uint64_t*)alloc_pinned(resident_words * 8, &lk);
-            if (ram) { memcpy(ram, recvbuf, resident_words * 8); locked = lk; }
+            if (ram) locked = lk; else resident_words = 0;
         }
     }
-    free(recvbuf); // the honest copy is gone — that's the whole point
+
+    {
+        static const size_t kChunk = 1u << 20; // 1 MiB
+        char* chunk = (char*)malloc(kChunk);
+        if (!chunk) { fprintf(stderr, "[cheat] chunk alloc failed\n"); close(fd); return; }
+        size_t off = 0, unflushed = 0;
+        bool ok = true;
+        while (off < bytes) {
+            size_t want = bytes - off < kChunk ? bytes - off : kChunk;
+            if (!recv_all(cfd, chunk, want)) { ok = false; break; }
+            if (!write_all(fd, chunk, want)) { ok = false; break; }
+            // PARTIAL/FAKE keep a resident prefix: copy that part as it streams by.
+            size_t prefix = resident_words * 8;
+            if (ram && off < prefix) {
+                size_t n = prefix - off < want ? prefix - off : want;
+                memcpy((char*)ram + off, chunk, n);
+            }
+            off += want;
+            // Flush and drop what we've written every 8 MiB. Without this the
+            // dirty page cache grows faster than writeback drains it, which
+            // OOM-kills the process whenever its memory budget is smaller than
+            // the buffer — the exact regime this mode exists to measure.
+            unflushed += want;
+            if (unflushed >= (8u << 20) || off == bytes) {
+                size_t from = off - unflushed;
+                sync_file_range(fd, (off_t)from, (off_t)unflushed,
+                                SYNC_FILE_RANGE_WAIT_BEFORE | SYNC_FILE_RANGE_WRITE |
+                                SYNC_FILE_RANGE_WAIT_AFTER);
+                posix_fadvise(fd, (off_t)from, (off_t)unflushed, POSIX_FADV_DONTNEED);
+                unflushed = 0;
+            }
+        }
+        free(chunk);
+        if (!ok) { fprintf(stderr, "[cheat] short data / file write failed\n"); close(fd); return; }
+    }
+    fsync(fd);
+    posix_fadvise(fd, 0, bytes, POSIX_FADV_RANDOM);   // no readahead
+    posix_fadvise(fd, 0, bytes, POSIX_FADV_DONTNEED); // try to evict page cache
 
     Ready rd{ kMagic, (uint32_t)locked, 0 };
     send_all(cfd, &rd, sizeof(rd));
@@ -146,33 +218,19 @@ static void serve(int cfd, Mode mode, double frac, const char* datafile) {
         // ADVERSARY: data on disk (page-cache DONTNEED'd), but read via a
         // memory-mapped view -> NO per-probe syscall. Falsification test: if
         // this answers at ~honest speed, the "disk" timing signal was syscall
-        // overhead, not storage distance. (For buffers that fit in RAM;
-        // behaviour above RAM size is unmeasured.)
+        // overhead, not storage distance. It does — but only while the page cache
+        // can hold the file, which is itself residency. The report_io() line below
+        // says which regime the run was actually in, so the latency is never read
+        // without the evidence next to it.
         mname = "mmapdisk";
         uint64_t* map = (uint64_t*)mmap(nullptr, bytes, PROT_READ, MAP_PRIVATE, fd, 0);
         if (map == MAP_FAILED) { perror("mmap file"); close(fd); return; }
         madvise(map, bytes, MADV_RANDOM); // no readahead; fault on demand
         printf("[cheat:mmapdisk] 0%% pinned; probes read a mmap'd file view (no pread syscall)\n");
 
-        size_t io0 = io_read_bytes();
-        g_preads = 0;
+        size_t io0 = io_read_bytes(), mf0 = major_faults();
         challenge_loop(cfd, [map](uint64_t idx){ return map[idx]; }, num_words, mname);
-        size_t io1 = io_read_bytes();
-
-        if (io0 == (size_t)-1 || io1 == (size_t)-1) {
-            printf("[cheat:mmapdisk] instrumentation: preads=%llu  read_bytes_delta=unavailable (bytes fetched from block layer)\n",
-                   (unsigned long long)g_preads);
-        } else {
-            size_t delta = io1 - io0;
-            printf("[cheat:mmapdisk] instrumentation: preads=%llu  read_bytes_delta=%zu (bytes fetched from block layer)\n",
-                   (unsigned long long)g_preads, delta);
-            if (g_preads > 0) {
-                size_t expected = g_preads * 4096;
-                if (delta < expected / 10) {
-                    printf("  => reads are PAGE-CACHE HITS after warmup; latency is syscall/page-cache overhead, NOT storage distance\n");
-                }
-            }
-        }
+        report_io(mname, g_probes_total, io0, io_read_bytes(), mf0, major_faults());
 
         munmap(map, bytes); close(fd); unlink(datafile);
         return;
@@ -180,53 +238,21 @@ static void serve(int cfd, Mode mode, double frac, const char* datafile) {
         mname = "disk";
         printf("[cheat:disk] 0%% resident; every probe hits disk\n");
 
-        size_t io0 = io_read_bytes();
-        g_preads = 0;
+        size_t io0 = io_read_bytes(), mf0 = major_faults();
         challenge_loop(cfd, [fd](uint64_t idx){
             return disk_word(fd, idx);
         }, num_words, mname);
-        size_t io1 = io_read_bytes();
-
-        if (io0 == (size_t)-1 || io1 == (size_t)-1) {
-            printf("[cheat:disk] instrumentation: preads=%llu  read_bytes_delta=unavailable (bytes fetched from block layer)\n",
-                   (unsigned long long)g_preads);
-        } else {
-            size_t delta = io1 - io0;
-            printf("[cheat:disk] instrumentation: preads=%llu  read_bytes_delta=%zu (bytes fetched from block layer)\n",
-                   (unsigned long long)g_preads, delta);
-            if (g_preads > 0) {
-                size_t expected = g_preads * 4096;
-                if (delta < expected / 10) {
-                    printf("  => reads are PAGE-CACHE HITS after warmup; latency is syscall/page-cache overhead, NOT storage distance\n");
-                }
-            }
-        }
+        report_io(mname, g_preads, io0, io_read_bytes(), mf0, major_faults());
     } else if (mode == PARTIAL) {
         mname = "partial";
         printf("[cheat:partial] %.0f%% resident, rest on disk (correct, bimodal)\n", frac * 100.0);
 
-        size_t io0 = io_read_bytes();
-        g_preads = 0;
+        size_t io0 = io_read_bytes(), mf0 = major_faults();
         challenge_loop(cfd, [ram, resident_words, fd](uint64_t idx){
             if (idx < resident_words) return ram[idx];
             return disk_word(fd, idx);
         }, num_words, mname);
-        size_t io1 = io_read_bytes();
-
-        if (io0 == (size_t)-1 || io1 == (size_t)-1) {
-            printf("[cheat:partial] instrumentation: preads=%llu  read_bytes_delta=unavailable (bytes fetched from block layer)\n",
-                   (unsigned long long)g_preads);
-        } else {
-            size_t delta = io1 - io0;
-            printf("[cheat:partial] instrumentation: preads=%llu  read_bytes_delta=%zu (bytes fetched from block layer)\n",
-                   (unsigned long long)g_preads, delta);
-            if (g_preads > 0) {
-                size_t expected = g_preads * 4096;
-                if (delta < expected / 10) {
-                    printf("  => reads are PAGE-CACHE HITS after warmup; latency is syscall/page-cache overhead, NOT storage distance\n");
-                }
-            }
-        }
+        report_io(mname, g_preads, io0, io_read_bytes(), mf0, major_faults());
     } else { // FAKE
         mname = "fake";
         printf("[cheat:fake] %.0f%% resident, misses fabricated (fast, WRONG)\n", frac * 100.0);

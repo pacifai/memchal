@@ -20,14 +20,24 @@ This repo was stabilized to make its numbers trustworthy. The honest summary:
   is caught with overwhelming probability (`1 − (1−m)^k`; for `m=0.001, k=4096`
   ≈ 0.98). Verified by test: `fake` fails **every** challenge; `honest`/`disk`/
   `mmapdisk` never do.
-- **Timing detection, as built, does NOT prove RAM-vs-storage.** The measured
-  "disk is ~15× slower" signal is **pread syscall overhead, not storage
+- **Timing does NOT measure storage distance; it measures residency.** The
+  measured "disk is ~15× slower" signal is **pread syscall overhead, not storage
   distance** — the identical probe loop over a tmpfs (pure RAM, zero block I/O)
-  costs ~94% as much as over the container disk. An **mmap adversary** (data on
-  disk, read through a memory-mapped view, no per-probe syscall) answers at
-  ~honest speed and passes correctness — **for a buffer that fits in RAM.
-  Behaviour above RAM size is unmeasured** and is where timing might still have
-  teeth. See [NEXT_STEPS.md](NEXT_STEPS.md).
+  costs ~94% as much as over the container disk (experiment 1). An **mmap
+  adversary** (data on disk, read through a memory-mapped view, no per-probe
+  syscall) answers at ~honest speed and passes correctness — but experiment 2
+  shows *why*: with RAM to spare the page cache holds the whole file, so that
+  adversary **is** resident, via the page cache instead of `mlock`. Give the same
+  adversary a memory budget **smaller than the buffer it claims to hold** and it
+  collapses to **~960× honest** with **~52% of its probes faulting through to
+  storage**. So the timing signal tracks *whether the data is in fast memory*,
+  not *what device it came from* — which is what the primitive actually cares
+  about.
+- **What is still unvalidated.** Experiment 2 constrains the page cache with a
+  cgroup memory budget, not with physical RAM on real storage, and Docker's disk
+  sits on top of the macOS host's own cache — so its storage costs are a **lower
+  bound**. A bare-metal >RAM run is still the settling experiment. See
+  [NEXT_STEPS.md](NEXT_STEPS.md).
 - **There is no decision rule yet.** This measures separations; it does not yet
   classify a prover with stated false-positive/false-negative rates.
 
@@ -38,7 +48,8 @@ src/            common.hpp (challenge math — single source of truth), prover.c
                 verifier.cpp, cheating_prover.cpp
 scripts/        mc_stats.py (stats + error propagation, single source),
                 run_trials.py (interleaved repeat-trials harness),
-                plot.py (self-describing chart), experiments/
+                plot.py (self-describing chart), fmt_table.py (aligned output),
+                experiments/ (disk_is_syscalls.sh, mmap_needs_ram.sh)
 tests/          kat.cpp (known-answer test), run_tests.sh (KAT + invariants)
 results/        generated CSVs/plots (gitignored)
 Dockerfile, run.sh, Makefile
@@ -58,8 +69,16 @@ lock privileges the honest baseline needs and mounts `results/` to the host.
   python3 scripts/run_trials.py --repeats 10 --n 3000 --k 4096 --mb 64 \
       --modes floor,honest,disk,partial,fake,mmapdisk --out results/trials.json && \
   python3 scripts/plot.py results/trials.json'
-./run.sh bash scripts/experiments/disk_is_syscalls.sh     # disk-is-syscalls proof
+# the two discriminator experiments, in demo order:
+./run.sh bash scripts/experiments/disk_is_syscalls.sh     # 1: the penalty is syscalls
+bash scripts/experiments/mmap_needs_ram.sh                # 2: the mmap cheat needs RAM
 ```
+
+Experiment 2 runs on the **host**, not via `run.sh`: it drives docker itself,
+putting the prover in a container whose memory budget is smaller than the buffer
+it claims to hold, and the verifier in a second container sharing the prover's
+network namespace (same loopback path as experiment 1, separate memory
+accounting). Knobs: `MB K LANES N WARMUP FIT_MEM STARVED_MEM CPUS`.
 
 Running natively on real Linux hardware is the same commands without the VM (see
 NEXT_STEPS — that is the environment that would settle the storage-physics and
@@ -117,14 +136,21 @@ compare within-session only):
 | honest (RAM, mlock-verified) | ~114 | 1× | 0 / n |
 | disk (pread per probe) | ~1850 | **~15× ± 0.2** | 0 / n |
 | fake (misses fabricated) | ~108 | **0.95× ± 0.01** | **n / n** |
-| mmapdisk (on disk, mmap'd) | ~122 | **~1.05× ± 0.02** | 0 / n |
+| mmapdisk (on disk, mmap'd), RAM to spare | ~122 | **~1.05× ± 0.02** | 0 / n |
+| mmapdisk, prover RAM budget < buffer | ~42600 | **~960×** | 0 / n |
 
 What the numbers say, checked against the six open questions:
 
-1. **Is the RAM-vs-disk gap real?** No — it's an artifact. The same pread loop
-   over tmpfs (RAM, `read_bytes=0`) costs ~94% of the container-disk latency; the
-   disk file is read from the block layer exactly **once** (one full sweep) then
-   served from page cache. The ~15× is **syscall/page-cache overhead**.
+1. **Is the RAM-vs-disk gap real?** Not as originally claimed — the *device* is
+   not what the gap measures. The same pread loop over tmpfs (RAM,
+   `read_bytes=0`) costs ~94% of the container-disk latency; the disk file is read
+   from the block layer exactly **once** (one full sweep) then served from page
+   cache. The ~15× is **syscall overhead**. What the timing *does* track is
+   residency: run the mmap adversary with a memory budget of half the buffer and
+   ~52% of its probes fault through to storage (verified by its own
+   `read_bytes`/`majflt` counters), costing **~960× honest** — and a pread prover
+   under the same budget lands within 1% of it, because real storage work swamps
+   the syscall difference that dominated experiment 1.
 2. **Why is `fake` faster than `honest`?** Genuinely, not noise. `fake --frac 0.5`
    fabricates half its probes (pure ALU, no memory traffic) over a smaller
    resident buffer; `fake --frac 0` (no memory at all) is faster still but only
@@ -143,23 +169,31 @@ What the numbers say, checked against the six open questions:
 6. **VM tail noise?** The dominant environmental effect is the ~1.6× P/E-core
    between-session swing above; within a session, per-run p50 is tight (sd ~1–3%).
 
-**The headline retraction.** The original README claimed disk/partial are "10–19×
-slower because probes hit storage instead of RAM," presenting timing as a
-RAM-vs-storage detector. Measurement shows that gap is **pread syscall overhead**,
-and it **vanishes under a one-line mmap adversary** (`mmapdisk` ≈ honest) for a
-fits-in-RAM buffer. The timing signal, as built, distinguishes *per-probe
-syscalls* from *in-process loads* — not memory residency. It is **not validated as
-a RAM-vs-storage detector**; whether it has any teeth requires a buffer larger
-than RAM on real storage (NEXT_STEPS).
+**The headline retraction, and what replaced it.** The original README claimed
+disk/partial are "10–19× slower because probes hit storage instead of RAM,"
+presenting timing as a RAM-vs-storage detector. That specific claim is wrong: the
+gap is **pread syscall overhead**, and it **vanishes under a one-line mmap
+adversary** for a buffer the page cache can hold. What replaced it is narrower and
+survives contact: **timing tracks residency, not device.** The mmap adversary is
+fast precisely because the page cache is holding its file — it is resident, just
+not via `mlock` — and when its memory budget cannot hold the buffer it claims, it
+is ~960× honest with ~52% of probes going to storage. Two limits remain: the
+budget is a **cgroup limit standing in for physical RAM**, and Docker's disk sits
+on the macOS host's cache, so the storage penalty measured here is a **lower
+bound**. A bare-metal >RAM run is still the settling experiment (NEXT_STEPS).
 
 ## What each detector actually catches
 
 - **Correctness (robust).** `fake` answers fast but wrong; the chained fold makes
   withholding any fraction catchable with probability `1 − (1−m)^k`. This is the
   one claim that survives adversarial contact.
-- **Timing (weak, as built).** Separates syscall-per-probe provers from
-  in-process-load provers. Defeated by an mmap adversary for fits-in-RAM buffers.
-  Depends heavily on transport floor and hardware; absolute numbers non-portable.
+- **Timing (a residency detector, not a storage detector).** It separates provers
+  whose probes are served from fast memory from provers whose probes are not,
+  regardless of syscall path: an mmap adversary with RAM to spare passes (it is
+  resident via the page cache), and the same adversary without the RAM fails by
+  ~3 orders of magnitude. It does **not** tell you what device the data lives on,
+  and it depends heavily on transport floor and hardware; absolute numbers are
+  non-portable. Not yet a classifier — no thresholds, no FP/FN rates.
 
 ## Path to GPU
 

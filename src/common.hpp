@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>
 #include <cerrno>
 #include <unistd.h>
 #include <sys/socket.h>
@@ -191,6 +192,36 @@ static inline size_t io_read_bytes() {
     }
     fclose(f);
     return found ? (size_t)b : (size_t)-1;
+}
+
+// Major page faults this process has taken (faults that had to go to storage),
+// from field 12 of /proc/self/stat. For the mmap adversary this is the direct
+// counter of "probes that could NOT be served from the page cache": with the
+// file cached it stays ~0; under memory pressure it grows with every probe.
+// Returns (size_t)-1 if unavailable.
+static inline size_t major_faults() {
+    FILE* f = fopen("/proc/self/stat", "r");
+    if (!f) return (size_t)-1;
+    char buf[1024];
+    size_t got = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    if (!got) return (size_t)-1;
+    buf[got] = '\0';
+    // comm (field 2) may contain spaces/parens; parse after the LAST ')'.
+    char* p = strrchr(buf, ')');
+    if (!p) return (size_t)-1;
+    ++p;
+    // Fields after comm: state(3) ppid(4) pgrp(5) session(6) tty(7) tpgid(8)
+    // flags(9) minflt(10) cminflt(11) majflt(12) -> the 10th token from here.
+    unsigned long long v = 0;
+    int field = 2; // we are positioned just after field 2
+    char* tok = strtok(p, " ");
+    while (tok) {
+        ++field;
+        if (field == 12) { v = strtoull(tok, nullptr, 10); return (size_t)v; }
+        tok = strtok(nullptr, " ");
+    }
+    return (size_t)-1;
 }
 
 } // namespace mc

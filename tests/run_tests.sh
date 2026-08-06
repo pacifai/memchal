@@ -141,6 +141,49 @@ run_invariant "fake" 9104 \
     ./cheating_prover --port 9104 --mode fake --frac 0.5 --datafile /tmp/memchal_test_fake.bin
 
 # ---------------------------------------------------------------------------
+# Step 4: report formatting — the experiment tables are read off a projector, so
+# a frame that doesn't close is a real defect. Every rendered line must be exactly
+# the same display width, including content with typographic characters.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== INVARIANT: report table alignment ==="
+if python3 - <<'PYEOF'
+import sys
+sys.path.insert(0, "/work/scripts")
+from fmt_table import table, block
+
+cases = [
+    table([("scenario", "l"), ("p50 (us)", "r")],
+          [["honest — mlock'd", "42.2"], ["mmapdisk ≈ honest", "1,451.0"]],
+          title="A TITLE LONGER THAN THE COLUMNS PUT TOGETHER",
+          notes=["a note — with an em dash"]),
+    table([("a", "l"), ("b", "r")], [["x", "1"]]),
+    block("VERDICT — SHORT TITLE", ["a line", "a much longer line — with a dash", ""]),
+]
+FRAME = set("═║╔╗╚╝╠╣╦╩╬╟╢┼─")
+bad = 0
+for i, rendered in enumerate(cases):
+    lines = [l for l in rendered.split("\n") if l[:1] in FRAME]
+    widths = {len(l) for l in lines}
+    if len(widths) != 1:
+        bad += 1
+        print(f"  case {i}: ragged frame, line widths {sorted(widths)}")
+    # Content must be folded to ASCII; only the frame itself may be non-ASCII,
+    # since ambiguous-width glyphs are what break alignment on other terminals.
+    stray = {c for l in lines for c in l if ord(c) > 127 and c not in FRAME}
+    if stray:
+        bad += 1
+        print(f"  case {i}: non-ASCII content survived folding: {sorted(stray)}")
+print("  all frames closed, content is ASCII" if not bad else f"  {bad} case(s) bad")
+sys.exit(1 if bad else 0)
+PYEOF
+then
+    pass "INVARIANT report alignment"
+else
+    fail "INVARIANT report alignment"
+fi
+
+# ---------------------------------------------------------------------------
 # Final summary
 # ---------------------------------------------------------------------------
 echo ""
