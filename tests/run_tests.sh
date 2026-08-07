@@ -141,7 +141,31 @@ run_invariant "fake" 9104 \
     ./cheating_prover --port 9104 --mode fake --frac 0.5 --datafile /tmp/memchal_test_fake.bin
 
 # ---------------------------------------------------------------------------
-# Step 4: report formatting — the experiment tables are read off a projector, so
+# Step 4: live demo instrumentation. The browser demo draws its page map from two
+# independent base64 bitstreams; a broken encoding would draw a convincing, wrong
+# picture rather than fail, so the invariants are tested here.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== INVARIANT: live stream (demo instrumentation) ==="
+STREAM_DIR=$(mktemp -d /tmp/memchal_stream_XXXXXX)
+./cheating_prover --port 9105 --mode mmapdisk --datafile /tmp/memchal_test_stream.bin \
+    --trace 10 >"$STREAM_DIR/prover.log" 2>&1 &
+STREAM_PID=$!
+sleep 1
+./verifier --port 9105 --mb 8 --k 512 --lanes 8 --n 30 --warmup 10 \
+    --csv /dev/null --stream "$STREAM_DIR/verifier.jsonl" --probe-map 10 >/dev/null 2>&1 || true
+sleep 0.4
+kill "$STREAM_PID" 2>/dev/null || true
+wait "$STREAM_PID" 2>/dev/null || true
+if python3 tests/check_stream.py "$STREAM_DIR/verifier.jsonl" "$STREAM_DIR/prover.log"; then
+    pass "INVARIANT live stream"
+else
+    fail "INVARIANT live stream"
+fi
+rm -rf "$STREAM_DIR"
+
+# ---------------------------------------------------------------------------
+# Step 5: report formatting — the experiment tables are read off a projector, so
 # a frame that doesn't close is a real defect. Every rendered line must be exactly
 # the same display width, including content with typographic characters.
 # ---------------------------------------------------------------------------

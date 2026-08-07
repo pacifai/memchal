@@ -50,6 +50,8 @@ scripts/        mc_stats.py (stats + error propagation, single source),
                 run_trials.py (interleaved repeat-trials harness),
                 plot.py (self-describing chart), fmt_table.py (aligned output),
                 experiments/ (disk_is_syscalls.sh, mmap_needs_ram.sh)
+demo/           bridge.py (local server driving real containers) + static/
+                (the live instrument page)
 tests/          kat.cpp (known-answer test), run_tests.sh (KAT + invariants)
 results/        generated CSVs/plots (gitignored)
 Dockerfile, run.sh, Makefile
@@ -79,6 +81,48 @@ putting the prover in a container whose memory budget is smaller than the buffer
 it claims to hold, and the verifier in a second container sharing the prover's
 network namespace (same loopback path as experiment 1, separate memory
 accounting). Knobs: `MB K LANES N WARMUP FIT_MEM STARVED_MEM CPUS`.
+
+## The live demo (browser)
+
+```bash
+python3 demo/bridge.py          # on the host; then open http://127.0.0.1:8777
+```
+
+Same two experiments, driven interactively. Pick a prover (honest, mmapdisk,
+disk, partial, fake), give it a RAM budget, and interrogate it. Nothing is
+simulated: each run starts a real prover container at that budget and a real
+verifier, and every number on the page comes off their stdout.
+
+What the page shows, and where each part comes from:
+
+- **Buffer page map** — one cell per 4 KiB page. Which pages were probed comes
+  from the verifier's own index sequence (`answer_challenge_t` with a recording
+  loader, so it is the same sequence the prover was asked for, not a
+  reconstruction); whether a page was resident comes from the prover calling
+  `mincore()` on its own mapping. Blue means the probe was served from memory,
+  orange means it faulted through to storage.
+- **Verdict** — a restatement of those counters, never an inference: the ratio
+  against the honest baseline you measured in the same session, plus residency,
+  storage share, and wrong answers.
+- **Latency per challenge** — log axis (40 µs and 60 ms have to share a screen);
+  the previous run stays on the chart so honest-vs-cheater is one picture.
+- **Where it breaks** — one mark per finished run, p50 against the RAM budget.
+  Walk the budget down and the curve finds the cliff.
+- **Challenge log** — nonce, response, latency, and whether it matched the
+  verifier's own recomputation. This is where `fake` gives itself away: fast,
+  and wrong on every single challenge.
+
+**The demo is not the measurement.** Live tracing makes both processes emit an
+event per challenge plus a periodic `mincore()` snapshot. All of it happens after
+the response has been sent, so it is outside the verifier's timed window, but it
+spaces challenges out. The numbers quoted in this README come from the terminal
+experiments, which never enable tracing (`--stream` / `--trace` are off by
+default and the experiment scripts do not pass them).
+
+A memory-starved prover is close to the edge by design: if you take the budget
+below roughly half the buffer, the prover can be OOM-killed before it finishes
+receiving the data. The bridge detects that, retries once, and then says so —
+raise the budget or shrink the buffer.
 
 Running natively on real Linux hardware is the same commands without the VM (see
 NEXT_STEPS — that is the environment that would settle the storage-physics and

@@ -60,6 +60,47 @@ struct Args {
     const char* json = nullptr;  // machine-readable summary (scripts consume this)
     const char* label = "";      // free-form environment/run label, copied into JSON
     uint64_t seed = 0xABCDEF0123456789ULL;
+    // Live streaming for the browser demo (demo/bridge.py). Off unless asked for:
+    // the experiment scripts must keep measuring an uninstrumented loop.
+    const char* stream = nullptr;   // "-" for stdout, else a path
+    uint32_t probe_map_every = 0;   // emit the probed-page bitmap every N challenges
+};
+
+// ---------------------------------------------------------------------------
+// Live event stream (browser demo only)
+// ---------------------------------------------------------------------------
+// Events are one JSON object per line, prefixed '@' so they can share stdout
+// with the human-readable output without either needing to know about the other.
+//
+// COST: every write happens AFTER the round trip has been timed and before the
+// next challenge is sent, so it is outside all measurement windows. It still
+// spaces the challenges out (a few us of gap), which is why the terminal
+// experiments — not this stream — produce the headline numbers.
+static const char kB64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static void b64_bits(FILE* f, const uint8_t* flags, size_t count) {
+    // Pack one bit per flag (LSB-first within each byte), then base64 it.
+    size_t nbytes = (count + 7) / 8;
+    std::vector<uint8_t> bits(nbytes, 0);
+    for (size_t i = 0; i < count; ++i)
+        if (flags[i]) bits[i >> 3] |= (uint8_t)(1u << (i & 7));
+    for (size_t i = 0; i < nbytes; i += 3) {
+        uint32_t v = (uint32_t)bits[i] << 16;
+        if (i + 1 < nbytes) v |= (uint32_t)bits[i + 1] << 8;
+        if (i + 2 < nbytes) v |= (uint32_t)bits[i + 2];
+        fputc(kB64[(v >> 18) & 63], f);
+        fputc(kB64[(v >> 12) & 63], f);
+        fputc(i + 1 < nbytes ? kB64[(v >> 6) & 63] : '=', f);
+        fputc(i + 2 < nbytes ? kB64[v & 63] : '=', f);
+    }
+}
+
+struct Stream {
+    FILE* f = nullptr;
+    uint32_t map_every = 0;
+    uint64_t page_words = 512;        // 4096-byte page / 8-byte word
+    std::vector<uint8_t> pages;       // scratch: probed-page flags for one challenge
+    bool wants_map(uint64_t idx) const { return f && map_every && (idx % map_every) == 0; }
 };
 
 static Args parse(int argc, char** argv) {
@@ -77,17 +118,39 @@ static Args parse(int argc, char** argv) {
         else if (!strcmp(k, "--json"))   a.json = v;
         else if (!strcmp(k, "--label"))  a.label = v;
         else if (!strcmp(k, "--seed"))   a.seed = strtoull(v, nullptr, 0);
+        else if (!strcmp(k, "--stream")) a.stream = v;
+        else if (!strcmp(k, "--probe-map")) a.probe_map_every = (uint32_t)strtoul(v, nullptr, 10);
     }
     return a;
 }
 
 // Run `count` challenges at fixed k, return latencies (ns) and #errors.
+// `st` (optional) streams one event per challenge for the browser demo; `seq` is
+// the running challenge counter across warmup+run so map sampling is stable.
 static void run_batch(int fd, const uint64_t* buf, uint64_t num_words,
                       uint32_t k, uint32_t lanes, uint32_t count,
-                      uint64_t nonce_base, std::vector<double>* out_ns, uint64_t* errors) {
+                      uint64_t nonce_base, std::vector<double>* out_ns, uint64_t* errors,
+                      Stream* st = nullptr, const char* phase = "r", uint64_t* seq = nullptr) {
     for (uint32_t i = 0; i < count; ++i) {
         Challenge ch{}; ch.nonce = nonce_base + i; ch.k = k; ch.lanes = lanes;
-        uint64_t expect = answer_challenge(buf, num_words, ch.nonce, ch.k, ch.lanes);
+        uint64_t idx = seq ? (*seq)++ : i;
+        bool map = st && st->wants_map(idx);
+
+        uint64_t expect;
+        if (map) {
+            // Same loader, plus a note of which page each probe landed on. The
+            // index sequence comes from answer_challenge_t itself, so the map is
+            // exactly what the prover was asked for — not a reconstruction.
+            std::fill(st->pages.begin(), st->pages.end(), (uint8_t)0);
+            uint8_t* pg = st->pages.data();
+            uint64_t pw = st->page_words;
+            expect = answer_challenge_t([buf, pg, pw](uint64_t j) {
+                pg[j / pw] = 1;
+                return buf[j];
+            }, num_words, ch.nonce, ch.k, ch.lanes);
+        } else {
+            expect = answer_challenge(buf, num_words, ch.nonce, ch.k, ch.lanes);
+        }
 
         auto t0 = Clock::now();
         if (!send_all(fd, &ch, sizeof(ch))) { fprintf(stderr, "send fail\n"); return; }
@@ -95,8 +158,25 @@ static void run_batch(int fd, const uint64_t* buf, uint64_t num_words,
         if (!recv_all(fd, &r, sizeof(r))) { fprintf(stderr, "recv fail\n"); return; }
         auto t1 = Clock::now();
 
-        if (r.hash != expect) (*errors)++;
-        if (out_ns) out_ns->push_back(std::chrono::duration<double, std::nano>(t1 - t0).count());
+        bool ok = (r.hash == expect);
+        if (!ok) (*errors)++;
+        double ns = std::chrono::duration<double, std::nano>(t1 - t0).count();
+        if (out_ns) out_ns->push_back(ns);
+
+        if (st && st->f) {   // strictly after the timed window
+            fprintf(st->f, "@{\"t\":\"c\",\"i\":%llu,\"ph\":\"%s\",\"us\":%.3f,"
+                           "\"nonce\":\"0x%016llx\",\"hash\":\"0x%016llx\",\"exp\":\"0x%016llx\","
+                           "\"ok\":%s",
+                    (unsigned long long)idx, phase, ns / 1000.0,
+                    (unsigned long long)ch.nonce, (unsigned long long)r.hash,
+                    (unsigned long long)expect, ok ? "true" : "false");
+            if (map) {
+                fprintf(st->f, ",\"map\":\"");
+                b64_bits(st->f, st->pages.data(), st->pages.size());
+                fputc('"', st->f);
+            }
+            fputs("}\n", st->f);
+        }
     }
 }
 
@@ -135,15 +215,41 @@ int main(int argc, char** argv) {
     std::mt19937_64 rng(a.seed ^ 0x5555u);
     uint64_t base = rng();
 
+    // Optional live event stream for the browser demo.
+    Stream stream;
+    long page_bytes = sysconf(_SC_PAGESIZE); if (page_bytes <= 0) page_bytes = 4096;
+    if (a.stream) {
+        stream.f = (!strcmp(a.stream, "-")) ? stdout : fopen(a.stream, "w");
+        if (!stream.f) {
+            fprintf(stderr, "[verifier] WARNING: could not open stream %s\n", a.stream);
+        } else {
+            setvbuf(stream.f, nullptr, _IOLBF, 0);   // one write per event, no more
+            stream.map_every = a.probe_map_every;
+            stream.page_words = (uint64_t)page_bytes / 8;
+            uint64_t num_pages = (num_words + stream.page_words - 1) / stream.page_words;
+            if (stream.map_every) stream.pages.assign(num_pages, 0);
+            fprintf(stream.f,
+                    "@{\"t\":\"run\",\"label\":\"%s\",\"mb\":%.6g,\"k\":%u,\"lanes\":%u,\"n\":%u,"
+                    "\"warmup\":%u,\"pages\":%llu,\"page_bytes\":%ld,\"locked\":%s,"
+                    "\"upload_s\":%.4f,\"map_every\":%u}\n",
+                    a.label, a.mb, a.k, a.lanes, a.n, a.warmup,
+                    (unsigned long long)num_pages, page_bytes,
+                    ready.locked ? "true" : "false", up_s, a.probe_map_every);
+        }
+    }
+    uint64_t seq = 0;
+
     // Warmup (fault in pages, warm caches/branch predictors) — not measured.
     uint64_t werr = 0;
-    run_batch(fd, buf, num_words, a.k, a.lanes, a.warmup, base, nullptr, &werr);
+    run_batch(fd, buf, num_words, a.k, a.lanes, a.warmup, base, nullptr, &werr,
+              stream.f ? &stream : nullptr, "w", &seq);
     base += a.warmup;
 
     // Measured run.
     std::vector<double> lat; lat.reserve(a.n);
     uint64_t errors = 0;
-    run_batch(fd, buf, num_words, a.k, a.lanes, a.n, base, &lat, &errors);
+    run_batch(fd, buf, num_words, a.k, a.lanes, a.n, base, &lat, &errors,
+              stream.f ? &stream : nullptr, "r", &seq);
 
     // Stats.
     std::vector<double> s = lat; std::sort(s.begin(), s.end());
@@ -222,6 +328,14 @@ int main(int argc, char** argv) {
         } else {
             fprintf(stderr, "[verifier] WARNING: could not write JSON to %s\n", a.json);
         }
+    }
+
+    if (stream.f) {
+        fprintf(stream.f, "@{\"t\":\"end\",\"samples\":%zu,\"errors\":%llu,\"p50\":%.3f,"
+                          "\"p99\":%.3f,\"min\":%.3f,\"max\":%.3f,\"mean\":%.3f}\n",
+                n, (unsigned long long)errors, pctile(s, 50) / 1000.0, pctile(s, 99) / 1000.0,
+                pctile(s, 0) / 1000.0, pctile(s, 100) / 1000.0, mean / 1000.0);
+        if (stream.f != stdout) fclose(stream.f);
     }
 
     // Terminate the prover session cleanly.
