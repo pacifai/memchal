@@ -11,7 +11,12 @@
  * mean one thing throughout:
  *      blue   = served from fast memory
  *      orange = went to storage
- * Chrome stays achromatic so those two are the only saturated colour on screen.
+ *
+ * A third hue (aqua) joins them for provers that hold the data NOWHERE. Three is
+ * the ceiling: no five-hue set drawn from this palette clears the normal-vision
+ * floor with every pair on screen at once, so the five prover modes are told
+ * apart by hue FAMILY plus a marker shape per mode, never by hue alone.
+ * Chrome stays achromatic so the data hues are the only saturated colour.
  */
 
 :root {
@@ -31,8 +36,9 @@
   --muted:   #6f7a7d;
   --hair:    #232b2e;
   --axis:    #2f393c;
-  --fast:    #3987e5;
-  --slow:    #d95926;
+  --fast:    #3987e5;   /* holds it in fast memory */
+  --slow:    #d95926;   /* reads it from storage */
+  --none:    #199e70;   /* does not hold it at all */
   --critical:#d03b3b;
   --good:    #0ca30c;
   --glow:    0 0 0 1px #232b2e, inset 0 1px 0 rgba(236,231,220,.04);
@@ -49,6 +55,7 @@
   --axis:    #cdcbc0;
   --fast:    #2a78d6;
   --slow:    #eb6834;
+  --none:    #1baf7a;
   --critical:#c22f2f;
   --good:    #0a8a0a;
   --glow:    0 0 0 1px #e2e0d6, inset 0 1px 0 rgba(255,255,255,.6);
@@ -105,7 +112,10 @@ main {
   background: var(--panel); border: 1px solid var(--hair); border-radius: 4px;
   padding: 13px 14px 15px;
 }
-.block-head { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
+.block-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px 14px; flex-wrap: wrap; }
+/* The legend must wrap inside the panel rather than run off its edge, so it has to
+   be allowed to shrink below its content width. */
+.block-head .legend { flex: 1 1 auto; min-width: 0; justify-content: flex-end; }
 .split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
 .hero { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(260px, .65fr); gap: 14px; }
 @media (max-width: 1180px) {
@@ -190,7 +200,7 @@ canvas { width: 100%; display: block; touch-action: none; }
   display: flex; gap: 13px; flex-wrap: wrap; margin-top: 9px;
   font-family: var(--face-prose); font-size: 11.5px; color: var(--ink-2);
 }
-.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .legend i { width: 9px; height: 9px; border-radius: 1px; background: currentColor; flex: none; }
 .legend .badge {
   color: var(--critical); border: 1px solid var(--critical);

@@ -23,6 +23,36 @@ const MODE_HINTS = {
   fake: "Keeps half the buffer and fabricates the rest. Fast and wrong — this is the one the correctness check catches, not the clock.",
 };
 
+// Each prover mode is its own series: their latency footprints have nothing in
+// common (fake is FASTER than honest; disk is syscall-bound; mmapdisk depends
+// entirely on its budget), so collapsing them into one "cheating" line would hide
+// the whole point. Hue carries the family — where the answer came from — and the
+// marker shape carries the individual mode, because five distinguishable hues do
+// not exist in this palette (no five-set clears the normal-vision floor with all
+// pairs on screen). Identity therefore never rests on hue alone.
+const MODE_STYLE = {
+  honest:   { hue: '--fast', shape: 'circle',   glyph: '●', family: 'holds it in RAM' },
+  mmapdisk: { hue: '--slow', shape: 'circle',   glyph: '●', family: 'reads it from storage' },
+  disk:     { hue: '--slow', shape: 'square',   glyph: '■', family: 'reads it from storage' },
+  partial:  { hue: '--slow', shape: 'triangle', glyph: '▲', family: 'reads it from storage' },
+  fake:     { hue: '--none', shape: 'diamond',  glyph: '◆', family: 'holds it nowhere' },
+};
+const modeStyle = (mode) => MODE_STYLE[mode] || MODE_STYLE.mmapdisk;
+
+/** Marker shapes are the per-mode identity channel, so they must be legible small. */
+function drawMarker(ctx, x, y, shape, r) {
+  ctx.beginPath();
+  if (shape === 'square') ctx.rect(x - r, y - r, r * 2, r * 2);
+  else if (shape === 'triangle') {
+    ctx.moveTo(x, y - r * 1.2); ctx.lineTo(x + r * 1.1, y + r); ctx.lineTo(x - r * 1.1, y + r);
+    ctx.closePath();
+  } else if (shape === 'diamond') {
+    ctx.moveTo(x, y - r * 1.3); ctx.lineTo(x + r * 1.2, y); ctx.lineTo(x, y + r * 1.3);
+    ctx.lineTo(x - r * 1.2, y); ctx.closePath();
+  } else ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fill();
+}
+
 const REDUCED_MOTION = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const $ = (id) => document.getElementById(id);
 const el = {
@@ -160,7 +190,6 @@ function finishRun(endEv) {
   state.collapse.push({ mib, p50: run.p50, mode: run.cfg.mode, label: run.label,
                         errors: run.errors, measured: run.measured });
   if (run.isHonest && run.p50) state.baseline = { label: run.label, p50: run.p50 };
-  state.prev = run;
   state.dirty.collapse = state.dirty.lat = true;
 }
 
@@ -225,7 +254,14 @@ function setStatus(cls, text) {
  *  dumps a backlog when you switch back. */
 function apply(ev) {
   switch (ev.t) {
-    case 'run': state.run = newRun(ev, ev.cfg || currentCfg()); clearConsole(); break;
+    case 'run':
+      // The run being replaced becomes the retained comparison series. Doing this
+      // here (rather than when a run ends) keeps prev and run distinct objects —
+      // otherwise a finished run was drawn, and legended, twice.
+      state.prev = state.run;
+      state.run = newRun(ev, ev.cfg || currentCfg());
+      clearConsole();
+      break;
     case 'c':   ingestChallenge(ev); break;
     case 'p':   ingestProver(ev); break;
     case 'end': finishRun(ev); break;
@@ -390,7 +426,7 @@ function updateVerdict() {
 }
 
 // ── latency chart ────────────────────────────────────────────────────────────
-function seriesColor(run) { return cssColor(run.isHonest ? '--fast' : '--slow'); }
+function seriesColor(run) { return cssColor(modeStyle(run.cfg.mode).hue); }
 
 function latencyGeom(w, h, runs) {
   const pad = { l: 54, r: 16, t: 12, b: 26 };
@@ -415,7 +451,7 @@ function latencyGeom(w, h, runs) {
 
 function drawLatency() {
   const { ctx, w, h } = fitCanvas(el.latency);
-  const runs = [state.prev, state.run].filter(Boolean).filter((r) => r.points.length);
+  const runs = [...new Set([state.prev, state.run].filter(Boolean))].filter((r) => r.points.length);
   renderLatLegend(runs);
   if (!runs.length) {
     emptyNote(ctx, w, h, state.collapse.length
@@ -475,9 +511,8 @@ function drawLatency() {
     ctx.stroke();
     if (run.points.length <= 60) {                    // few enough to mark individually
       ctx.fillStyle = seriesColor(run);
-      run.points.forEach((pt, i) => {
-        ctx.beginPath(); ctx.arc(g.x(i), g.y(pt.us), 4, 0, Math.PI * 2); ctx.fill();
-      });
+      const shape = modeStyle(run.cfg.mode).shape;
+      run.points.forEach((pt, i) => drawMarker(ctx, g.x(i), g.y(pt.us), shape, 4));
     }
     // direct label at the series end
     const last = run.points[run.points.length - 1];
@@ -485,7 +520,8 @@ function drawLatency() {
     ctx.font = `${isCurrent ? '600 ' : ''}10px ${cssColor('--face-label')}`;
     const lx = Math.min(g.x(run.points.length - 1) + 6, w - g.pad.r - 4);
     ctx.textAlign = g.x(run.points.length - 1) > w - 120 ? 'right' : 'left';
-    ctx.fillText(`${run.label}${isCurrent ? '' : ' (previous)'}`, lx, g.y(last.us) - 7);
+    ctx.fillText(`${modeStyle(run.cfg.mode).glyph} ${run.label}${isCurrent ? '' : ' (previous)'}`,
+                 lx, g.y(last.us) - 7);
     ctx.textAlign = 'left';
     ctx.globalAlpha = 1;
   });
@@ -519,7 +555,7 @@ function renderLatLegend(runs) {
     const current = r === state.run;
     // Two runs of the same class share a hue, so the swatch carries the same
     // opacity the mark does — the legend must not be the only place they differ.
-    const swatch = `<i style="opacity:${current ? 1 : 0.55}"></i>`;
+    const swatch = `<span style="opacity:${current ? 1 : 0.55}">${modeStyle(r.cfg.mode).glyph}</span>`;
     const badge = r.errors ? `<span class="badge">✕ ${r.errors}/${r.measured} mismatched</span>` : '';
     return `<span style="color:${c}">${swatch}<span style="color:var(--ink-2)">${r.label}`
          + `${current ? '' : ' (previous)'}</span></span>${badge}`;
@@ -635,7 +671,7 @@ function drawCollapse() {
   const pts = state.collapse.filter((p) => p.p50 != null);
   renderCollapseLegend(pts);
   if (!pts.length) { emptyNote(ctx, w, h, 'completed runs land here'); return; }
-  const pad = { l: 58, r: 16, t: 12, b: 22 };
+  const pad = { l: 58, r: 16, t: 12, b: 34 };
   const xs = pts.map((p) => Math.log10(p.mib));
   const ys = pts.map((p) => Math.log10(p.p50));
   const xLo = Math.min(...xs) - 0.12, xHi = Math.max(...xs) + 0.12;
@@ -653,14 +689,24 @@ function drawCollapse() {
     ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
     ctx.fillText(fmtUs(Math.pow(10, d)), pad.l - 5, y + 3);
   }
+  // Budgets belong on the axis, not beside every mark: with several provers at one
+  // budget, per-mark labels collide into unreadable overlap.
+  ctx.fillStyle = cssColor('--muted');
+  ctx.font = `9px ${cssColor('--face-num')}`;
   ctx.textAlign = 'center';
-  ctx.fillText('prover RAM budget →', (pad.l + w) / 2, h - 6);
+  for (const mib of [...new Set(pts.map((p) => p.mib))].sort((a, b) => a - b)) {
+    ctx.fillText(fmtMiB(mib), X(Math.log10(mib)), h - pad.b + 11);
+  }
+  ctx.fillText('prover RAM budget →', (pad.l + w) / 2, h - 2);
 
-  for (const honest of [true, false]) {
-    const group = pts.filter((p) => (p.mode === 'honest') === honest).sort((a, b) => a.mib - b.mib);
+  const labels = [];
+  for (const mode of Object.keys(MODE_STYLE)) {
+    const group = pts.filter((p) => p.mode === mode).sort((a, b) => a.mib - b.mib);
     if (!group.length) continue;
-    const color = cssColor(honest ? '--fast' : '--slow');
+    const style = modeStyle(mode);
+    const color = cssColor(style.hue);
     ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 2;
+
     // Runs at the same budget would sit on top of each other; nudge them apart by
     // a couple of pixels so a hidden mark can't read as a missing one.
     const dodge = (p) => {
@@ -668,42 +714,50 @@ function drawCollapse() {
       const i = same.indexOf(p);
       return same.length > 1 ? (i - (same.length - 1) / 2) * 5 : 0;
     };
-    ctx.beginPath();
-    group.forEach((p, i) => {
-      const x = X(Math.log10(p.mib)) + dodge(p), y = Y(Math.log10(p.p50));
-      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
-    });
-    ctx.stroke();
+    if (group.length > 1) {
+      ctx.beginPath();
+      group.forEach((p, i) => {
+        const x = X(Math.log10(p.mib)) + dodge(p), y = Y(Math.log10(p.p50));
+        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      });
+      ctx.stroke();
+    }
     group.forEach((p) => {
-      const x = X(Math.log10(p.mib)) + dodge(p), y = Y(Math.log10(p.p50));
-      ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2); ctx.fill();
-      ctx.strokeStyle = cssColor('--panel'); ctx.lineWidth = 2; ctx.stroke();
-      ctx.strokeStyle = color; ctx.lineWidth = 2;
+      drawMarker(ctx, X(Math.log10(p.mib)) + dodge(p), Y(Math.log10(p.p50)), style.shape, 4.5);
     });
+    // Name each line once, beside its worst (highest) mark — that is the end of the
+    // story the chart is telling.
+    const worst = group.reduce((a, b) => (b.p50 > a.p50 ? b : a));
+    labels.push({ text: mode.toUpperCase(), color,
+                  x: X(Math.log10(worst.mib)) + dodge(worst), y: Y(Math.log10(worst.p50)) });
   }
 
-  // Label the budgets, once each: runs at the same budget would otherwise stack
-  // identical labels on top of each other.
-  ctx.fillStyle = cssColor('--muted');
-  ctx.font = `9px ${cssColor('--face-num')}`;
-  ctx.textAlign = 'center';
-  const labelled = new Set();
-  for (const p of [...pts].sort((a, b) => a.mib - b.mib)) {
-    if (labelled.has(p.mib)) continue;
-    labelled.add(p.mib);
-    const sameBudget = pts.filter((q) => q.mib === p.mib);
-    const topY = Math.min(...sameBudget.map((q) => Y(Math.log10(q.p50))));
-    ctx.fillText(fmtMiB(p.mib), X(Math.log10(p.mib)), topY - 9);
+  // Push labels apart vertically so clustered provers stay readable.
+  labels.sort((a, b) => a.y - b.y);
+  const MIN_GAP = 12;
+  for (let i = 1; i < labels.length; i++) {
+    if (labels[i].y - labels[i - 1].y < MIN_GAP) labels[i].y = labels[i - 1].y + MIN_GAP;
   }
+  ctx.font = `10px ${cssColor('--face-label')}`;
+  for (const l of labels) {
+    const right = l.x > w - 90;
+    ctx.textAlign = right ? 'right' : 'left';
+    ctx.fillStyle = l.color;
+    ctx.fillText(l.text, l.x + (right ? -10 : 10), Math.min(Math.max(l.y + 3, pad.t + 8), h - pad.b - 2));
+  }
+  ctx.textAlign = 'left';
 }
 
 function renderCollapseLegend(pts) {
   if (!el.collapseLegend) return;
-  const kinds = [];
-  if (pts.some((p) => p.mode === 'honest')) kinds.push(['--fast', 'honest prover']);
-  if (pts.some((p) => p.mode !== 'honest')) kinds.push(['--slow', 'cheating prover']);
-  el.collapseLegend.innerHTML = kinds.map(([v, label]) =>
-    `<span style="color:${cssColor(v)}"><i></i><span style="color:var(--ink-2)">${label}</span></span>`).join('');
+  // One entry per mode present, with its glyph: hue says which family, glyph says
+  // which mode. The families are named so the grouping teaches the taxonomy.
+  const present = Object.keys(MODE_STYLE).filter((m) => pts.some((p) => p.mode === m));
+  el.collapseLegend.innerHTML = present.map((m) => {
+    const st = modeStyle(m);
+    return `<span style="color:${cssColor(st.hue)}">${st.glyph}`
+         + `<span style="color:var(--ink-2)">${m}</span></span>`;
+  }).join('');
 }
 
 // ── console ──────────────────────────────────────────────────────────────────

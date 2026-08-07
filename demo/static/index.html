@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>memory challenge · instrument</title>
+<!-- Favicon: the page map itself, at tab size — a grid of pages, most served from
+     memory (blue) and a few faulting to storage (orange). Inline SVG so there is
+     no second request and nothing external to fail. -->
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230a0e0f'/><g fill='%233987e5'><rect x='4' y='4' width='5' height='5'/><rect x='11' y='4' width='5' height='5'/><rect x='23' y='4' width='5' height='5'/><rect x='4' y='11' width='5' height='5'/><rect x='17' y='11' width='5' height='5'/><rect x='23' y='11' width='5' height='5'/><rect x='11' y='18' width='5' height='5'/><rect x='17' y='18' width='5' height='5'/><rect x='4' y='25' width='5' height='5'/><rect x='23' y='25' width='5' height='5'/></g><g fill='%23d95926'><rect x='17' y='4' width='5' height='5'/><rect x='11' y='11' width='5' height='5'/><rect x='4' y='18' width='5' height='5'/><rect x='23' y='18' width='5' height='5'/><rect x='11' y='25' width='5' height='5'/><rect x='17' y='25' width='5' height='5'/></g></svg>">
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
@@ -116,7 +120,10 @@
         </div>
         <canvas id="collapse" height="200"></canvas>
         <p class="prose">One mark per finished run: p50 against the RAM you allowed the
-          prover. Walk the budget down and the curve finds the cliff.</p>
+          prover. Each prover gets its own line — their footprints have nothing in
+          common. Hue says where the answer came from (blue held it in RAM, orange read
+          it from storage, aqua held it nowhere); shape says which prover. Walk the
+          budget down and the curve finds the cliff.</p>
         <button id="clearBtn" class="chip small" type="button">Clear marks</button>
       </section>
 
