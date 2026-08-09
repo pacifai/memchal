@@ -12,12 +12,22 @@ the *trustworthiness* of the numbers:
 [session-variance](../investigations/session-variance/).
 
 ## What the measurements showed
-- **The gap is syscall overhead, not storage distance.** The same 4096-`pread`/
+- **The gap is syscall overhead, not storage distance** (experiment 1,
+  [disk-is-syscalls](../investigations/disk-is-syscalls/)). The same 4096-`pread`/
   challenge loop over **tmpfs** (guaranteed RAM, `read_bytes = 0`) costs ~94–100%
   of the overlay-**disk** latency; the disk file is fetched from the block layer
   exactly once, then served from page cache. An **mmap adversary** (`mmapdisk`:
   data on disk, read via a memory-mapped view, no per-probe syscall) answers at
-  **~honest speed** and passes correctness — **for a buffer that fits in RAM**.
+  **~honest speed** — but only because the page cache is holding its file.
+- **Timing tracks residency, not the device** (experiment 2,
+  [mmap-needs-ram](../investigations/mmap-needs-ram/)). The mmap adversary isn't
+  evading residency; it *is* resident, via the page cache instead of `mlock`. Give
+  the same adversary a memory budget **smaller than the buffer it claims** and it
+  collapses to **~840× honest** with ~52% of probes faulting to storage; a `pread`
+  prover on the same budget is within ~2% (once the data genuinely isn't resident,
+  the experiment-1 syscall difference is noise). Two limits: the cgroup budget
+  stands in for physical RAM, and Docker's disk is re-cached by the macOS host, so
+  the storage penalty is a **lower bound**.
 - **Per-probe cost is ~half hash-chain ALU, ~half DRAM stall**, riding on a large
   transport floor (~40% of the honest number). "Memory-bound" was an overstatement.
 - **Absolute latencies are not portable across sessions.** The VM's vCPUs land on
@@ -26,11 +36,13 @@ the *trustworthiness* of the numbers:
   showed only 1.05×). Within a session the level is stable (no mid-run step).
 
 ## Decision
-1. **Claim scope.** State plainly that the timing detector distinguishes *per-probe
-   syscalls from in-process loads*, **not** RAM-vs-storage residency, and that it is
-   **defeated by an mmap adversary for buffers that fit in RAM** (above RAM size is
-   unmeasured — always keep that caveat so the negative result isn't overclaimed).
-   The **correctness detector remains robust** and is the claim that survives.
+1. **Claim scope.** State plainly that timing tracks **residency — whether the
+   probed data is in fast memory now — not the storage device**. It does not
+   distinguish RAM from page-cache (both are resident), and it does not establish a
+   real-RAM-vs-real-storage figure (the cgroup budget and host-cached virtual disk
+   make experiment 2 a lower bound; a bare-metal >RAM run is the settling test).
+   The mmap adversary is *not* a defeat — it is resident via page cache, and dies
+   (~840×) once denied the RAM. The **correctness detector remains robust**.
 2. **Measurement discipline.** Measure every mode in ONE session, **interleaved** in
    randomized (logged) order, with the `k=0` transport **floor as a mode in the
    rotation**. Report **within-session ratios** and **paired differences**

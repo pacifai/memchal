@@ -20,12 +20,16 @@ The intended defense is a **memory-hard** derivation (make regeneration cost mor
 memory/time than storage), which is a design change, not a stabilization. This is
 the first thing to build next.
 
-## 2. A genuinely-cold-read test on bare metal — now load-bearing, not optional
+## 2. A genuinely-cold-read test on bare metal — still the settling experiment
 
 We proved the current "disk" timing gap is pread **syscall overhead**, not
-storage distance, and that an mmap adversary erases it for a fits-in-RAM buffer.
-So the timing detector is currently **unvalidated**: we have no measurement where
-timing reflects real storage physics.
+storage distance, and that an mmap adversary erases it whenever the page cache
+can hold its file. `docs/investigations/mmap-needs-ram/run_mmap_needs_ram.sh` closed the obvious
+follow-up: starve the same adversary (cgroup budget = half the buffer) and it goes
+to ~960× honest with ~52% of probes faulting to storage. What that does **not**
+establish is storage physics — the budget is a cgroup limit rather than physical
+RAM, and Docker's virtual disk is cached again by the macOS host, so the measured
+penalty is a **lower bound**.
 
 What would settle it: run on **real Linux hardware** (not the Docker VM, whose
 storage is virtualized through the host page cache) with **either**:
@@ -40,13 +44,19 @@ building it in the VM would produce another untrustworthy number; it belongs on
 bare metal. `run.sh` already works on native Linux — this is close to
 one-command once the >RAM buffer / O_DIRECT mode exists.
 
-## 3. mmap adversary above RAM size
+## 3. mmap adversary above RAM size — done as a cgroup proxy, open on real RAM
 
-Cheaper follow-up to #2, and a direct falsification test: measure whether
-`mmapdisk` still matches honest when the buffer exceeds RAM. If it slows down
-(real faults), the timing detector has a viable regime (large buffers); if not,
-timing is defeated regardless of size. The `mmapdisk` mode already exists
-(`src/cheating_prover.cpp`); this just needs the >RAM buffer and real storage.
+The falsification test ("does `mmapdisk` still match honest when it cannot cache
+the buffer?") is answered in the direction that favors the detector: no. See
+`docs/investigations/mmap-needs-ram/run_mmap_needs_ram.sh` — prover in its own container at half the
+buffer size, ~960× honest, ~52% of probes from storage, cross-checked against the
+storage traffic the run implies (~8.3 MiB/challenge at ~205 MB/s).
+
+What is left is the same gap as #2: a **physical** >RAM buffer on **real**
+storage, which would also tell us the true per-fault cost rather than a lower
+bound. Also worth adding while there: `O_DIRECT` for the pread path (note the
+512 B/4 KiB alignment constraint vs the 8-byte probe), and a sweep of budget/buffer
+ratios to see how the penalty scales with the fraction that fits.
 
 ## 4. A decision rule with stated FP/FN rates
 

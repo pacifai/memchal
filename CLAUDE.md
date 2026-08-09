@@ -20,9 +20,12 @@ This repo has been **stabilized** (results made trustworthy, repo made legible).
 new capability was added. Current honest position:
 - ✅ **Correctness detection is robust.** `fake` fails every challenge; catch
   probability `1 − (1−m)^k`. This is the claim that survives adversarial contact.
-- ⚠️ **Timing detection does NOT prove RAM-vs-storage.** The measured "disk is
-  ~15× slower" is `pread` **syscall overhead**, and an **mmap adversary** answers
-  at ~honest speed **for a buffer that fits in RAM** (above RAM size is unmeasured).
+- ⚠️ **Timing tracks residency, not storage distance.** The "disk is ~15× slower"
+  gap is `pread` **syscall overhead**; an **mmap adversary** looks honest only
+  because the page cache holds its file (it *is* resident). Starve its RAM below
+  the buffer and it is **~840× honest** (~52% of probes fault to storage). Not yet
+  validated: a real-RAM/real-storage figure (needs a bare-metal >RAM run — the
+  cgroup/host-cache result is a lower bound).
   See [ADR 0003](docs/decisions/0003-timing-detector-scope-and-measurement.md).
 - ⚠️ **Absolute latencies are not portable across sessions** (Apple-Silicon P/E-core
   swing, up to ~1.6×, load-dependent). Only within-session ratios/differences are

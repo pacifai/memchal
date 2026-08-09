@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# disk_is_syscalls.sh — discriminator experiment: shows that the "disk" prover's
-# latency penalty is dominated by pread() SYSCALL overhead, NOT by storage
-# distance (spinning-disk, SSD, network latency, etc.).
+# disk_is_syscalls.sh — discriminator experiment #1: shows that the "disk"
+# prover's latency penalty is dominated by pread() SYSCALL overhead, NOT by
+# storage distance (spinning-disk, SSD, network latency, etc.).
 #
 # KEY INSIGHT: the same 4096-pread loop over a tmpfs (which is pure RAM — zero
 # block I/O, read_bytes never grows) costs ~91% as much as the same loop over the
 # container's overlay disk. That means ~91% of the "disk" penalty is syscall
 # overhead. An mmap adversary (data on disk, read via mmap, no per-probe syscall)
-# answers at ~honest speed — for buffers that fit in RAM; behaviour above RAM
-# size is unmeasured.
+# answers at ~honest speed — because with RAM to spare the page cache holds the
+# whole file, i.e. the data really is resident. Experiment #2
+# (docs/investigations/mmap-needs-ram/run_mmap_needs_ram.sh) takes that RAM away and shows the mmap
+# adversary collapsing; run both, in order, for the full story.
 #
 # HOW TO RUN:
 #   ./run.sh bash docs/investigations/disk-is-syscalls/disk_is_syscalls.sh
@@ -16,8 +18,8 @@
 # The repo's run.sh mounts the source at /work, provides a tmpfs at /ram, and
 # grants lock privileges. Do NOT run this script directly on the host.
 #
-# OUTPUT: a table of p50 latencies and /proc/PID/io read_bytes deltas for each
-# scenario, followed by a VERDICT block with % breakdown.
+# OUTPUT: a table of p50 latencies, block-layer reads and major faults per
+# scenario, followed by a VERDICT block.
 #
 # NOTE ON PORTABILITY: absolute latencies (us) are meaningful only within a
 # single run of this script. Compare the within-run numbers only — between-
@@ -25,6 +27,7 @@
 
 set -euo pipefail
 cd /work
+export PYTHONPATH=/work/scripts
 
 echo "=== disk_is_syscalls.sh: building binaries ==="
 make verifier cheating_prover prover 2>&1 | tail -5
@@ -44,27 +47,36 @@ LANES=32
 WARMUP=200
 BASE_PORT=9600
 
-# Temp directory for JSON results
 TMPDIR_MC=$(mktemp -d /tmp/disk_disc_XXXXXX)
+ROWS="$TMPDIR_MC/rows.tsv"       # label \t p50 \t read_bytes_delta \t majflt_delta
 trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$TMPDIR_MC"' EXIT
+
+# p50 (us) out of a verifier --json summary, or "N/A".
+p50_of() {
+    python3 -c "
+import json
+try:
+    print(json.load(open('$1'))['result']['percentiles_us']['p50']['value'])
+except Exception:
+    print('N/A')
+" 2>/dev/null || echo "N/A"
+}
 
 # ── helper: run one scenario ──────────────────────────────────────────────────
 # run_scenario LABEL MODE DATAFILE PORT
-# Starts cheating_prover in background, waits for it, reads /proc/PID/io before
-# and after verifier run, records p50 from --json output.
+# Starts cheating_prover in the background, runs the verifier against it, and
+# appends one row (p50 + I/O evidence) to $ROWS.
 run_scenario() {
-    local label="$1"
-    local mode="$2"
-    local datafile="$3"
-    local port="$4"
-    local out_json="$TMPDIR_MC/${label//[^a-zA-Z0-9_]/_}.json"
+    local label="$1" mode="$2" datafile="$3" port="$4"
+    local slug="${label//[^a-zA-Z0-9_]/_}"
+    local out_json="$TMPDIR_MC/$slug.json"
+    local srv_log="$TMPDIR_MC/srv_$slug.log"
 
-    # Start the server
+    echo "  - $label"
     ./cheating_prover --port "$port" --mode "$mode" --datafile "$datafile" \
-        >"$TMPDIR_MC/srv_${port}.log" 2>&1 &
+        >"$srv_log" 2>&1 &
     local SRV=$!
 
-    # Wait for it to be ready
     local waited=0
     while ! (echo >/dev/tcp/127.0.0.1/$port) 2>/dev/null; do
         sleep 0.1
@@ -72,50 +84,39 @@ run_scenario() {
         if [ $waited -gt 80 ]; then
             echo "  ERROR: server on port $port did not come up" >&2
             kill $SRV 2>/dev/null
-            return 1
+            printf '%s\tN/A\tN/A\tN/A\n' "$label" >>"$ROWS"
+            return 0
         fi
     done
     sleep 0.2  # let it settle
 
-    # Capture read_bytes from the server process before verifier run
-    local io0
+    # read_bytes straight from the server's own /proc, bracketing the run.
+    local io0 io1
     io0=$(awk '/^read_bytes/{print $2}' /proc/$SRV/io 2>/dev/null || echo 0)
 
-    # Run verifier
     ./verifier --host 127.0.0.1 --port "$port" \
         --mb "$MB" --k "$K" --lanes "$LANES" \
         --n "$N" --warmup "$WARMUP" \
         --csv /dev/null --json "$out_json" \
         >/dev/null 2>&1 || true
 
-    # Capture read_bytes after
-    local io1
     io1=$(awk '/^read_bytes/{print $2}' /proc/$SRV/io 2>/dev/null || echo 0)
-
-    local delta=$((io1 - io0))
-
-    # Extract p50 from JSON
-    local p50
-    p50=$(python3 -c "
-import json, sys
-try:
-    d=json.load(open('$out_json'))
-    print(d['result']['percentiles_us']['p50']['value'])
-except Exception as e:
-    print('N/A')
-" 2>/dev/null || echo "N/A")
-
-    # Store results for table
-    echo "${label}|${p50}|${delta}|${SRV}"
 
     kill "$SRV" 2>/dev/null || true
     wait "$SRV" 2>/dev/null || true
     sleep 0.3
+
+    # The prover reports its own major-fault delta over the challenge loop.
+    local majflt
+    majflt=$(sed -n 's/.*majflt_delta=\([0-9]*\).*/\1/p' "$srv_log" | tail -1)
+    [ -n "$majflt" ] || majflt="N/A"
+
+    printf '%s\t%s\t%s\t%s\n' "$label" "$(p50_of "$out_json")" "$((io1 - io0))" "$majflt" >>"$ROWS"
 }
 
 # ── honest baseline ───────────────────────────────────────────────────────────
 echo "--- running honest baseline ---"
-HONEST_PORT=$((BASE_PORT))
+HONEST_PORT=$BASE_PORT
 ./cheating_prover --port "$HONEST_PORT" --mode honest \
     >"$TMPDIR_MC/srv_honest.log" 2>&1 &
 HONEST_PID=$!
@@ -133,103 +134,92 @@ HONEST_JSON="$TMPDIR_MC/honest.json"
     --csv /dev/null --json "$HONEST_JSON" \
     >/dev/null 2>&1 || true
 
-HONEST_P50=$(python3 -c "
-import json
-try:
-    d=json.load(open('$HONEST_JSON'))
-    print(d['result']['percentiles_us']['p50']['value'])
-except:
-    print('N/A')
-" 2>/dev/null || echo "N/A")
-
+HONEST_P50=$(p50_of "$HONEST_JSON")
 kill "$HONEST_PID" 2>/dev/null || true
 wait "$HONEST_PID" 2>/dev/null || true
 sleep 0.3
 echo "  honest p50: ${HONEST_P50} us"
+
+printf '%s\t%s\t%s\t%s\n' "honest (RAM, mlock'd)" "$HONEST_P50" "-" "-" >>"$ROWS"
 echo ""
 
 # ── disk scenarios ────────────────────────────────────────────────────────────
 echo "--- running disk scenarios (this will be slow) ---"
+run_scenario "disk/pread over tmpfs (pure RAM)" disk     /ram/x.bin      $((BASE_PORT+1))
+run_scenario "disk/pread over overlay (VM disk)" disk     /tmp/x.bin      $((BASE_PORT+2))
+run_scenario "mmapdisk over overlay (no pread)" mmapdisk /tmp/x_mmap.bin $((BASE_PORT+3))
 echo ""
 
-# 1) disk mode over tmpfs (/ram)
-RESULT_TMPFS=$(run_scenario "disk_tmpfs" "disk" "/ram/x.bin" $((BASE_PORT+1)))
-P50_TMPFS=$(echo "$RESULT_TMPFS" | cut -d'|' -f2)
-DELTA_TMPFS=$(echo "$RESULT_TMPFS" | cut -d'|' -f3)
+# ── report ────────────────────────────────────────────────────────────────────
+ROWS="$ROWS" K=$K LANES=$LANES MB=$MB N=$N WARMUP=$WARMUP python3 - <<'PYEOF'
+import os, sys
+sys.path.insert(0, "/work/scripts")
+from fmt_table import table, block
 
-# 2) disk mode over overlay (container disk)
-RESULT_OVERLAY=$(run_scenario "disk_overlay" "disk" "/tmp/x.bin" $((BASE_PORT+2)))
-P50_OVERLAY=$(echo "$RESULT_OVERLAY" | cut -d'|' -f2)
-DELTA_OVERLAY=$(echo "$RESULT_OVERLAY" | cut -d'|' -f3)
+def num(s):
+    try: return float(s)
+    except Exception: return None
 
-# 3) mmapdisk over overlay (no per-probe syscall)
-RESULT_MMAP=$(run_scenario "mmapdisk_overlay" "mmapdisk" "/tmp/x_mmap.bin" $((BASE_PORT+3)))
-P50_MMAP=$(echo "$RESULT_MMAP" | cut -d'|' -f2)
-DELTA_MMAP=$(echo "$RESULT_MMAP" | cut -d'|' -f3)
+rows_in = [l.rstrip("\n").split("\t") for l in open(os.environ["ROWS"]) if l.strip()]
+p50 = {r[0]: num(r[1]) for r in rows_in}
+honest = next((v for k, v in p50.items() if k.startswith("honest")), None)
 
-# ── print table ───────────────────────────────────────────────────────────────
-echo ""
-echo "╔══════════════════════════════════════════════════════════════════════════════╗"
-echo "║           DISK vs SYSCALL DISCRIMINATOR — within-session results           ║"
-echo "╠══════════════════════════════════════════════════════════════════════════════╣"
-printf "║  %-35s  %10s us   %15s  ║\n" "scenario" "p50" "read_bytes_delta"
-echo "╠══════════════════════════════════════════════════════════════════════════════╣"
-printf "║  %-35s  %10s us   %15s  ║\n" "honest (RAM, mlock'd)"       "${HONEST_P50}"  "n/a"
-printf "║  %-35s  %10s us   %15s  ║\n" "disk / tmpfs (RAM, no blk I/O)" "${P50_TMPFS}" "${DELTA_TMPFS} B"
-printf "║  %-35s  %10s us   %15s  ║\n" "disk / overlay (VM disk)"    "${P50_OVERLAY}" "${DELTA_OVERLAY} B"
-printf "║  %-35s  %10s us   %15s  ║\n" "mmapdisk / overlay (no pread)" "${P50_MMAP}"  "${DELTA_MMAP} B"
-echo "╚══════════════════════════════════════════════════════════════════════════════╝"
-echo ""
-echo "  (Absolute us are within-session only; compare within this run.)"
-echo "  (k=$K, lanes=$LANES, mb=$MB, n=$N per run, warmup=$WARMUP)"
-echo ""
+def mib(s):
+    v = num(s)
+    return s if v is None else f"{v/(1<<20):,.1f} MiB"
 
-# ── VERDICT ───────────────────────────────────────────────────────────────────
-python3 - <<PYEOF
-import sys
+out = []
+for label, p, io, mf in rows_in:
+    v = num(p)
+    ratio = "1.00x (ref)" if label.startswith("honest") else (
+        f"{v/honest:,.2f}x" if (v and honest) else "N/A")
+    out.append([label,
+                "N/A" if v is None else f"{v:,.1f}",
+                ratio,
+                mib(io),
+                f"{int(mf):,}" if mf.isdigit() else mf])
 
-def safe_float(s):
-    try:
-        return float(s)
-    except:
-        return None
+print(table(
+    [("scenario", "l"), ("p50 (us)", "r"), ("vs honest", "r"),
+     ("storage reads", "r"), ("maj faults", "r")],
+    out,
+    title='EXPERIMENT 1 — IS THE "DISK" PENALTY STORAGE, OR SYSCALLS?',
+    notes=[
+        f"k={os.environ['K']}  lanes={os.environ['LANES']}  mb={os.environ['MB']}  "
+        f"n={os.environ['N']}/run  warmup={os.environ['WARMUP']}",
+        "absolute us are within-session only — compare rows of THIS run, never across runs",
+        "block-layer reads / major faults are the prover's own counters over the challenge loop",
+    ]))
+print()
 
-honest   = safe_float("${HONEST_P50}")
-p_tmpfs  = safe_float("${P50_TMPFS}")
-p_over   = safe_float("${P50_OVERLAY}")
-p_mmap   = safe_float("${P50_MMAP}")
+tmpfs = p50.get("disk/pread over tmpfs (pure RAM)")
+over  = p50.get("disk/pread over overlay (VM disk)")
+mmapd = p50.get("mmapdisk over overlay (no pread)")
 
-print("╔══════════════════════════════════════════════════════════════════════════════╗")
-print("║                              VERDICT                                        ║")
-print("╠══════════════════════════════════════════════════════════════════════════════╣")
-
-if p_tmpfs is not None and p_over is not None and p_over > 0:
-    disk_penalty = p_over - (honest or 0)
-    syscall_frac = (p_tmpfs - (honest or 0)) / disk_penalty * 100 if disk_penalty > 0 else 0
-    storage_frac = 100 - syscall_frac
-    pct_tmpfs_vs_overlay = (p_tmpfs / p_over) * 100
-    print(f"║  disk/tmpfs p50     = {p_tmpfs:>8.1f} us  ({pct_tmpfs_vs_overlay:.0f}% of overlay disk p50)  ║")
-    print(f"║  disk/overlay p50   = {p_over:>8.1f} us                                   ║")
-    print(f"║  => ~{pct_tmpfs_vs_overlay:.0f}% of overlay-disk latency is present even on tmpfs (RAM)       ║")
-    print(f"║  => disk 'latency' is syscall/page-cache overhead, NOT storage distance    ║")
+lines = []
+if tmpfs and over:
+    lines += [
+        f"disk over tmpfs (pure RAM)  = {tmpfs:>10,.1f} us   <- zero block I/O, same pread loop",
+        f"disk over overlay (VM disk) = {over:>10,.1f} us",
+        f"=> {tmpfs / over * 100.0:.0f}% of the overlay-disk latency is still there with NO disk involved.",
+        '   The "disk is ~15x slower" signal is pread() syscall overhead, not storage distance.',
+    ]
 else:
-    print("║  (could not compute tmpfs vs overlay ratio — N/A results)                  ║")
+    lines.append("could not compare tmpfs vs overlay (N/A results)")
 
-print("║                                                                              ║")
-
-if p_mmap is not None and honest is not None and honest > 0:
-    mmap_ratio = p_mmap / honest
-    print(f"║  mmapdisk p50       = {p_mmap:>8.1f} us                                   ║")
-    print(f"║  honest p50         = {honest:>8.1f} us                                   ║")
-    print(f"║  mmapdisk/honest ratio = {mmap_ratio:.2f}x                                     ║")
-    if mmap_ratio < 2.0:
-        print(f"║  => mmapdisk answers at ~honest speed: proof that eliminating per-probe   ║")
-        print(f"║     syscall (via mmap) removes the penalty — for buffers that fit in RAM  ║")
-        print(f"║     (behaviour above RAM size is unmeasured)                              ║")
-    else:
-        print(f"║  => mmapdisk ratio {mmap_ratio:.2f}x vs honest (may exceed RAM size for this run) ║")
+lines.append("")
+if mmapd and honest:
+    lines += [
+        f"mmapdisk (on disk, mmap'd)  = {mmapd:>10,.1f} us   ({mmapd/honest:.2f}x honest)",
+        f"honest (RAM, mlock'd)       = {honest:>10,.1f} us",
+        "=> Drop the per-probe syscall and the penalty disappears entirely. Note WHY:",
+        "   this container has RAM to spare, so the page cache holds the whole file and",
+        "   the adversary IS resident, just not via mlock (its block-layer reads stop",
+        "   after one cold sweep). Take that RAM away and the trick dies — experiment 2,",
+        "   docs/investigations/mmap-needs-ram/run_mmap_needs_ram.sh.",
+    ]
 else:
-    print("║  (could not compute mmapdisk vs honest ratio — N/A results)                ║")
+    lines.append("could not compare mmapdisk vs honest (N/A results)")
 
-print("╚══════════════════════════════════════════════════════════════════════════════╝")
+print(block("VERDICT — TIMING MEASURES SYSCALLS, NOT DISTANCE", lines))
 PYEOF

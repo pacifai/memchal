@@ -11,9 +11,10 @@ not comparable across sessions (see [decisions/0003](../decisions/0003-timing-de
 
 | Investigation | Question | Headline finding |
 |---|---|---|
-| [disk-is-syscalls](disk-is-syscalls/) | Is the "disk" gap storage distance or syscalls? | Syscall overhead; defeated by an mmap adversary for fits-in-RAM buffers |
+| [disk-is-syscalls](disk-is-syscalls/) | Is the "disk" gap storage distance or syscalls? | Syscall overhead; the mmap adversary looks honest because the page cache holds its file |
+| [mmap-needs-ram](mmap-needs-ram/) | Does the mmap adversary survive without RAM to cache the file? | No — starved below the buffer it's ~840× honest; timing tracks residency, not device |
 | [latency-decomposition](latency-decomposition/) | Where does a challenge's time go? Why is `fake` faster? | ~45 µs transport floor + ~half ALU / ~half DRAM per probe; `fake` is genuinely cheaper (no memory reads) |
 | [session-variance](session-variance/) | How much of absolute latency is the environment? | Within-session stable; between-session P/E-core swing up to ~1.6× (load-dependent) → compare within-session only |
 
-Run any of them from the repo root via `./run.sh bash <path>` (or, for
-session-variance, `bash <path>` since it launches its own containers).
+Run from the repo root via `./run.sh bash <path>` — except session-variance and
+mmap-needs-ram, which launch their own containers, so run those as `bash <path>`.

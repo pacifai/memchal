@@ -15,37 +15,40 @@ make: 'prover' is up to date.
   /root fstype: overlayfs
 
 --- running honest baseline ---
-  honest p50: 98.208 us
+  honest p50: 102.833 us
 
 --- running disk scenarios (this will be slow) ---
+  - disk/pread over tmpfs (pure RAM)
+  - disk/pread over overlay (VM disk)
+  - mmapdisk over overlay (no pread)
 
+╔═══════════════════════════════════════════════════════════════════════════════════════════════════╗
+║                    EXPERIMENT 1 -- IS THE "DISK" PENALTY STORAGE, OR SYSCALLS?                    ║
+╠═════════════════════════════════════╦════════════╦═══════════════╦═════════════════╦══════════════╣
+║  scenario                           ║  p50 (us)  ║  vs honest    ║  storage reads  ║  maj faults  ║
+╟─────────────────────────────────────┼────────────┼───────────────┼─────────────────┼──────────────╢
+║  honest (RAM, mlock'd)              ║     102.8  ║  1.00x (ref)  ║              -  ║           -  ║
+║  disk/pread over tmpfs (pure RAM)   ║   1,425.4  ║       13.86x  ║        0.0 MiB  ║           0  ║
+║  disk/pread over overlay (VM disk)  ║   1,547.9  ║       15.05x  ║       64.0 MiB  ║           0  ║
+║  mmapdisk over overlay (no pread)   ║     106.3  ║        1.03x  ║       64.0 MiB  ║      16,384  ║
+╚═════════════════════════════════════╩════════════╩═══════════════╩═════════════════╩══════════════╝
+  k=4096  lanes=32  mb=64  n=2000/run  warmup=200
+  absolute us are within-session only -- compare rows of THIS run, never across runs
+  block-layer reads / major faults are the prover's own counters over the challenge loop
 
-╔══════════════════════════════════════════════════════════════════════════════╗
-║           DISK vs SYSCALL DISCRIMINATOR — within-session results           ║
-╠══════════════════════════════════════════════════════════════════════════════╣
-║  scenario                                    p50 us   read_bytes_delta  ║
-╠══════════════════════════════════════════════════════════════════════════════╣
-║  honest (RAM, mlock'd)                    98.208 us               n/a  ║
-║  disk / tmpfs (RAM, no blk I/O)           1391.5 us               0 B  ║
-║  disk / overlay (VM disk)               1389.625 us        67108864 B  ║
-║  mmapdisk / overlay (no pread)            96.292 us        67108864 B  ║
-╚══════════════════════════════════════════════════════════════════════════════╝
-
-  (Absolute us are within-session only; compare within this run.)
-  (k=4096, lanes=32, mb=64, n=2000 per run, warmup=200)
-
-╔══════════════════════════════════════════════════════════════════════════════╗
-║                              VERDICT                                        ║
-╠══════════════════════════════════════════════════════════════════════════════╣
-║  disk/tmpfs p50     =   1391.5 us  (100% of overlay disk p50)  ║
-║  disk/overlay p50   =   1389.6 us                                   ║
-║  => ~100% of overlay-disk latency is present even on tmpfs (RAM)       ║
-║  => disk 'latency' is syscall/page-cache overhead, NOT storage distance    ║
-║                                                                              ║
-║  mmapdisk p50       =     96.3 us                                   ║
-║  honest p50         =     98.2 us                                   ║
-║  mmapdisk/honest ratio = 0.98x                                     ║
-║  => mmapdisk answers at ~honest speed: proof that eliminating per-probe   ║
-║     syscall (via mmap) removes the penalty — for buffers that fit in RAM  ║
-║     (behaviour above RAM size is unmeasured)                              ║
-╚══════════════════════════════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════════════════════════════════╗
+║                    VERDICT -- TIMING MEASURES SYSCALLS, NOT DISTANCE                     ║
+╠══════════════════════════════════════════════════════════════════════════════════════════╣
+║  disk over tmpfs (pure RAM)  =    1,425.4 us   <- zero block I/O, same pread loop        ║
+║  disk over overlay (VM disk) =    1,547.9 us                                             ║
+║  => 92% of the overlay-disk latency is still there with NO disk involved.                ║
+║     The "disk is ~15x slower" signal is pread() syscall overhead, not storage distance.  ║
+║                                                                                          ║
+║  mmapdisk (on disk, mmap'd)  =      106.3 us   (1.03x honest)                            ║
+║  honest (RAM, mlock'd)       =      102.8 us                                             ║
+║  => Drop the per-probe syscall and the penalty disappears entirely. Note WHY:            ║
+║     this container has RAM to spare, so the page cache holds the whole file and          ║
+║     the adversary IS resident, just not via mlock (its block-layer reads stop            ║
+║     after one cold sweep). Take that RAM away and the trick dies -- experiment 2,        ║
+║     docs/investigations/mmap-needs-ram/run_mmap_needs_ram.sh.                            ║
+╚══════════════════════════════════════════════════════════════════════════════════════════╝

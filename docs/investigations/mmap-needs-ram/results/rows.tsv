@@ -1,0 +1,4 @@
+honest (mlock'd RAM)	1g	96.708	-	-	-	
+mmapdisk, RAM to spare	1g	109.584	901120	67108864	16384	
+mmapdisk, RAM < buffer	32m	81312.625	901120	1930702848	471363	
+disk/pread, RAM < buffer	32m	79471.417	901120	1909800960	0	

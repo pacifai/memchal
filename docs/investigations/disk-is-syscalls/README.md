@@ -22,13 +22,16 @@ subsequent probe from the page cache. And `mmapdisk` — data genuinely on disk,
 read via mmap — answers at **~honest speed** (ratio ≈ 1.0×) with 0 verify errors.
 
 **The "disk is ~15× slower" gap is `pread` syscall overhead, not storage
-distance.** The timing detector distinguishes *per-probe syscalls* from
-*in-process loads*; it is **defeated by a one-line mmap change** for any buffer
-that fits in RAM. (Behaviour above RAM size is unmeasured — see NEXT_STEPS.)
+distance.** But `mmapdisk` looking honest is *not* a defeat of the detector: it is
+fast because the page cache is holding its whole file — it really is resident, just
+not via `mlock`. The follow-up, [mmap-needs-ram](../mmap-needs-ram/), takes that
+RAM away and the same adversary goes ~840× honest. So timing tracks **residency**,
+and this experiment only shows that *device* is the wrong way to read it.
 
 Representative results (illustrative, one session — absolute µs are not portable,
-see `../../decisions/0003-*`): tmpfs 1391 µs ≈ overlay 1389 µs; mmapdisk 96 µs ≈
-honest 98 µs. Full run in [`results/disk_is_syscalls.txt`](results/disk_is_syscalls.txt).
+see `../../decisions/0003-timing-detector-scope-and-measurement.md`): tmpfs ~1425 µs
+≈ overlay ~1548 µs; mmapdisk ~106 µs ≈ honest ~103 µs. Full run in
+[`results/disk_is_syscalls.txt`](results/disk_is_syscalls.txt).
 
 ## Reproduce
 ```bash
