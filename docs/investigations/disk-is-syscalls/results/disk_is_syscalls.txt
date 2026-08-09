@@ -1,0 +1,51 @@
+
+
+
+
+
+
+
+make: 'verifier' is up to date.
+make: 'cheating_prover' is up to date.
+make: 'prover' is up to date.
+
+=== environment ===
+  /ram fstype: tmpfs
+  /tmp fstype: overlayfs
+  /root fstype: overlayfs
+
+--- running honest baseline ---
+  honest p50: 98.208 us
+
+--- running disk scenarios (this will be slow) ---
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║           DISK vs SYSCALL DISCRIMINATOR — within-session results           ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  scenario                                    p50 us   read_bytes_delta  ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  honest (RAM, mlock'd)                    98.208 us               n/a  ║
+║  disk / tmpfs (RAM, no blk I/O)           1391.5 us               0 B  ║
+║  disk / overlay (VM disk)               1389.625 us        67108864 B  ║
+║  mmapdisk / overlay (no pread)            96.292 us        67108864 B  ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+  (Absolute us are within-session only; compare within this run.)
+  (k=4096, lanes=32, mb=64, n=2000 per run, warmup=200)
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                              VERDICT                                        ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  disk/tmpfs p50     =   1391.5 us  (100% of overlay disk p50)  ║
+║  disk/overlay p50   =   1389.6 us                                   ║
+║  => ~100% of overlay-disk latency is present even on tmpfs (RAM)       ║
+║  => disk 'latency' is syscall/page-cache overhead, NOT storage distance    ║
+║                                                                              ║
+║  mmapdisk p50       =     96.3 us                                   ║
+║  honest p50         =     98.2 us                                   ║
+║  mmapdisk/honest ratio = 0.98x                                     ║
+║  => mmapdisk answers at ~honest speed: proof that eliminating per-probe   ║
+║     syscall (via mmap) removes the penalty — for buffers that fit in RAM  ║
+║     (behaviour above RAM size is unmeasured)                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
