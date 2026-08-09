@@ -1,0 +1,15 @@
+# Decision records (ADRs)
+
+Short records of the decisions that bear directly on the PoC's logic and claims.
+Read these before changing the challenge math, the honest-baseline guarantee, or
+what the timing detector is said to establish. Each is backed by the
+[investigations](../investigations/).
+
+(Tooling/environment choices — containerization, JSON output, Python aggregation —
+are documented in [`CLAUDE.md`](../../CLAUDE.md) and `README.md`, not here.)
+
+| # | Decision | Why it matters |
+|---|---|---|
+| [0001](0001-challenge-math-frozen-pinned-by-kat.md) | Challenge math frozen; pinned by a KAT | A silent math change would invalidate every number |
+| [0002](0002-verify-and-refuse-on-mlock.md) | Verify the lock (VmLck); refuse to run unpinned | No result rests on an unpinned honest baseline |
+| [0003](0003-timing-detector-scope-and-measurement.md) | Timing detector: syscalls not storage; within-session only | The main claim correction — read before trusting timing |
