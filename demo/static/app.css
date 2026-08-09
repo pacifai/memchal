@@ -1,0 +1,245 @@
+/* app.css — the demo dressed as what it actually is: a measuring instrument.
+ *
+ * Three faces, three jobs. Condensed grotesque for engraved panel labels, a
+ * monospace for every measured number (tabular, so figures don't dance as they
+ * update), and an old-style serif for the prose — this repo explains itself in
+ * paragraphs, and that voice belongs to a lab notebook, not to UI chrome.
+ *
+ * The two data hues are the validated categorical pair (blue slot 1, orange
+ * slot 2): they clear CVD separation and 3:1 against every surface used here,
+ * which the obvious green/red pair does not (ΔE 4.1 under deuteranopia). They
+ * mean one thing throughout:
+ *      blue   = served from fast memory
+ *      orange = went to storage
+ *
+ * A third hue (aqua) joins them for provers that hold the data NOWHERE. Three is
+ * the ceiling: no five-hue set drawn from this palette clears the normal-vision
+ * floor with every pair on screen at once, so the five prover modes are told
+ * apart by hue FAMILY plus a marker shape per mode, never by hue alone.
+ * Chrome stays achromatic so the data hues are the only saturated colour.
+ */
+
+:root {
+  --face-label: "Avenir Next Condensed", "HelveticaNeue-CondensedBold",
+                "Roboto Condensed", "Arial Narrow", system-ui, sans-serif;
+  --face-num:   ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --face-prose: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --plane:   #0e1214;
+  --panel:   #141a1c;
+  --inset:   #0a0e0f;
+  --ink:     #ece7dc;
+  --ink-2:   #a8a79f;
+  --muted:   #6f7a7d;
+  --hair:    #232b2e;
+  --axis:    #2f393c;
+  --fast:    #3987e5;   /* holds it in fast memory */
+  --slow:    #d95926;   /* reads it from storage */
+  --none:    #199e70;   /* does not hold it at all */
+  --critical:#d03b3b;
+  --good:    #0ca30c;
+  --glow:    0 0 0 1px #232b2e, inset 0 1px 0 rgba(236,231,220,.04);
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --plane:   #f2f0ea;
+  --panel:   #faf8f2;
+  --inset:   #eeece4;
+  --ink:     #14181a;
+  --ink-2:   #4a5254;
+  --muted:   #78807f;
+  --hair:    #e2e0d6;
+  --axis:    #cdcbc0;
+  --fast:    #2a78d6;
+  --slow:    #eb6834;
+  --none:    #1baf7a;
+  --critical:#c22f2f;
+  --good:    #0a8a0a;
+  --glow:    0 0 0 1px #e2e0d6, inset 0 1px 0 rgba(255,255,255,.6);
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--plane); color: var(--ink);
+  font-family: var(--face-prose); font-size: 14px; line-height: 1.55;
+}
+
+/* engraved labels: the instrument's silkscreen */
+.eyebrow, .lab, .chip, .go, select, th, .rail-name, .rail-role, .hero-lab, .state {
+  font-family: var(--face-label);
+  text-transform: uppercase;
+  letter-spacing: .12em;
+}
+.eyebrow {
+  font-size: 11px; font-weight: 600; color: var(--muted);
+  margin: 0 0 10px; display: block;
+}
+.lab { font-size: 10px; color: var(--muted); display: block; }
+.num { font-family: var(--face-num); font-variant-numeric: tabular-nums; }
+.prose { font-family: var(--face-prose); color: var(--ink-2); font-size: 12.5px; margin: 8px 0 0; }
+.prose.inline { display: inline; margin: 0; text-transform: none; letter-spacing: 0; }
+
+/* ── top rail ─────────────────────────────────────────────────────────── */
+.rail {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 10px 18px; background: var(--panel);
+  border-bottom: 1px solid var(--hair); position: sticky; top: 0; z-index: 5;
+}
+.rail-id { display: flex; align-items: baseline; gap: 10px; }
+.rail-name { font-size: 15px; font-weight: 600; letter-spacing: .16em; }
+.rail-role { font-size: 10px; color: var(--muted); }
+.rail-right { display: flex; align-items: center; gap: 12px; }
+.rail-status { font-family: var(--face-num); font-size: 11.5px; color: var(--ink-2); }
+.led {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--muted);
+  box-shadow: 0 0 0 3px var(--hair); align-self: center;
+}
+.led.busy { background: var(--slow); box-shadow: 0 0 10px var(--slow), 0 0 0 3px var(--hair); animation: blink 1.2s infinite; }
+.led.done { background: var(--fast); box-shadow: 0 0 10px var(--fast), 0 0 0 3px var(--hair); }
+.led.err  { background: var(--critical); box-shadow: 0 0 10px var(--critical), 0 0 0 3px var(--hair); }
+@keyframes blink { 50% { opacity: .3; } }
+
+/* ── layout ───────────────────────────────────────────────────────────── */
+main {
+  display: grid; grid-template-columns: 268px minmax(0, 1fr);
+  gap: 14px; padding: 14px 18px 36px; align-items: start;
+}
+.col-instrument { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.block {
+  background: var(--panel); border: 1px solid var(--hair); border-radius: 4px;
+  padding: 13px 14px 15px;
+}
+.block-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px 14px; flex-wrap: wrap; }
+/* The legend must wrap inside the panel rather than run off its edge, so it has to
+   be allowed to shrink below its content width. */
+.block-head .legend { flex: 1 1 auto; min-width: 0; justify-content: flex-end; }
+.split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
+.hero { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(260px, .65fr); gap: 14px; }
+@media (max-width: 1180px) {
+  main { grid-template-columns: 1fr; }
+  .hero, .split { grid-template-columns: 1fr; }
+}
+
+/* ── controls ─────────────────────────────────────────────────────────── */
+.field { display: block; margin: 12px 0 0; }
+.field .lab { margin-bottom: 5px; }
+.field .lab b { color: var(--ink); letter-spacing: 0; font-size: 12px; }
+select, input[type="number"] {
+  width: 100%; padding: 6px 7px; color: var(--ink); background: var(--inset);
+  border: 1px solid var(--axis); border-radius: 3px; font-size: 12px;
+}
+select { font-size: 10.5px; }
+input[type="number"] { font-family: var(--face-num); }
+input[type="range"] { width: 100%; accent-color: var(--slow); margin: 2px 0 0; }
+.pairs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; }
+.actions { display: flex; gap: 8px; margin-top: 16px; }
+button {
+  font-size: 11px; font-weight: 600; cursor: pointer; border-radius: 3px;
+  padding: 8px 12px; border: 1px solid var(--axis);
+  background: var(--inset); color: var(--ink);
+}
+button.go { background: var(--fast); border-color: var(--fast); color: #fff; flex: 1; }
+button.small { padding: 5px 9px; margin-top: 10px; }
+button:disabled { opacity: .4; cursor: default; }
+button:hover:not(:disabled) { filter: brightness(1.12); }
+:focus-visible { outline: 2px solid var(--fast); outline-offset: 2px; }
+
+/* ── the screen: signature element ────────────────────────────────────── */
+.screen-frame {
+  margin: 0; padding: 13px 14px 14px; background: var(--panel);
+  border: 1px solid var(--hair); border-radius: 4px;
+}
+.screen-top { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.screen-top .eyebrow { margin-bottom: 8px; }
+.engrave { font-size: 10px; color: var(--muted); letter-spacing: .04em; }
+#pagemap {
+  width: 100%; display: block; background: var(--inset);
+  border: 1px solid var(--axis); border-radius: 2px; box-shadow: var(--glow);
+}
+/* Canvases MUST carry an explicit CSS height. With only a height attribute a
+   canvas lays out at its intrinsic 300xH ratio, so a full-width one becomes
+   absurdly tall and the page grows with it. */
+canvas { width: 100%; display: block; touch-action: none; }
+#pagemap  { height: 420px; }
+#latency  { height: 240px; }
+#collapse { height: 200px; }
+@media (max-width: 1180px) { #pagemap { height: 340px; } }
+
+/* ── verdict ──────────────────────────────────────────────────────────── */
+.verdict {
+  background: var(--panel); border: 1px solid var(--hair); border-radius: 4px;
+  padding: 13px 14px 15px; display: flex; flex-direction: column;
+}
+.state {
+  font-size: 12px; font-weight: 600; margin: 0; color: var(--ink-2);
+  padding-bottom: 10px; border-bottom: 1px solid var(--hair);
+}
+.state.holding { color: var(--fast); }
+.state.storage { color: var(--slow); }
+.state.wrong   { color: var(--critical); }
+.hero-num { margin: 14px 0 0; }
+.hero-num b {
+  display: block; font-size: 54px; line-height: .95; font-weight: 500;
+  letter-spacing: -.02em;
+}
+.hero-lab { display: block; font-size: 10.5px; color: var(--muted); margin-top: 7px; }
+.readouts {
+  margin: auto 0 0; padding-top: 14px; display: grid; gap: 11px 14px;
+  grid-template-columns: 1fr 1fr;
+}
+.readouts > div { border-top: 1px solid var(--hair); padding-top: 8px; }
+.readouts dd { margin: 2px 0 0; font-size: 19px; }
+.readouts dd.foot { font-size: 10px; color: var(--muted); font-family: var(--face-prose); }
+.readouts dd.alarm { color: var(--critical); }
+
+/* ── legends: identity is never colour alone ──────────────────────────── */
+.legend {
+  display: flex; gap: 13px; flex-wrap: wrap; margin-top: 9px;
+  font-family: var(--face-prose); font-size: 11.5px; color: var(--ink-2);
+}
+.legend span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.legend i { width: 9px; height: 9px; border-radius: 1px; background: currentColor; flex: none; }
+.legend .badge {
+  color: var(--critical); border: 1px solid var(--critical);
+  border-radius: 2px; padding: 0 6px; font-family: var(--face-label);
+  font-size: 10px; letter-spacing: .1em; text-transform: uppercase;
+}
+
+/* ── ledger ───────────────────────────────────────────────────────────── */
+.log-scroll { overflow: auto; max-height: 244px; margin-top: 2px; }
+table.ledger { width: 100%; border-collapse: collapse; font-family: var(--face-num); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+table.ledger th {
+  position: sticky; top: 0; background: var(--panel); text-align: left;
+  font-size: 9.5px; font-weight: 600; color: var(--muted);
+  padding: 4px 8px; border-bottom: 1px solid var(--axis);
+}
+table.ledger td { padding: 2px 8px; border-bottom: 1px solid var(--hair); white-space: nowrap; color: var(--ink-2); }
+table.ledger td:first-child { color: var(--muted); }
+table.ledger tr.bad td { color: var(--critical); }
+table.ledger tr.warm td { color: var(--muted); }
+.v-ok::before { content: "✓ "; }
+.v-bad::before { content: "✕ "; }
+
+/* ── process output ───────────────────────────────────────────────────── */
+.log-panel summary { cursor: pointer; }
+.log-panel summary::marker { color: var(--muted); }
+#log {
+  margin: 10px 0 0; max-height: 200px; overflow: auto; font-size: 11px;
+  color: var(--ink-2); white-space: pre-wrap;
+}
+
+/* ── tooltip ──────────────────────────────────────────────────────────── */
+.tip {
+  position: fixed; z-index: 20; pointer-events: none; font-size: 11.5px; line-height: 1.5;
+  background: var(--panel); color: var(--ink); border: 1px solid var(--axis);
+  border-radius: 3px; padding: 6px 9px; box-shadow: 0 8px 26px rgba(0,0,0,.35);
+}
+.tip b { font-weight: 600; }
+.tip .k { color: var(--muted); }
+
+@media (prefers-reduced-motion: reduce) {
+  .led.busy { animation: none; }
+}

@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>memory challenge · instrument</title>
+<!-- Favicon: the page map itself, at tab size — a grid of pages, most served from
+     memory (blue) and a few faulting to storage (orange). Inline SVG so there is
+     no second request and nothing external to fail. -->
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230a0e0f'/><g fill='%233987e5'><rect x='4' y='4' width='5' height='5'/><rect x='11' y='4' width='5' height='5'/><rect x='23' y='4' width='5' height='5'/><rect x='4' y='11' width='5' height='5'/><rect x='17' y='11' width='5' height='5'/><rect x='23' y='11' width='5' height='5'/><rect x='11' y='18' width='5' height='5'/><rect x='17' y='18' width='5' height='5'/><rect x='4' y='25' width='5' height='5'/><rect x='23' y='25' width='5' height='5'/></g><g fill='%23d95926'><rect x='17' y='4' width='5' height='5'/><rect x='11' y='11' width='5' height='5'/><rect x='4' y='18' width='5' height='5'/><rect x='23' y='18' width='5' height='5'/><rect x='11' y='25' width='5' height='5'/><rect x='17' y='25' width='5' height='5'/></g></svg>">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="rail">
+  <div class="rail-id">
+    <span class="led" id="led" aria-hidden="true"></span>
+    <span class="rail-name">memory challenge</span>
+    <span class="rail-role">prover interrogation · live</span>
+  </div>
+  <div class="rail-right">
+    <span class="rail-status" id="statusText" role="status">idle</span>
+    <button id="themeBtn" class="chip" type="button" aria-label="Toggle daylight mode">daylight</button>
+  </div>
+</header>
+
+<main>
+  <!-- ── control column ─────────────────────────────────────────────────── -->
+  <aside class="col-controls">
+    <section class="block">
+      <h2 class="eyebrow">prover under test</h2>
+
+      <label class="field">
+        <span class="lab">mode</span>
+        <select id="mode">
+          <option value="honest">honest — mlock'd in RAM</option>
+          <option value="mmapdisk" selected>mmapdisk — on disk, mmap'd</option>
+          <option value="disk">disk — pread per probe</option>
+          <option value="partial">partial — half RAM, half disk</option>
+          <option value="fake">fake — fabricates the rest</option>
+        </select>
+      </label>
+      <p class="prose" id="modeHint"></p>
+
+      <label class="field">
+        <span class="lab">ram budget <b class="num" id="memLabel">32 MiB</b></span>
+        <input type="range" id="mem" min="0" max="10" step="1" value="0">
+      </label>
+      <p class="prose" id="memHint"></p>
+
+      <div class="pairs">
+        <label class="field"><span class="lab">buffer mib</span><input class="num" type="number" id="mb" value="64" min="1" max="1024"></label>
+        <label class="field"><span class="lab">probes k</span><input class="num" type="number" id="k" value="4096" min="1" max="65536"></label>
+        <label class="field"><span class="lab">challenges</span><input class="num" type="number" id="n" value="200" min="1" max="20000"></label>
+        <label class="field"><span class="lab">warmup</span><input class="num" type="number" id="warmup" value="20" min="0" max="20000"></label>
+      </div>
+
+      <div class="actions">
+        <button id="runBtn" class="go" type="button">Interrogate</button>
+        <button id="stopBtn" class="chip" type="button">Stop</button>
+      </div>
+      <p class="prose">Every run starts a real container at that budget, uploads the
+        buffer, then challenges it. Tracing spaces the challenges out, so the
+        headline numbers still belong to the terminal experiments.</p>
+    </section>
+  </aside>
+
+  <!-- ── instrument ─────────────────────────────────────────────────────── -->
+  <div class="col-instrument">
+
+    <!-- hero: the buffer itself, and the verdict about it -->
+    <section class="hero">
+      <figure class="screen-frame">
+        <div class="screen-top">
+          <span class="eyebrow">buffer page map</span>
+          <span class="engrave num" id="mapScale">— pages · 4 KiB each</span>
+        </div>
+        <canvas id="pagemap" height="420"></canvas>
+        <div class="legend" id="mapLegend"></div>
+        <figcaption class="prose" id="mapHint">One cell is one page of the buffer.
+          Colour is where the probes actually came from, per the kernel — never a claim
+          the prover makes about itself.</figcaption>
+      </figure>
+
+      <section class="verdict">
+        <h2 class="eyebrow">verdict</h2>
+        <p class="state" id="verdictState">standing by</p>
+        <div class="hero-num">
+          <b class="num" id="heroRatio">—</b>
+          <span class="hero-lab" id="heroLabel">press Interrogate</span>
+        </div>
+        <p class="prose" id="heroSub">Run the honest prover first — it is the reference
+          every other prover is measured against.</p>
+
+        <dl class="readouts">
+          <div><dt class="lab">p50 latency</dt><dd class="num" id="tP50">—</dd><dd class="foot" id="tP50sub">measured phase</dd></div>
+          <div><dt class="lab">buffer resident</dt><dd class="num" id="tRes">—</dd><dd class="foot" id="tRessub">kernel mincore</dd></div>
+          <div><dt class="lab">probes from storage</dt><dd class="num" id="tStorage">—</dd><dd class="foot" id="tStoragesub">block-layer reads</dd></div>
+          <div><dt class="lab">answers wrong</dt><dd class="num" id="tErr">—</dd><dd class="foot" id="tErrsub">vs local recompute</dd></div>
+        </dl>
+      </section>
+    </section>
+
+    <!-- scope trace -->
+    <section class="block">
+      <div class="block-head">
+        <h2 class="eyebrow">latency per challenge</h2>
+        <div class="legend" id="latLegend"></div>
+      </div>
+      <canvas id="latency" height="240"></canvas>
+      <p class="prose">Log decades, because 40 µs and 60 ms have to share one screen.
+        The x axis counts challenges, not seconds: the draw is paced so a burst is
+        legible.</p>
+    </section>
+
+    <div class="split">
+      <section class="block">
+        <div class="block-head">
+          <h2 class="eyebrow">where it breaks</h2>
+          <div class="legend" id="collapseLegend"></div>
+        </div>
+        <canvas id="collapse" height="200"></canvas>
+        <p class="prose">One mark per finished run: p50 against the RAM you allowed the
+          prover. Each prover gets its own line — their footprints have nothing in
+          common. Hue says where the answer came from (blue held it in RAM, orange read
+          it from storage, aqua held it nowhere); shape says which prover. Walk the
+          budget down and the curve finds the cliff.</p>
+        <button id="clearBtn" class="chip small" type="button">Clear marks</button>
+      </section>
+
+      <section class="block">
+        <h2 class="eyebrow">challenge log</h2>
+        <div class="log-scroll">
+          <table class="ledger" id="console">
+            <thead><tr><th>#</th><th>nonce</th><th>response</th><th>µs</th><th>verdict</th></tr></thead>
+            <tbody id="consoleBody"></tbody>
+          </table>
+        </div>
+        <p class="prose">What was asked, what came back, how long it took, and whether it
+          matched the verifier's own recomputation.</p>
+      </section>
+    </div>
+
+    <details class="block log-panel">
+      <summary class="eyebrow">process output <span class="prose inline">prover, verifier and bridge, verbatim</span></summary>
+      <pre id="log" class="num"></pre>
+    </details>
+  </div>
+</main>
+<div id="tip" class="tip num" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

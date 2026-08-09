@@ -80,6 +80,81 @@ static inline uint64_t disk_word(int fd, uint64_t idx) {
     return w;
 }
 
+// ---------------------------------------------------------------------------
+// Live trace for the browser demo (demo/bridge.py) — off unless --trace is given
+// ---------------------------------------------------------------------------
+// Every `every` challenges, emit one '@'-prefixed JSON line with this prover's
+// own counters and, for a mapped mode, a mincore() snapshot of which pages of the
+// buffer are actually resident right now. That snapshot is the honest answer to
+// "is it holding the data?" — it is the kernel's view, not our claim.
+//
+// COST: emitted after the response has been sent, so it is outside the verifier's
+// timed window; a mincore() over a 64 MiB mapping does cost ~0.1 ms, which delays
+// the NEXT challenge. That is why the cadence is coarse and why the headline
+// numbers come from the terminal experiments, which never enable this.
+struct Trace {
+    uint32_t every = 0;             // 0 = disabled
+    const char* mode = "";
+    const char* reader = "";        // "ram" | "pread" | "mmap"
+    const unsigned char* map = nullptr;  // region to inspect, if any (for mincore)
+    size_t bytes = 0;               // size of that region (may be a prefix, e.g. partial)
+    size_t total_bytes = 0;         // size of the buffer the verifier asked us to hold
+    unsigned char* vec = nullptr;   // mincore output, one byte per page
+    size_t vec_len = 0;
+};
+
+static const char kB64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+// Pack the low bit of each byte into a bitstream, then base64 it to stdout.
+static void b64_low_bits(const unsigned char* v, size_t count) {
+    uint32_t acc = 0; int have = 0;   // bits pending, MSB-first within the sextets
+    size_t nbytes = (count + 7) / 8;
+    for (size_t b = 0; b < nbytes; ++b) {
+        unsigned char byte = 0;
+        for (size_t i = b * 8; i < (b + 1) * 8 && i < count; ++i)
+            if (v[i] & 1u) byte |= (unsigned char)(1u << (i & 7));
+        acc = (acc << 8) | byte; have += 8;
+        while (have >= 6) { putchar(kB64[(acc >> (have - 6)) & 63]); have -= 6; }
+    }
+    if (have) { putchar(kB64[(acc << (6 - have)) & 63]); }
+    for (int pad = (int)(nbytes % 3); pad && pad < 3; ++pad) putchar('=');
+}
+
+static void emit_trace(Trace& tr, uint64_t served) {
+    size_t pages = tr.bytes / (size_t)g_page;
+    size_t resident = 0;
+    bool have_res = false;
+    if (tr.map && pages) {
+        if (tr.vec_len != pages) {
+            free(tr.vec);
+            tr.vec = (unsigned char*)calloc(pages, 1);
+            tr.vec_len = tr.vec ? pages : 0;
+        }
+        if (tr.vec && mincore((void*)tr.map, tr.bytes, tr.vec) == 0) {
+            have_res = true;
+            for (size_t i = 0; i < pages; ++i) resident += (tr.vec[i] & 1u);
+        }
+    }
+    size_t rb = io_read_bytes(), mf = major_faults();
+    // `pages` is the region we can actually inspect; `pages_total` is the buffer the
+    // verifier asked for. A pread reader maps nothing, so pages=0 — it holds no
+    // pages at all, which is exactly the claim the page map should show.
+    printf("@{\"t\":\"p\",\"served\":%llu,\"mode\":\"%s\",\"reader\":\"%s\","
+           "\"pages\":%zu,\"pages_total\":%zu,\"read_bytes\":%lld,\"majflt\":%lld,"
+           "\"probes\":%llu,\"res_pages\":%zu",
+           (unsigned long long)served, tr.mode, tr.reader, pages,
+           tr.total_bytes / (size_t)g_page,
+           rb == (size_t)-1 ? -1LL : (long long)rb,
+           mf == (size_t)-1 ? -1LL : (long long)mf,
+           (unsigned long long)g_probes_total, resident);
+    if (have_res) {
+        printf(",\"res\":\"");
+        b64_low_bits(tr.vec, pages);
+        putchar('"');
+    }
+    puts("}");
+}
+
 // Print the per-run I/O instrumentation for a disk-backed mode: bytes actually
 // fetched from the block layer and major faults taken (probes that could not be
 // served from the page cache). The line is stable and greppable — the experiment
@@ -114,7 +189,8 @@ static void report_io(const char* name, uint64_t probes,
 // Run the challenge loop with a given word loader (no std::function, so the
 // loader is inlined and doesn't distort the timing we're trying to expose).
 template <typename Load>
-static void challenge_loop(int cfd, Load&& load, uint64_t num_words, const char* name) {
+static void challenge_loop(int cfd, Load&& load, uint64_t num_words, const char* name,
+                           Trace* tr = nullptr) {
     uint64_t served = 0;
     for (;;) {
         Challenge ch{};
@@ -124,11 +200,15 @@ static void challenge_loop(int cfd, Load&& load, uint64_t num_words, const char*
         Response r{ answer_challenge_t(load, num_words, ch.nonce, ch.k, ch.lanes) };
         if (!send_all(cfd, &r, sizeof(r))) break;
         ++served;
+        // Strictly after the response: never inside the verifier's timed window.
+        if (tr && tr->every && (served % tr->every) == 0) emit_trace(*tr, served);
     }
+    if (tr && tr->every) emit_trace(*tr, served);
     printf("[cheat:%s] served %llu challenges\n", name, (unsigned long long)served);
 }
 
-static void serve(int cfd, Mode mode, double frac, const char* datafile) {
+static void serve(int cfd, Mode mode, double frac, const char* datafile,
+                  uint32_t trace_every) {
     set_low_latency(cfd);
 
     Hello hello{};
@@ -148,7 +228,10 @@ static void serve(int cfd, Mode mode, double frac, const char* datafile) {
         locked = lk;
         printf("[cheat:honest] resident+%s\n", lk ? "LOCKED" : "unlocked");
         Ready rd{ kMagic, (uint32_t)locked, 0 }; send_all(cfd, &rd, sizeof(rd));
-        challenge_loop(cfd, [buf](uint64_t idx){ return buf[idx]; }, num_words, "honest");
+        Trace tr{trace_every, "honest", "ram", (const unsigned char*)buf, bytes, bytes, nullptr, 0};
+        challenge_loop(cfd, [buf](uint64_t idx){ return buf[idx]; }, num_words, "honest",
+                       trace_every ? &tr : nullptr);
+        free(tr.vec);
         munlock(buf, bytes); munmap(buf, bytes);
         return;
     }
@@ -190,12 +273,15 @@ static void serve(int cfd, Mode mode, double frac, const char* datafile) {
                 memcpy((char*)ram + off, chunk, n);
             }
             off += want;
-            // Flush and drop what we've written every 8 MiB. Without this the
+            // Flush and drop what we've written every 2 MiB. Without this the
             // dirty page cache grows faster than writeback drains it, which
             // OOM-kills the process whenever its memory budget is smaller than
-            // the buffer — the exact regime this mode exists to measure.
+            // the buffer — the exact regime this mode exists to measure. The
+            // window is deliberately small: it bounds the dirty high-water mark to
+            // ~2 MiB, so a 32 MiB budget survives even when the host is busy
+            // enough to slow writeback (at 8 MiB it was marginal and died).
             unflushed += want;
-            if (unflushed >= (8u << 20) || off == bytes) {
+            if (unflushed >= (2u << 20) || off == bytes) {
                 size_t from = off - unflushed;
                 sync_file_range(fd, (off_t)from, (off_t)unflushed,
                                 SYNC_FILE_RANGE_WAIT_BEFORE | SYNC_FILE_RANGE_WRITE |
@@ -229,7 +315,10 @@ static void serve(int cfd, Mode mode, double frac, const char* datafile) {
         printf("[cheat:mmapdisk] 0%% pinned; probes read a mmap'd file view (no pread syscall)\n");
 
         size_t io0 = io_read_bytes(), mf0 = major_faults();
-        challenge_loop(cfd, [map](uint64_t idx){ return map[idx]; }, num_words, mname);
+        Trace tr{trace_every, mname, "mmap", (const unsigned char*)map, bytes, bytes, nullptr, 0};
+        challenge_loop(cfd, [map](uint64_t idx){ return map[idx]; }, num_words, mname,
+                       trace_every ? &tr : nullptr);
+        free(tr.vec);
         report_io(mname, g_probes_total, io0, io_read_bytes(), mf0, major_faults());
 
         munmap(map, bytes); close(fd); unlink(datafile);
@@ -239,27 +328,35 @@ static void serve(int cfd, Mode mode, double frac, const char* datafile) {
         printf("[cheat:disk] 0%% resident; every probe hits disk\n");
 
         size_t io0 = io_read_bytes(), mf0 = major_faults();
+        Trace tr{trace_every, mname, "pread", nullptr, 0, bytes, nullptr, 0};
         challenge_loop(cfd, [fd](uint64_t idx){
             return disk_word(fd, idx);
-        }, num_words, mname);
+        }, num_words, mname, trace_every ? &tr : nullptr);
+        free(tr.vec);
         report_io(mname, g_preads, io0, io_read_bytes(), mf0, major_faults());
     } else if (mode == PARTIAL) {
         mname = "partial";
         printf("[cheat:partial] %.0f%% resident, rest on disk (correct, bimodal)\n", frac * 100.0);
 
         size_t io0 = io_read_bytes(), mf0 = major_faults();
+        Trace tr{trace_every, mname, "partial", (const unsigned char*)ram,
+                 resident_words * 8, bytes, nullptr, 0};
         challenge_loop(cfd, [ram, resident_words, fd](uint64_t idx){
             if (idx < resident_words) return ram[idx];
             return disk_word(fd, idx);
-        }, num_words, mname);
+        }, num_words, mname, trace_every ? &tr : nullptr);
+        free(tr.vec);
         report_io(mname, g_preads, io0, io_read_bytes(), mf0, major_faults());
     } else { // FAKE
         mname = "fake";
         printf("[cheat:fake] %.0f%% resident, misses fabricated (fast, WRONG)\n", frac * 100.0);
+        Trace tr{trace_every, mname, "fabricate", (const unsigned char*)ram,
+                 resident_words * 8, bytes, nullptr, 0};
         challenge_loop(cfd, [ram, resident_words](uint64_t idx){
             if (idx < resident_words) return ram[idx];
             return mix64(idx * 0x9E3779B97F4A7C15ULL + 1); // plausible-looking garbage
-        }, num_words, mname);
+        }, num_words, mname, trace_every ? &tr : nullptr);
+        free(tr.vec);
     }
 
     if (ram) { munlock(ram, resident_words * 8); munmap(ram, resident_words * 8); }
@@ -271,7 +368,7 @@ int main(int argc, char** argv) {
     long ps = sysconf(_SC_PAGESIZE); if (ps > 0) g_page = ps;
 
     uint16_t port = kDefaultPort;
-    Mode mode = HONEST; double frac = 0.5;
+    Mode mode = HONEST; double frac = 0.5; uint32_t trace_every = 0;
     const char* datafile = "/tmp/memchal_cheat.bin";
     for (int i = 1; i < argc; ++i) {
         if      (!strcmp(argv[i], "--port")  && i + 1 < argc) port = (uint16_t)atoi(argv[++i]);
@@ -285,6 +382,9 @@ int main(int argc, char** argv) {
         }
         else if (!strcmp(argv[i], "--frac") && i + 1 < argc) frac = atof(argv[++i]);
         else if (!strcmp(argv[i], "--datafile") && i + 1 < argc) datafile = argv[++i];
+        // Live trace for the browser demo: emit a counters+residency event every N
+        // challenges. Off by default — the experiments must stay uninstrumented.
+        else if (!strcmp(argv[i], "--trace") && i + 1 < argc) trace_every = (uint32_t)strtoul(argv[++i], nullptr, 10);
     }
 
     int lfd = make_listener(port);
@@ -294,7 +394,7 @@ int main(int argc, char** argv) {
         sockaddr_in ca{}; socklen_t cl = sizeof(ca);
         int cfd = accept(lfd, (sockaddr*)&ca, &cl);
         if (cfd < 0) { if (errno == EINTR) continue; perror("accept"); break; }
-        serve(cfd, mode, frac, datafile);
+        serve(cfd, mode, frac, datafile, trace_every);
         close(cfd);
     }
     close(lfd);

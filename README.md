@@ -52,6 +52,7 @@ tests/          kat.cpp (known-answer test), run_tests.sh (KAT + invariants)
 docs/decisions/       ADRs — why the harness/claims are what they are
 docs/investigations/  analyses (question → script → results) backing the ADRs,
                       incl. disk-is-syscalls/ and mmap-needs-ram/
+demo/           bridge.py (local server driving real containers) + static/ (live page)
 results/        generated CSVs/plots (gitignored)
 Dockerfile, run.sh, Makefile
 ```
@@ -87,6 +88,34 @@ accounting). Knobs: `MB K LANES N WARMUP FIT_MEM STARVED_MEM CPUS`.
 Running natively on real Linux hardware is the same commands without the VM (see
 NEXT_STEPS — that is the environment that would settle the storage-physics and
 core-affinity questions this VM cannot).
+
+## The live demo (browser)
+
+```bash
+python3 demo/bridge.py          # on the host; then open http://127.0.0.1:8777
+```
+
+The same two experiments, driven interactively. Pick a prover (honest, mmapdisk,
+disk, partial, fake), give it a RAM budget, and interrogate it. Nothing is
+simulated: each run starts a real prover container at that budget and a real
+verifier, and every number on the page comes off their stdout.
+
+- **Buffer page map** — one cell per 4 KiB page. Which pages were probed comes from
+  the verifier's own index sequence (`answer_challenge_t` with a recording loader);
+  whether a page was resident comes from the prover calling `mincore()` on its own
+  mapping. Blue = served from memory, orange = faulted through to storage.
+- **Latency per challenge / where it breaks** — log axis (40 µs and 60 ms share a
+  screen); walk the budget down and the curve finds the cliff.
+- **Challenge log** — nonce, response, latency, and whether it matched the
+  verifier's recomputation. This is where `fake` gives itself away: fast, and wrong
+  every time.
+
+**The demo is not the measurement.** Live tracing (`--stream` / `--trace`) emits an
+event and a periodic `mincore()` snapshot per challenge, *after* the timed round
+trip, so it's outside the measurement window but it spaces challenges out. The
+numbers in this README come from the terminal experiments, which never enable
+tracing. A prover starved below ~half the buffer can be OOM-killed mid-transfer;
+the bridge detects that, retries once, and says so.
 
 ## How the challenge binds to memory
 
