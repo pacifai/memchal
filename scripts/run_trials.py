@@ -34,6 +34,9 @@ MODE_MAP = {
     "partial":  {"server": "cheating_prover", "k_override": None, "cheat_mode": "partial"},
     "fake":     {"server": "cheating_prover", "k_override": None, "cheat_mode": "fake"},
     "mmapdisk": {"server": "cheating_prover", "k_override": None, "cheat_mode": "mmapdisk"},
+    "recompute":  {"server": "cheating_prover", "k_override": None, "cheat_mode": "recompute"},
+    "prefetch":   {"server": "cheating_prover", "k_override": None, "cheat_mode": "prefetch"},
+    "precompute": {"server": "cheating_prover", "k_override": None, "cheat_mode": "precompute"},
 }
 
 # Port offsets per mode from the base --port
@@ -44,6 +47,9 @@ PORT_OFFSET = {
     "partial":  2,
     "fake":     3,
     "mmapdisk": 4,
+    "recompute":  5,
+    "prefetch":   6,
+    "precompute": 7,
 }
 
 PCTLS = ["min", "p50", "p90", "p99", "p99.9", "max"]
@@ -107,7 +113,12 @@ def run_one(port: int, k: int, a, out_json: str) -> dict:
     cmd = ["./verifier", "--host", "127.0.0.1", "--port", str(port),
            "--mb", str(a.mb), "--k", str(k), "--lanes", str(a.lanes),
            "--n", str(a.n), "--warmup", str(a.warmup),
+           "--gen", a.gen, "--nonce", a.nonce, "--gap-us", str(a.gap_us),
            "--csv", "/dev/null", "--json", out_json, "--label", a.label]
+    # floor is k=0 (no probes) so chaining is meaningless there; skip it to avoid
+    # the k/lanes>=16 chain-depth floor tripping on the floor mode.
+    if a.chain == "dependent" and k > 0:
+        cmd += ["--chain", "dependent"]
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
     return m.load_json(out_json)
 
@@ -124,6 +135,13 @@ def main():
     ap.add_argument("--lanes", type=int, default=32)
     ap.add_argument("--mb", type=float, default=64.0)
     ap.add_argument("--warmup", type=int, default=300)
+    # generator / access-pattern / nonce controls (the defenses) — applied to every
+    # verifier run in the session, so recompute/prefetch/precompute can be measured
+    # by the harness against each defense, not just watched in the demo.
+    ap.add_argument("--gen", default="splitmix64", choices=["splitmix64", "chacha"])
+    ap.add_argument("--chain", default="independent", choices=["independent", "dependent"])
+    ap.add_argument("--nonce", default="sequential", choices=["sequential", "random"])
+    ap.add_argument("--gap-us", dest="gap_us", type=int, default=0)
     ap.add_argument("--port", type=int, default=9700)
     ap.add_argument("--label", default="")
     ap.add_argument("--tmp", default="/tmp/mc_trials")
@@ -422,6 +440,7 @@ def main():
             "mb": args.mb,
             "warmup": args.warmup,
             "shuffle_seed": shuffle_seed,
+            "gen": args.gen, "chain": args.chain, "nonce": args.nonce, "gap_us": args.gap_us,
         },
         "executed_orders": executed_orders,
         "modes": {
