@@ -20,18 +20,25 @@
 // byte-identical to the verifier's local recomputation — only latency (disk/
 // partial) or correctness (fake) exposes the cheat.
 #include "common.hpp"
+#include <cassert>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
+#include <algorithm>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
+#include <unordered_map>
+#include <mutex>
+#include <thread>
 
 using namespace mc;
 
-enum Mode { HONEST, DISK, PARTIAL, FAKE, MMAP_DISK };
+enum Mode { HONEST, DISK, PARTIAL, FAKE, MMAP_DISK, RECOMPUTE, PREFETCH, PRECOMPUTE };
 
 static long g_page = 4096;
+static bool g_allow_unlocked = false;  // --allow-unlocked: skip honest-mode lock refusal
 
 // Count of pread() calls made in disk_word(); instrumentation only.
 static uint64_t g_preads = 0;
@@ -76,7 +83,13 @@ static inline uint64_t disk_word(int fd, uint64_t idx) {
     uint64_t w = 0;
     ++g_preads;
     ssize_t got = pread(fd, &w, sizeof(w), (off_t)(idx * 8));
-    (void)got; // best-effort; a failed probe just folds in 0
+    if (got != (ssize_t)sizeof(w)) {
+        // A partial or failed read silently folds in 0, producing a wrong hash.
+        // Make this loud so real I/O errors are not masked as plausible answers.
+        fprintf(stderr, "[cheat:disk] pread error at idx=%llu: got=%zd errno=%d\n",
+                (unsigned long long)idx, got, errno);
+        assert(got == (ssize_t)sizeof(w) && "pread short read — real I/O error");
+    }
     return w;
 }
 
@@ -197,7 +210,8 @@ static void challenge_loop(int cfd, Load&& load, uint64_t num_words, const char*
         if (!recv_all(cfd, &ch, sizeof(ch))) break;
         if (ch.flags & kFlagTerminate) break;
         g_probes_total += ch.k;
-        Response r{ answer_challenge_t(load, num_words, ch.nonce, ch.k, ch.lanes) };
+        bool chained = (ch.flags & kFlagChained) != 0;
+        Response r{ answer_challenge_t(load, num_words, ch.nonce, ch.k, ch.lanes, chained) };
         if (!send_all(cfd, &r, sizeof(r))) break;
         ++served;
         // Strictly after the response: never inside the verifier's timed window.
@@ -205,6 +219,237 @@ static void challenge_loop(int cfd, Load&& load, uint64_t num_words, const char*
     }
     if (tr && tr->every) emit_trace(*tr, served);
     printf("[cheat:%s] served %llu challenges\n", name, (unsigned long long)served);
+}
+
+// ---------------------------------------------------------------------------
+// PRECOMPUTE mode — the "third escape hatch" attack:
+//
+// Strategy:
+//   • Keep the data on disk (mmap + MADV_RANDOM), hold nothing pinned.
+//   • Serve loop (main thread): recv challenge, look up nonce in a cache.
+//     Hit -> respond instantly. Miss -> compute from mmap (slow), then cache.
+//   • Background precompute thread: once 2+ challenges seen, infer the step
+//     (nonce_{i+1} - nonce_i), and precompute answers for the next K predicted
+//     nonces into the cache, using the last-seen k/lanes/flags.
+//
+// Under sequential nonces + gap: the background thread stays ahead of the
+// serve loop -> all cache hits -> latency ≈ transport floor with data on disk.
+// Under random nonces: predictions always miss -> serve loop computes from
+// disk on every challenge -> caught by the timing detector.
+// ---------------------------------------------------------------------------
+
+// Shared state between the serve loop and the background precompute thread.
+struct PrecomputeState {
+    std::mutex mtx;
+
+    // Cache: nonce -> answer.
+    std::unordered_map<uint64_t, uint64_t> cache;
+
+    // Last two nonces seen (for step inference) and their challenge params.
+    uint64_t last_nonce  = 0;
+    uint64_t prev_nonce  = 0;
+    uint32_t last_k      = 0;
+    uint32_t last_lanes  = 0;
+    uint32_t last_flags  = 0;
+    uint64_t seen        = 0;   // number of challenges received so far
+
+    bool done = false;          // set by the serve loop when the session ends
+};
+
+static constexpr uint64_t kPrecomputeLookahead = 64;  // nonces to precompute ahead
+
+// Background thread: infer step, precompute the next kPrecomputeLookahead nonces.
+static void precompute_worker(PrecomputeState* st, uint64_t* mmap_buf, uint64_t num_words) {
+    for (;;) {
+        // Snapshot shared state under lock.
+        uint64_t step = 0, base_nonce = 0;
+        uint32_t k = 0, lanes = 0, flags = 0;
+        uint64_t seen = 0;
+        {
+            std::unique_lock<std::mutex> lk(st->mtx);
+            if (st->done) return;
+            seen = st->seen;
+            if (seen < 2) {
+                // Not enough samples yet; spin briefly then retry.
+                lk.unlock();
+                // Busy-wait is fine here: we only enter this path for the very
+                // first ~2 challenges. After that we loop in the precompute body.
+                struct timespec ts{0, 1000000}; // 1 ms
+                nanosleep(&ts, nullptr);
+                continue;
+            }
+            step  = st->last_nonce - st->prev_nonce;
+            base_nonce = st->last_nonce;
+            k     = st->last_k;
+            lanes = st->last_lanes;
+            flags = st->last_flags;
+        }
+
+        // Precompute the next kPrecomputeLookahead predicted nonces.
+        bool chained = (flags & kFlagChained) != 0;
+        for (uint64_t j = 1; j <= kPrecomputeLookahead; ++j) {
+            uint64_t predicted_nonce = base_nonce + step * j;
+
+            // Check if already cached (avoid redundant computation).
+            {
+                std::unique_lock<std::mutex> lk(st->mtx);
+                if (st->done) return;
+                if (st->cache.count(predicted_nonce)) continue;
+            }
+
+            // Compute from mmap (may fault, but we have offline time during gap_us).
+            uint64_t ans = answer_challenge_t(
+                [mmap_buf](uint64_t idx) -> uint64_t { return mmap_buf[idx]; },
+                num_words, predicted_nonce, k, lanes, chained);
+
+            {
+                std::unique_lock<std::mutex> lk(st->mtx);
+                if (st->done) return;
+                // Only insert if the params haven't changed under us.
+                if (st->last_k == k && st->last_lanes == lanes && st->last_flags == flags)
+                    st->cache[predicted_nonce] = ans;
+            }
+        }
+
+        // After precomputing, re-check if done; otherwise loop to stay ahead.
+        {
+            std::unique_lock<std::mutex> lk(st->mtx);
+            if (st->done) return;
+            // Update base_nonce snapshot so next iteration looks further ahead.
+            // (The serve loop will have advanced last_nonce in the meantime.)
+        }
+        // Small yield so the serve loop can acquire the mutex.
+        struct timespec ts{0, 100000}; // 0.1 ms
+        nanosleep(&ts, nullptr);
+    }
+}
+
+static void serve_precompute(int cfd, const char* datafile, uint32_t trace_every) {
+    set_low_latency(cfd);
+
+    Hello hello{};
+    if (!recv_all(cfd, &hello, sizeof(hello)) || hello.magic != kMagic) {
+        fprintf(stderr, "[cheat:precompute] bad hello\n"); return;
+    }
+    size_t bytes = ((size_t)hello.buffer_bytes + 7) & ~size_t(7);
+    uint64_t num_words = bytes / 8;
+
+    // Stream buffer to disk (never hold a full anonymous copy in RAM).
+    int fd = open(datafile, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) { perror("[precompute] open datafile"); return; }
+
+    {
+        static const size_t kChunk = 1u << 20; // 1 MiB
+        char* chunk = (char*)malloc(kChunk);
+        if (!chunk) { fprintf(stderr, "[cheat:precompute] chunk alloc failed\n"); close(fd); return; }
+        size_t off = 0, unflushed = 0;
+        bool ok = true;
+        while (off < bytes) {
+            size_t want = bytes - off < kChunk ? bytes - off : kChunk;
+            if (!recv_all(cfd, chunk, want)) { ok = false; break; }
+            if (!write_all(fd, chunk, want)) { ok = false; break; }
+            off += want;
+            unflushed += want;
+            if (unflushed >= (2u << 20) || off == bytes) {
+                size_t from = off - unflushed;
+                sync_file_range(fd, (off_t)from, (off_t)unflushed,
+                                SYNC_FILE_RANGE_WAIT_BEFORE | SYNC_FILE_RANGE_WRITE |
+                                SYNC_FILE_RANGE_WAIT_AFTER);
+                posix_fadvise(fd, (off_t)from, (off_t)unflushed, POSIX_FADV_DONTNEED);
+                unflushed = 0;
+            }
+        }
+        free(chunk);
+        if (!ok) {
+            fprintf(stderr, "[cheat:precompute] short data / file write failed\n");
+            close(fd); return;
+        }
+    }
+    fsync(fd);
+    posix_fadvise(fd, 0, bytes, POSIX_FADV_RANDOM);
+    posix_fadvise(fd, 0, bytes, POSIX_FADV_DONTNEED);
+
+    // mmap the file: no pinned RAM, reads fault on demand.
+    uint64_t* mmap_buf = (uint64_t*)mmap(nullptr, bytes, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (mmap_buf == MAP_FAILED) {
+        perror("[precompute] mmap"); close(fd); return;
+    }
+    madvise(mmap_buf, bytes, MADV_RANDOM);
+
+    // Send Ready (not locked).
+    Ready rd{ kMagic, 0, 0 };
+    send_all(cfd, &rd, sizeof(rd));
+
+    printf("[cheat:precompute] 0%% pinned; data on disk via mmap; background precompute thread started\n");
+
+    PrecomputeState st;
+    std::thread worker(precompute_worker, &st, mmap_buf, num_words);
+
+    uint64_t served = 0, cache_hits = 0;
+    // precompute is mmap-backed: mincore() over the mmap shows which pages the
+    // background thread has actually staged into the page cache.
+    Trace tr_pc{trace_every, "precompute", "mmap", (const unsigned char*)mmap_buf, bytes, bytes, nullptr, 0};
+    for (;;) {
+        Challenge ch{};
+        if (!recv_all(cfd, &ch, sizeof(ch))) break;
+        if (ch.flags & kFlagTerminate) break;
+
+        uint64_t ans = 0;
+        bool hit = false;
+
+        {
+            std::unique_lock<std::mutex> lk(st.mtx);
+            auto it = st.cache.find(ch.nonce);
+            if (it != st.cache.end()) {
+                ans = it->second;
+                hit = true;
+            }
+            // Update shared state for the background thread to track.
+            st.prev_nonce  = st.last_nonce;
+            st.last_nonce  = ch.nonce;
+            st.last_k      = ch.k;
+            st.last_lanes  = ch.lanes;
+            st.last_flags  = ch.flags;
+            st.seen++;
+        }
+
+        if (!hit) {
+            // Cache miss: compute from mmap now (slow path).
+            bool chained = (ch.flags & kFlagChained) != 0;
+            ans = answer_challenge_t(
+                [mmap_buf](uint64_t idx) -> uint64_t { return mmap_buf[idx]; },
+                num_words, ch.nonce, ch.k, ch.lanes, chained);
+            // Insert into cache for potential reuse.
+            std::unique_lock<std::mutex> lk(st.mtx);
+            st.cache[ch.nonce] = ans;
+        } else {
+            ++cache_hits;
+        }
+
+        Response r{ ans };
+        if (!send_all(cfd, &r, sizeof(r))) break;
+        ++served;
+        // Strictly after the response: never inside the verifier's timed window.
+        if (tr_pc.every && (served % tr_pc.every) == 0) emit_trace(tr_pc, served);
+    }
+    if (tr_pc.every) emit_trace(tr_pc, served);
+    free(tr_pc.vec);
+
+    // Signal the background thread to stop and join it.
+    {
+        std::unique_lock<std::mutex> lk(st.mtx);
+        st.done = true;
+    }
+    worker.join();
+
+    printf("[cheat:precompute] served %llu challenges, cache hits=%llu (%.1f%%)\n",
+           (unsigned long long)served,
+           (unsigned long long)cache_hits,
+           served > 0 ? 100.0 * (double)cache_hits / (double)served : 0.0);
+
+    munmap(mmap_buf, bytes);
+    close(fd);
+    unlink(datafile);
 }
 
 static void serve(int cfd, Mode mode, double frac, const char* datafile,
@@ -227,12 +472,63 @@ static void serve(int cfd, Mode mode, double frac, const char* datafile,
         if (!recv_all(cfd, buf, bytes)) { fprintf(stderr, "[cheat] short data\n"); munmap(buf, bytes); return; }
         locked = lk;
         printf("[cheat:honest] resident+%s\n", lk ? "LOCKED" : "unlocked");
+        if (!lk && !g_allow_unlocked) {
+            fprintf(stderr, "[cheat:honest] FATAL: memory not locked (need CAP_IPC_LOCK / `ulimit -l`, or pass --allow-unlocked)\n");
+            munmap(buf, bytes); exit(1);
+        }
         Ready rd{ kMagic, (uint32_t)locked, 0 }; send_all(cfd, &rd, sizeof(rd));
         Trace tr{trace_every, "honest", "ram", (const unsigned char*)buf, bytes, bytes, nullptr, 0};
         challenge_loop(cfd, [buf](uint64_t idx){ return buf[idx]; }, num_words, "honest",
                        trace_every ? &tr : nullptr);
         free(tr.vec);
         munlock(buf, bytes); munmap(buf, bytes);
+        return;
+    }
+
+    if (mode == RECOMPUTE) {
+        // ADVERSARY: recompute attack against a splitmix64-generated buffer.
+        //
+        // Strategy: receive buf[0] from the incoming stream, recover the seed via
+        // splitmix64_recover_seed(), then FREE the entire buffer and answer every
+        // challenge using the O(1) splitmix64_word() formula.
+        //
+        // Against a splitmix64-generated buffer this reproduces every word exactly
+        // → 0 verification errors, near-zero memory.
+        // Against a chacha20-generated buffer the "recovered" seed is bogus →
+        // wrong words → verification errors (correctness detector catches it).
+        //
+        // Receive just the first word, then drain-and-discard the rest of the stream.
+        uint64_t word0 = 0;
+        if (!recv_all(cfd, &word0, 8)) { fprintf(stderr, "[cheat:recompute] short data\n"); return; }
+        uint64_t recovered_seed = splitmix64_recover_seed(word0);
+
+        // Drain the rest of the incoming buffer (we don't store it).
+        {
+            static const size_t kDrain = 1u << 20;
+            char* chunk = (char*)malloc(kDrain);
+            if (!chunk) { fprintf(stderr, "[cheat:recompute] alloc failed\n"); return; }
+            size_t remaining = bytes - 8;
+            while (remaining > 0) {
+                size_t want = remaining < kDrain ? remaining : kDrain;
+                if (!recv_all(cfd, chunk, want)) { free(chunk); return; }
+                remaining -= want;
+            }
+            free(chunk);
+        }
+
+        printf("[cheat:recompute] holding ~0 data; recovered seed=0x%016llx from buf[0]=0x%016llx\n",
+               (unsigned long long)recovered_seed, (unsigned long long)word0);
+
+        Ready rd{ kMagic, 0, 0 };
+        send_all(cfd, &rd, sizeof(rd));
+
+        // recompute holds NO mapping — set map=nullptr and bytes=0 so emit_trace
+        // emits pages=0, no residency bitmap: every probe was regenerated, not read.
+        Trace tr{trace_every, "recompute", "regenerate", nullptr, 0, bytes, nullptr, 0};
+        challenge_loop(cfd,
+            [recovered_seed](uint64_t idx){ return splitmix64_word(recovered_seed, idx); },
+            num_words, "recompute", trace_every ? &tr : nullptr);
+        free(tr.vec);
         return;
     }
 
@@ -300,7 +596,89 @@ static void serve(int cfd, Mode mode, double frac, const char* datafile,
     Ready rd{ kMagic, (uint32_t)locked, 0 };
     send_all(cfd, &rd, sizeof(rd));
 
-    if (mode == MMAP_DISK) {
+    if (mode == PREFETCH) {
+        // ADVERSARY (timing attack): data on disk, accessed via mmap+MADV_RANDOM.
+        // For each challenge, enumerate the probe indices up-front (dry run with a
+        // zero-returning loader), then issue MADV_WILLNEED on those pages
+        // asynchronously before reading for real.
+        //
+        // With --chain independent: the indices are data-independent, so the dry
+        // run yields the *true* indices -> prefetch hits the right pages -> fewer
+        // serialized faults -> faster than cold serial reads under memory pressure.
+        //
+        // With --chain dependent: the dry-run indices are computed from zeros
+        // (wrong) -> prefetch hits wrong pages -> the real read still faults
+        // serially -> slower (defense wins). Correctness is always 0 errors.
+        mname = "prefetch";
+        uint64_t* map = (uint64_t*)mmap(nullptr, bytes, PROT_READ, MAP_PRIVATE, fd, 0);
+        if (map == MAP_FAILED) { perror("mmap file (prefetch)"); close(fd); return; }
+        madvise(map, bytes, MADV_RANDOM); // no readahead; we control it manually
+        printf("[cheat:prefetch] 0%% pinned; enumerate indices then MADV_WILLNEED before answering\n");
+
+        size_t io0 = io_read_bytes(), mf0 = major_faults();
+
+        // Reserve a scratch buffer for recorded indices (worst-case k per challenge).
+        // We'll use the verifier's k as the upper bound — reuse across challenges.
+        uint64_t served = 0;
+        Trace tr_pf{trace_every, mname, "mmap", (const unsigned char*)map, bytes, bytes, nullptr, 0};
+        for (;;) {
+            Challenge ch{};
+            if (!recv_all(cfd, &ch, sizeof(ch))) break;
+            if (ch.flags & kFlagTerminate) break;
+            g_probes_total += ch.k;
+            bool chained = (ch.flags & kFlagChained) != 0;
+
+            // --- Phase 1: dry run — enumerate indices (data-independent values if
+            //     !chained, zero-derived values if chained — intentionally wrong). ---
+            std::vector<uint64_t> recorded;
+            recorded.reserve(ch.k);
+            answer_challenge_t(
+                [&](uint64_t idx) -> uint64_t { recorded.push_back(idx); return (uint64_t)0; },
+                num_words, ch.nonce, ch.k, ch.lanes, chained);
+
+            // --- Phase 2: prefetch — issue MADV_WILLNEED on the pages containing
+            //     the recorded indices (deduplicated). This is async: the kernel
+            //     reads them into the page cache in the background. ---
+            {
+                // Collect unique page base addresses.
+                std::vector<void*> pages_to_advise;
+                pages_to_advise.reserve(recorded.size());
+                for (uint64_t idx : recorded) {
+                    char* addr = (char*)map + idx * 8;
+                    // Align down to page boundary.
+                    char* page_addr = (char*)((uintptr_t)addr & ~(uintptr_t)(g_page - 1));
+                    pages_to_advise.push_back(page_addr);
+                }
+                // Sort and deduplicate.
+                std::sort(pages_to_advise.begin(), pages_to_advise.end());
+                pages_to_advise.erase(
+                    std::unique(pages_to_advise.begin(), pages_to_advise.end()),
+                    pages_to_advise.end());
+                // Advise each unique page.
+                for (void* pg : pages_to_advise) {
+                    madvise(pg, (size_t)g_page, MADV_WILLNEED);
+                }
+            }
+
+            // --- Phase 3: answer for real with the actual mmap loader. ---
+            uint64_t ans = answer_challenge_t(
+                [map](uint64_t idx) -> uint64_t { return map[idx]; },
+                num_words, ch.nonce, ch.k, ch.lanes, chained);
+
+            Response r{ ans };
+            if (!send_all(cfd, &r, sizeof(r))) break;
+            ++served;
+            // Strictly after the response: never inside the verifier's timed window.
+            if (tr_pf.every && (served % tr_pf.every) == 0) emit_trace(tr_pf, served);
+        }
+        if (tr_pf.every) emit_trace(tr_pf, served);
+
+        report_io(mname, g_probes_total, io0, io_read_bytes(), mf0, major_faults());
+        printf("[cheat:%s] served %llu challenges\n", mname, (unsigned long long)served);
+        free(tr_pf.vec);
+        munmap(map, bytes); close(fd); unlink(datafile);
+        return;
+    } else if (mode == MMAP_DISK) {
         // ADVERSARY: data on disk (page-cache DONTNEED'd), but read via a
         // memory-mapped view -> NO per-probe syscall. Falsification test: if
         // this answers at ~honest speed, the "disk" timing signal was syscall
@@ -374,27 +752,35 @@ int main(int argc, char** argv) {
         if      (!strcmp(argv[i], "--port")  && i + 1 < argc) port = (uint16_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--mode")  && i + 1 < argc) {
             const char* m = argv[++i];
-            if      (!strcmp(m, "honest"))   mode = HONEST;
-            else if (!strcmp(m, "disk"))     mode = DISK;
-            else if (!strcmp(m, "partial"))  mode = PARTIAL;
-            else if (!strcmp(m, "fake"))     mode = FAKE;
-            else if (!strcmp(m, "mmapdisk")) mode = MMAP_DISK;
+            if      (!strcmp(m, "honest"))      mode = HONEST;
+            else if (!strcmp(m, "disk"))        mode = DISK;
+            else if (!strcmp(m, "partial"))     mode = PARTIAL;
+            else if (!strcmp(m, "fake"))        mode = FAKE;
+            else if (!strcmp(m, "mmapdisk"))    mode = MMAP_DISK;
+            else if (!strcmp(m, "recompute"))   mode = RECOMPUTE;
+            else if (!strcmp(m, "prefetch"))    mode = PREFETCH;
+            else if (!strcmp(m, "precompute"))  mode = PRECOMPUTE;
         }
         else if (!strcmp(argv[i], "--frac") && i + 1 < argc) frac = atof(argv[++i]);
         else if (!strcmp(argv[i], "--datafile") && i + 1 < argc) datafile = argv[++i];
         // Live trace for the browser demo: emit a counters+residency event every N
         // challenges. Off by default — the experiments must stay uninstrumented.
         else if (!strcmp(argv[i], "--trace") && i + 1 < argc) trace_every = (uint32_t)strtoul(argv[++i], nullptr, 10);
+        else if (!strcmp(argv[i], "--allow-unlocked")) g_allow_unlocked = true;
     }
 
     int lfd = make_listener(port);
-    const char* names[] = { "honest", "disk", "partial", "fake", "mmapdisk" };
+    const char* names[] = { "honest", "disk", "partial", "fake", "mmapdisk", "recompute", "prefetch", "precompute" };
     printf("[cheat] listening on 0.0.0.0:%u  mode=%s frac=%.2f\n", port, names[mode], frac);
     for (;;) {
         sockaddr_in ca{}; socklen_t cl = sizeof(ca);
         int cfd = accept(lfd, (sockaddr*)&ca, &cl);
         if (cfd < 0) { if (errno == EINTR) continue; perror("accept"); break; }
-        serve(cfd, mode, frac, datafile, trace_every);
+        if (mode == PRECOMPUTE) {
+            serve_precompute(cfd, datafile, trace_every);
+        } else {
+            serve(cfd, mode, frac, datafile, trace_every);
+        }
         close(cfd);
     }
     close(lfd);

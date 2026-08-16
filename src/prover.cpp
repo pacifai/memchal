@@ -120,7 +120,8 @@ static void serve(int cfd) {
         Challenge ch{};
         if (!recv_all(cfd, &ch, sizeof(ch))) break;
         if (ch.flags & kFlagTerminate) break;
-        Response resp{ answer_challenge(buf, num_words, ch.nonce, ch.k, ch.lanes) };
+        bool chained = (ch.flags & kFlagChained) != 0;
+        Response resp{ answer_challenge(buf, num_words, ch.nonce, ch.k, ch.lanes, chained) };
         if (!send_all(cfd, &resp, sizeof(resp))) break;
         ++served;
     }

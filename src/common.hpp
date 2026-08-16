@@ -19,12 +19,20 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include "chacha20.hpp"
 
 namespace mc {
 
 constexpr uint64_t kMagic       = 0x4D454D4348414C31ULL; // "MEMCHAL1"
 constexpr uint16_t kDefaultPort = 9099;
 constexpr uint32_t kFlagTerminate = 1u;
+constexpr uint32_t kFlagChained   = 2u;
+
+// Minimum effective chain depth (k / lanes) required when --chain dependent.
+// At depth D, an attacker can pipeline across lanes and achieve ~1/D of the
+// latency-hardness compared to a fully serial chain.  Below this floor the
+// dependent access mode offers negligible defense.
+constexpr uint32_t kMinChainDepth = 16u;
 
 // Fixed-layout wire messages. Native byte order: this PoC assumes prover and
 // verifier run on the same-endian machines (true for loopback / x86 / ARM LE).
@@ -39,12 +47,134 @@ struct Response  { uint64_t hash; };
 // Hashing / sampling core
 // ---------------------------------------------------------------------------
 
-// splitmix64: fast, well-distributed PRNG step. GPU PORT: identical.
-static inline uint64_t splitmix64(uint64_t& s) {
-    uint64_t z = (s += 0x9E3779B97F4A7C15ULL);
-    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
-    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+// splitmix64 finalizer constants.
+static constexpr uint64_t kSM64_C1  = 0xBF58476D1CE4E5B9ULL;
+static constexpr uint64_t kSM64_C2  = 0x94D049BB133111EBULL;
+static constexpr uint64_t kSM64_GOLDEN = 0x9E3779B97F4A7C15ULL;
+
+// The 3-step mixing half of splitmix64 (no increment).  Called by splitmix64
+// and also by the recompute-adversary helpers below.
+static inline uint64_t splitmix64_finalize(uint64_t z) {
+    z = (z ^ (z >> 30)) * kSM64_C1;
+    z = (z ^ (z >> 27)) * kSM64_C2;
     return z ^ (z >> 31);
+}
+
+// splitmix64: fast, well-distributed PRNG step. GPU PORT: identical.
+// Behavior is bit-identical to the original one-liner.
+static inline uint64_t splitmix64(uint64_t& s) {
+    s += kSM64_GOLDEN;
+    return splitmix64_finalize(s);
+}
+
+// O(1) random-access: returns the word that fill_random would place at buf[idx]
+// when started with the given seed.  Equivalent to advancing the state by
+// (idx+1) increments from seed, then finalizing.
+static inline uint64_t splitmix64_word(uint64_t seed, uint64_t idx) {
+    return splitmix64_finalize(seed + (idx + 1) * kSM64_GOLDEN);
+}
+
+// ---------------------------------------------------------------------------
+// splitmix64 seed recovery from a single output word.
+//
+// The finalizer f(z) is a bijection on uint64_t; its inverse lets us recover
+// z (= seed + GOLDEN) from any output word w = f(z), then seed = z - GOLDEN.
+// Used by the recompute adversary to reconstruct the seed from buf[0].
+// ---------------------------------------------------------------------------
+
+// Newton-inversion: given a uint64_t a (odd), find inv such that a*inv == 1
+// (mod 2^64).  Five Hensel-lifting steps suffice for 64 bits.
+static inline uint64_t inv_mul(uint64_t a) {
+    uint64_t inv = a; // initial approx: a*a == 1 mod 8 when a is odd
+    for (int i = 0; i < 5; ++i) inv *= 2 - a * inv;
+    return inv;
+}
+
+// Recover x from y = x ^ (x >> s) for right-shifts s in [1,63].
+// Iterative fix-point: applying x = y ^ (x >> s) ceil(64/s) times
+// converges to the unique solution because each pass propagates the
+// correct bits one window of s further down.
+static inline uint64_t unxorshift_r(uint64_t y, int s) {
+    uint64_t x = y;
+    int iters = (63 + s) / s;   // ceil(64/s)
+    for (int i = 0; i < iters; ++i)
+        x = y ^ (x >> s);
+    return x;
+}
+
+// Invert the splitmix64 finalizer.
+static inline uint64_t splitmix64_unfinalize(uint64_t w) {
+    // Reverse step 3: w = z ^ (z >> 31)
+    uint64_t z = unxorshift_r(w, 31);
+    // Reverse step 2: z = (prev ^ (prev >> 27)) * C2  =>  prev = z * inv(C2)
+    z = z * inv_mul(kSM64_C2);
+    // Reverse step 1 unmixing: z = prev ^ (prev >> 27)
+    z = unxorshift_r(z, 27);
+    // Reverse step 1 multiply
+    z = z * inv_mul(kSM64_C1);
+    // Reverse step 0: z = prev ^ (prev >> 30)
+    z = unxorshift_r(z, 30);
+    return z;
+}
+
+// Recover the seed from buf[0] = splitmix64_finalize(seed + GOLDEN).
+// After recovery: splitmix64_word(seed, idx) == buf[idx] for all idx.
+static inline uint64_t splitmix64_recover_seed(uint64_t word0) {
+    return splitmix64_unfinalize(word0) - kSM64_GOLDEN;
+}
+
+// ---------------------------------------------------------------------------
+// Generator selection
+// ---------------------------------------------------------------------------
+enum class Gen { SPLITMIX64, CHACHA20 };
+
+// Fill a uint64_t buffer using the selected generator.
+//
+// SPLITMIX64 (default): produces exactly what fill_random() produced —
+//   buf[i] = splitmix64_finalize(s + (i+1)*GOLDEN), where s = (seed ? seed : DEFAULT).
+//
+// CHACHA20: derive a 32-byte key from the 64-bit seed by running splitmix64
+//   four times (words 0..3 of the sequence, little-endian bytes), use a
+//   zero nonce and counter0=0.  The resulting keystream bytes are assembled
+//   into uint64_t words little-endian (buf[i] = LE64 of bytes [8i..8i+7]).
+//   The seed cannot be recovered from the output, so the recompute adversary
+//   produces wrong words against a ChaCha20-generated buffer.
+static inline void fill_buffer(uint64_t* buf, uint64_t num_words,
+                                uint64_t seed, Gen gen) {
+    if (gen == Gen::SPLITMIX64) {
+        uint64_t s = seed ? seed : 0xDEADBEEFCAFEF00DULL;
+        for (uint64_t i = 0; i < num_words; ++i) buf[i] = splitmix64(s);
+        return;
+    }
+    // CHACHA20: seed -> key via 4 splitmix64 words
+    uint64_t ks = seed ? seed : 0xDEADBEEFCAFEF00DULL;
+    uint8_t key[32];
+    for (int i = 0; i < 4; ++i) {
+        uint64_t w = splitmix64(ks);
+        // Little-endian store
+        for (int b = 0; b < 8; ++b)
+            key[i * 8 + b] = (uint8_t)(w >> (b * 8));
+    }
+    static const uint8_t zero_nonce[12] = {};
+    // Fill raw bytes, then the uint64_t words are already in the right order
+    // (host is little-endian for the purposes of this PoC; see comment in
+    // common.hpp near kMagic: "same-endian machines").
+    chacha20_fill((uint8_t*)buf, num_words * 8, key, zero_nonce, 0);
+}
+
+// Fill a uint64_t buffer using a caller-supplied full 32-byte ChaCha20 key.
+//
+// This is the hardened entry point used by the verifier's --gen chacha path.
+// The key must be 32 bytes of entropy from std::random_device (not derived
+// from the 64-bit seed), so the buffer capacity is unconditionally 256 bits.
+//
+// A zero 12-byte nonce and block index 0 are used; the buffer is treated as
+// a stream of little-endian uint64_t words (consistent with the host-LE
+// assumption documented near kMagic).
+static inline void fill_buffer_chacha(uint64_t* buf, uint64_t num_words,
+                                      const uint8_t key[32]) {
+    static const uint8_t zero_nonce[12] = {};
+    chacha20_fill((uint8_t*)buf, num_words * 8, key, zero_nonce, 0);
 }
 
 // mix64: MurmurHash3 finalizer, a strong 64-bit avalanche. GPU PORT: identical.
@@ -75,18 +205,37 @@ static inline uint64_t map_index(uint64_t r, uint64_t n) {
 //
 // GPU PORT: this becomes the per-thread body of a CUDA kernel; the loader is a
 // direct global-memory read from a cudaMalloc buffer. Each thread owns one lane.
+//
+// When chained==false (default): the EXACT current independent code path — do
+// not change a single operation, so existing KAT vectors remain bit-identical.
+// When chained==true: pointer-chasing loop where each index depends on the
+// previously-read word, preventing any pre-enumeration of offsets.
 template <typename Load>
 static inline uint64_t answer_lane_t(Load&& load, uint64_t num_words,
-                                     uint64_t nonce, uint32_t lane, uint32_t samples) {
-    uint64_t s   = mix64(nonce ^ (0x9E3779B97F4A7C15ULL * (uint64_t)(lane + 1)));
-    uint64_t acc = mix64(nonce + 0x100000001B3ULL * (uint64_t)(lane + 1));
-    for (uint32_t i = 0; i < samples; ++i) {
-        uint64_t r   = splitmix64(s);
-        uint64_t idx = map_index(r, num_words);
-        uint64_t w   = load(idx);                // <-- the probe (RAM/disk/…)
-        acc = mix64(acc ^ (w + 0x9E3779B97F4A7C15ULL * (uint64_t)i) ^ idx);
+                                     uint64_t nonce, uint32_t lane, uint32_t samples,
+                                     bool chained = false) {
+    if (!chained) {
+        // INDEPENDENT path — bit-identical to original; do not edit these lines.
+        uint64_t s   = mix64(nonce ^ (0x9E3779B97F4A7C15ULL * (uint64_t)(lane + 1)));
+        uint64_t acc = mix64(nonce + 0x100000001B3ULL * (uint64_t)(lane + 1));
+        for (uint32_t i = 0; i < samples; ++i) {
+            uint64_t r   = splitmix64(s);
+            uint64_t idx = map_index(r, num_words);
+            uint64_t w   = load(idx);                // <-- the probe (RAM/disk/…)
+            acc = mix64(acc ^ (w + 0x9E3779B97F4A7C15ULL * (uint64_t)i) ^ idx);
+        }
+        return acc;
+    } else {
+        // DEPENDENT (chained) path — pointer-chasing: idx_{i+1} depends on
+        // w_i = load(idx_i), so offsets cannot be enumerated without reading.
+        uint64_t acc = mix64(nonce ^ (0x9E3779B97F4A7C15ULL * (uint64_t)(lane + 1)));
+        for (uint32_t i = 0; i < samples; ++i) {
+            uint64_t idx = map_index(acc, num_words);   // index from running acc
+            uint64_t w   = load(idx);                   // <-- the probe
+            acc = mix64(acc ^ w ^ (0x9E3779B97F4A7C15ULL * (uint64_t)i) ^ idx);
+        }
+        return acc;
     }
-    return acc;
 }
 
 // Full challenge answer: partition k samples across `lanes` and fold the lane
@@ -94,31 +243,38 @@ static inline uint64_t answer_lane_t(Load&& load, uint64_t num_words,
 //
 // GPU PORT: launch `lanes` threads computing answer_lane_t() into a scratch
 // array, then reduce. The fold below is the sequential CPU reference.
+//
+// chained==false (default): independent path, bit-identical to original.
+// chained==true: each lane uses the data-dependent (pointer-chasing) path.
 template <typename Load>
 static inline uint64_t answer_challenge_t(Load&& load, uint64_t num_words,
-                                          uint64_t nonce, uint32_t k, uint32_t lanes) {
+                                          uint64_t nonce, uint32_t k, uint32_t lanes,
+                                          bool chained = false) {
     if (lanes == 0) lanes = 1;
     uint32_t per = k / lanes;
     uint32_t rem = k % lanes;
     uint64_t combined = mix64(nonce ^ ((uint64_t)k << 20) ^ (uint64_t)lanes);
     for (uint32_t l = 0; l < lanes; ++l) {
         uint32_t samples = per + (l < rem ? 1u : 0u);
-        uint64_t h = answer_lane_t(load, num_words, nonce, l, samples);
+        uint64_t h = answer_lane_t(load, num_words, nonce, l, samples, chained);
         combined = mix64(combined ^ mix64(h + 0x9E3779B97F4A7C15ULL * (uint64_t)(l + 1)));
     }
     return combined;
 }
 
 // Raw-buffer wrappers — the honest prover and the verifier use these.
+// chained defaults to false so all existing callers and KAT are unchanged.
 static inline uint64_t answer_lane(const uint64_t* buf, uint64_t num_words,
-                                   uint64_t nonce, uint32_t lane, uint32_t samples) {
+                                   uint64_t nonce, uint32_t lane, uint32_t samples,
+                                   bool chained = false) {
     return answer_lane_t([buf](uint64_t idx){ return buf[idx]; },
-                         num_words, nonce, lane, samples);
+                         num_words, nonce, lane, samples, chained);
 }
 static inline uint64_t answer_challenge(const uint64_t* buf, uint64_t num_words,
-                                        uint64_t nonce, uint32_t k, uint32_t lanes) {
+                                        uint64_t nonce, uint32_t k, uint32_t lanes,
+                                        bool chained = false) {
     return answer_challenge_t([buf](uint64_t idx){ return buf[idx]; },
-                              num_words, nonce, k, lanes);
+                              num_words, nonce, k, lanes, chained);
 }
 
 // ---------------------------------------------------------------------------
@@ -159,9 +315,10 @@ static inline bool write_all(int fd, const void* p, size_t n) {
 }
 
 // Deterministic buffer fill (verifier generates; also handy for tests).
+// Delegates to fill_buffer(SPLITMIX64) — behavior is bit-identical to the
+// original implementation.
 static inline void fill_random(uint64_t* buf, uint64_t num_words, uint64_t seed) {
-    uint64_t s = seed ? seed : 0xDEADBEEFCAFEF00DULL;
-    for (uint64_t i = 0; i < num_words; ++i) buf[i] = splitmix64(s);
+    fill_buffer(buf, num_words, seed, Gen::SPLITMIX64);
 }
 
 // Bytes this process currently has locked (wired), as reported by the OS, so we
