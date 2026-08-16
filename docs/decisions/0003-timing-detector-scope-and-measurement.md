@@ -59,3 +59,56 @@ the *trustworthiness* of the numbers:
   `taskset`-pinned rerun are now *load-bearing, not optional* — they are the only
   things that would validate any timing teeth and give portable absolute numbers.
   See NEXT_STEPS.md.
+
+---
+
+## Addendum — dependent-access (chain) latency-hardness and crypto capacity
+
+### Dependent access: effective depth and its limits
+
+The dependent (`--chain dependent`) access path implements pointer-chasing: each
+sample index depends on the word read by the previous probe.  The latency-hardness
+it provides equals the **chain depth = k / lanes**, not k, because each lane's
+*first* index is derived from a predictable seed (`mix64(nonce ^ GOLDEN*(lane+1))`)
+— computed before any memory read and therefore prefetchable.  An attacker can
+pipeline across lanes, achieving roughly 1/(k/lanes) of what a fully serial chain
+would cost.
+
+**Practical consequence:** at `lanes = k` the chain depth is 1 and the dependent
+mode offers no defense over independent access (every index is independently
+predictable).  The verifier now enforces `k / lanes ≥ 16` (constant
+`kMinChainDepth`) and exits with an error if this floor is violated.  This is a
+floor on minimum defensiveness, not a cure — a determined attacker can still
+pipeline `chain_depth` probes per lane across `lanes` lanes.
+
+**Cost to the honest prover:** the chained path forces pointer-chasing, which
+serializes memory-level parallelism within each lane.  In our measurements this
+costs the honest prover roughly **3–4× in throughput** relative to the independent
+path, because hardware prefetchers cannot predict the next address until the current
+read completes.  This is the honest cost of the defense.
+
+The effective chain depth is stamped as `chain_depth` in the verifier JSON output
+whenever `--chain dependent` is used.
+
+### Crypto capacity: unconditional with a random 256-bit key
+
+Previously, `--gen chacha` derived the 32-byte ChaCha20 key from a 64-bit seed by
+running splitmix64 four times.  This made the buffer's security *computational* —
+the buffer was describable in 64 bits, and an adversary with the seed could
+regenerate it without reading it.
+
+The verifier now generates a **full random 256-bit key** from `std::random_device`
+for `--gen chacha`.  The capacity claim is now **unconditional**: the buffer cannot
+be described or regenerated from fewer than 256 bits of entropy.
+
+The splitmix64 path (`--gen splitmix64`, the default) is unchanged and remains
+intentionally breakable by the recompute adversary — that is its role as the weak
+baseline in the attack taxonomy.
+
+Note also that **ChaCha20-CTR is O(1) random-access, not memory-hard** — any block
+can be generated without reading any other block.  This is precisely why `--gen
+chacha` can play the role of "attacker cannot recompute" without making the *prover*
+memory-hard; the buffer content is hard to predict, but the verifier's latency
+measurement is still what carries the residency signal.  A memory-hard buffer
+generator (e.g. Argon2) would be needed if one wanted the fill itself to resist
+off-line regeneration under a constrained memory budget.

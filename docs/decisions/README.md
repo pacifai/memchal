@@ -13,3 +13,5 @@ are documented in [`CLAUDE.md`](../../CLAUDE.md) and `README.md`, not here.)
 | [0001](0001-challenge-math-frozen-pinned-by-kat.md) | Challenge math frozen; pinned by a KAT | A silent math change would invalidate every number |
 | [0002](0002-verify-and-refuse-on-mlock.md) | Verify the lock (VmLck); refuse to run unpinned | No result rests on an unpinned honest baseline |
 | [0003](0003-timing-detector-scope-and-measurement.md) | Timing detector: syscalls not storage; within-session only | The main claim correction — read before trusting timing |
+| [0004](0004-adversary-taxonomy-and-defenses.md) | Adversary taxonomy: recompute / prefetch / precompute + defenses | The three escape hatches from proof-of-retention and their toggled defenses |
+| [0005](0005-per-lane-chaining-vs-gpu-parallelism.md) | Per-lane chaining: latency-hardness vs GPU parallelism | The chain shape decision the GPU port will re-open |

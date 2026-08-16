@@ -4,21 +4,87 @@ Out of scope for the stabilization phase (which only made existing results
 trustworthy), captured here with why each matters. Ordered roughly by how much
 each changes what the PoC can claim.
 
-## 1. The recompute adversary — the most important gap
+## 1. Threat models: what "retention" actually requires
 
-A prover that does **not** store the buffer but **regenerates** each probed word
-on demand from the PRNG seed (`fill_random` is deterministic: `buf[i] =
-splitmix64(seed_state_i)`). It holds *no* data, yet every answer is correct
-(beats the correctness detector) and the work is pure ALU with a tiny footprint
-(beats the timing detector — likely *faster* than honest, like `fake` but
-correct).
+The stabilized design proves "you can't answer without *reading* the data." That is
+weaker than proof-of-*retention*, because there are **three ways to answer fast
+without genuinely holding the data**, and each needs its own defense. All three are
+built (as `cheating_prover` modes with their defenses — see
+[ADR 0004](docs/decisions/0004-adversary-taxonomy-and-defenses.md)), so the claim is
+tested rather than asserted.
 
-Why it matters: it is the natural strongest attack on a proof-of-*retention*
-primitive and it defeats **both** current detectors at once. Until it's tested,
-we cannot claim the challenge forces data to be *stored* rather than *recomputed*.
-The intended defense is a **memory-hard** derivation (make regeneration cost more
-memory/time than storage), which is a design change, not a stabilization. This is
-the first thing to build next.
+### The three escape hatches → three defenses
+
+- **Recompute** — don't store the buffer; regenerate each probed word on demand.
+  This works *only because our generator is cheap and invertible*: `fill_random`
+  is `splitmix64`, and `buf[idx] = finalizer(seed + (idx+1)·GOLDEN)` with an
+  **invertible** finalizer. So an adversary recovers the seed from a single
+  received word, throws the bytes away, and computes any `buf[idx]` in O(1) with
+  ~zero memory — correct *and* fast, beating **both** detectors. Defeating it needs
+  **capacity-hardness**: the data must be genuinely un-regenerable.
+- **Prefetch** — keep the data on disk, but because *all `k` offsets are derivable
+  from the nonce the instant it arrives*, compute them up front and batch/async
+  prefetch the pages (parallel I/O) instead of paying serialized per-probe faults.
+  This collapses the timing gap without holding anything resident. Defeating it
+  needs **latency-hardness**: the access pattern must not be knowable ahead of the
+  reads. (Real only under memory pressure — see the prefetch-needs-pattern
+  investigation.)
+- **Precompute** — the cheapest one, and it moots the other two: because nonces are
+  **predictable** (`ch.nonce = nonce_base + i`), a prover keeps the data on disk and
+  precomputes each answer *offline* (a background thread, in the gap between
+  challenges) and serves from cache — instant, zero residency. Chaining and ChaCha
+  don't help (you precompute offline). Defeating it needs an **unpredictable nonce**.
+
+You need all three; each defense is blind to the other attacks.
+
+### The three defenses (built)
+
+- **Capacity-hardness → crypto keyed-stream generation.** Generate the buffer with
+  a deterministic **crypto** stream (ChaCha20 keyed by a random 256-bit key) instead
+  of `splitmix64`. The seed can't be recovered from the output, so the recompute
+  attack regenerates *wrong* data → the correctness detector catches it. Lives
+  entirely in the **verifier** (generation is verifier-side and one-time; the
+  prover only stores bytes). We vendored a small ChaCha20 (RFC 8439, KAT'd) rather
+  than a heavy dependency like Botan — ~120 lines, table-free, and (critically)
+  **GPU-portable**, which Botan is not.
+- **Unpredictability → fresh CSPRNG nonce.** `--nonce random` draws each nonce from
+  a ChaCha20 CSPRNG, so a prover can't precompute answers offline. Cheap, and it
+  closes the cheapest hole outright.
+- **Latency-hardness → data-dependent access.** Make each next index depend on the
+  *previously-read word* (`idx_{i+1} = f(acc_i)` where `acc` folds in `w_i`), so you
+  cannot enumerate the offsets — or prefetch — without actually reading probe `i`
+  first (pointer-chasing). This is a change to the frozen challenge math in
+  `common.hpp` and gets its own KAT vectors. GPU note: keep it **per-lane**
+  sequential with many lanes in parallel, so it stays latency-hard *within* a lane
+  while remaining embarrassingly parallel *across* lanes (the standard memory-hard
+  shape) — otherwise it fights the GPU port.
+
+Both are wired as **toggles** (generator: splitmix64|chacha; access: independent|
+dependent) defaulting to the current behavior, so existing KAT/tests are unchanged
+and the demo can flip a defense on/off and show the attack succeed then fail.
+
+### Model 1 vs Model 2 — and why the seed is (or isn't) shared
+
+- **Model 1 — the prover only gets the bytes** (today's protocol, and what the two
+  attacks/defenses above target). The verifier ships the buffer and keeps the seed.
+  Crypto generation is a **cheap, complete** fix: the seed is unrecoverable, so the
+  prover must store all N bytes. *Meaning:* "prove you kept the specific data I
+  sent." Binds to real data, but doesn't scale — you must upload N bytes per check.
+- **Model 2 — the verifier gives the prover the seed** (proof-of-space shape). The
+  rationale is **scale**: you cannot upload hundreds of GB of weights per
+  verification, so you ship a ~32-byte *recipe* instead, and both sides materialize
+  the dataset. The apparent paradox (handing the prover the shortcut) is resolved
+  only by making the generator **memory-hard** (Argon2/scrypt-style): the seed is
+  cheap to send but `f(seed)` is expensive to materialize, so a rational prover
+  stores rather than regenerates. *Meaning:* "prove you materialized and hold this
+  recipe" — scales, but proves you hold *filler*, not the operator's weights.
+
+**The frontier** (what actually matches the parent goal): a Model-2, memory-hard
+generator whose dataset is **bound to the real weights** (derived from the model),
+so residency implies holding something tied to the actual workload — without
+revealing it. That is proof-of-retrievability ∩ proof-of-space for ML, and a real
+research lift, not a build task. Model-1 recompute+crypto is the near-term step;
+the memory-hard, weight-bound Model 2 is the destination.
 
 ## 2. A genuinely-cold-read test on bare metal — still the settling experiment
 
@@ -90,6 +156,8 @@ should be settled on CPU first.
 ## 7. Protocol hardening (before any production use)
 
 - Responses ≥128-bit with a cryptographic PRF/hash (64-bit is guessable/
-  precomputable in a real adversarial setting).
-- Fresh random nonce per challenge from the verifier.
+  precomputable in a real adversarial setting). **Still open.**
+- Fresh random nonce per challenge from the verifier — **done** (`--nonce random`,
+  ChaCha20 CSPRNG); see the precompute escape hatch in §1 and ADR 0004. Make it the
+  default for any adversarial (non-benchmark) use.
 - Wire byte-order is native (assumes same-endian peers; true on loopback).
