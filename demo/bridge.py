@@ -49,7 +49,10 @@ PROVER_PORT = 9700
 CONTAINER = "memchal_demo_prover"
 
 # ── what the browser may ask for ─────────────────────────────────────────────
-MODES = ("honest", "disk", "partial", "fake", "mmapdisk")
+MODES = ("honest", "disk", "partial", "fake", "mmapdisk", "recompute", "prefetch", "precompute")
+GENS = ("splitmix64", "chacha")
+CHAINS = ("independent", "dependent")
+NONCES = ("sequential", "random")
 MEM_RE = re.compile(r"^[0-9]{1,5}[mg]$")
 LIMITS = {           # field: (min, max, default)
     "mb":     (1, 1024, 64),
@@ -61,7 +64,7 @@ LIMITS = {           # field: (min, max, default)
     "probe":  (0, 10000, 20),     # verifier probed-page map every N challenges
     "frac":   (0, 1, 0.5),
 }
-DEFAULTS = {"mode": "mmapdisk", "mem": "32m", **{k: v[2] for k, v in LIMITS.items()}}
+DEFAULTS = {"mode": "mmapdisk", "gen": "splitmix64", "chain": "independent", "nonce": "sequential", "mem": "32m", **{k: v[2] for k, v in LIMITS.items()}}
 
 
 def clamp(name, value):
@@ -76,9 +79,15 @@ def clamp(name, value):
 def validate(req):
     """Whitelist the run request. Anything unrecognized falls back to a default."""
     mode = req.get("mode")
+    gen = req.get("gen")
     mem = str(req.get("mem", DEFAULTS["mem"])).lower()
+    chain = req.get("chain")
+    nonce = req.get("nonce")
     out = {
         "mode": mode if mode in MODES else DEFAULTS["mode"],
+        "gen": gen if gen in GENS else DEFAULTS["gen"],
+        "chain": chain if chain in CHAINS else DEFAULTS["chain"],
+        "nonce": nonce if nonce in NONCES else DEFAULTS["nonce"],
         "mem": mem if MEM_RE.match(mem) else DEFAULTS["mem"],
     }
     for name in LIMITS:
@@ -248,16 +257,28 @@ class Run:
 
     def _verifier_cmd(self):
         c = self.cfg
-        return [
+        cmd = [
             "docker", "run", "--rm", "--network", f"container:{CONTAINER}",
             "--platform", PLATFORM, "--cpus", CPUS, "--memory", VERIFIER_MEM,
             "-v", f"{ROOT}:/work", IMAGE,
             "./verifier", "--host", "127.0.0.1", "--port", str(PROVER_PORT),
             "--mb", str(c["mb"]), "--k", str(c["k"]), "--lanes", str(c["lanes"]),
             "--n", str(c["n"]), "--warmup", str(c["warmup"]),
+            "--gen", c["gen"],
+            "--chain", c["chain"],
+            "--nonce", c["nonce"],
             "--label", f"demo-{c['mode']}-{c['mem']}",
             "--csv", "/dev/null", "--stream", "-", "--probe-map", str(c["probe"]),
         ]
+        if c["mode"] == "precompute":
+            # The attack precomputes each answer offline in the gap between
+            # challenges, so the gap must exceed the cost of one answer. In the
+            # starved regime (where the attack matters — on-the-spot reads are cold
+            # and slow) that cost is tens of ms, so 400us would leave even the attack
+            # unable to get ahead. Give it a generous gap so a starved-budget run
+            # actually shows sequential(fast, cache-ahead) vs random(slow, cold read).
+            cmd += ["--gap-us", "80000"]
+        return cmd
 
     # -- the sequence -----------------------------------------------------
     def _run(self):
@@ -419,7 +440,7 @@ class Handler(BaseHTTPRequestHandler):
             HUB.publish({"t": "log", "src": "bridge",
                          "line": f"run requested from {self.client_address[0]}: "
                                  f"{cfg['mode']} at {cfg['mem']}, buffer {cfg['mb']} MiB, "
-                                 f"n={cfg['n']} warmup={cfg['warmup']}"})
+                                 f"chain={cfg['chain']} n={cfg['n']} warmup={cfg['warmup']}"})
             MANAGER.start(cfg)
             return self._json({"started": cfg})
         if path == "/stop":

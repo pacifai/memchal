@@ -37,9 +37,39 @@
           <option value="disk">disk — pread per probe</option>
           <option value="partial">partial — half RAM, half disk</option>
           <option value="fake">fake — fabricates the rest</option>
+          <option value="recompute">recompute — holds no data, regenerates it</option>
+          <option value="prefetch">prefetch — stages the pages it will be asked for</option>
+          <option value="precompute">precompute — predicts nonces, answers from cache</option>
         </select>
       </label>
       <p class="prose" id="modeHint"></p>
+
+      <label class="field">
+        <span class="lab">buffer generator</span>
+        <select id="gen">
+          <option value="splitmix64" selected>splitmix64 (weak)</option>
+          <option value="chacha">chacha (crypto)</option>
+        </select>
+      </label>
+      <p class="prose">Flip to chacha to defend against recompute — the seed can't be recovered, so the attack regenerates wrong data and every challenge fails.</p>
+
+      <label class="field">
+        <span class="lab">access pattern</span>
+        <select id="chain">
+          <option value="independent" selected>independent (weak) — offsets are predictable</option>
+          <option value="dependent">dependent (chained) — each offset depends on the previous read</option>
+        </select>
+      </label>
+      <p class="prose">Flip to dependent to defend against prefetch — the offsets can't be enumerated up front, so the prover can't pre-stage the right pages and falls back to slow serial faults.</p>
+
+      <label class="field">
+        <span class="lab">nonce — flip to random to defend against precompute</span>
+        <select id="nonce">
+          <option value="sequential" selected>sequential (weak) — nonces are predictable</option>
+          <option value="random">random (crypto) — drawn from ChaCha20 CSPRNG</option>
+        </select>
+      </label>
+      <p class="prose">Flip to random to defend against precompute — the prover can't predict future nonces, so its cache misses and it must read from disk on the spot.</p>
 
       <label class="field">
         <span class="lab">ram budget <b class="num" id="memLabel">32 MiB</b></span>

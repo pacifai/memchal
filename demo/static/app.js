@@ -21,6 +21,9 @@ const MODE_HINTS = {
   disk: "Keeps the data on disk and pread()s every probe. Slow, but experiment 1 shows most of that is syscall overhead, not the disk.",
   partial: "Keeps half the buffer in RAM, the rest on disk. Correct answers, bimodal latency.",
   fake: "Keeps half the buffer and fabricates the rest. Fast and wrong — this is the one the correctness check catches, not the clock.",
+  recompute: "Recovers the buffer's seed from one word and regenerates every probe on demand — holds nothing. Correct and fast against the weak generator (splitmix64); switch the generator to chacha and it's wrong on every challenge.",
+  prefetch: "Keeps the data on disk but pre-stages the pages each challenge will touch. This only pays off under memory pressure: with a starved RAM budget it batches the readahead and beats mmapdisk's serial faults (~4× in tests), but in the cached regime its own staging overhead makes it SLOWER than a plain mmap read — so give it less RAM than the buffer to see the attack. Flip the access pattern to dependent and it can't predict the pages — back to slow.",
+  precompute: "Holds nothing resident: it predicts the (sequential) nonces and precomputes each answer offline, serving from cache — instant, while the page map stays empty. Give it a starved RAM budget to see it shine (reading on the spot is slow, so cache hits are a big win). Flip the nonce to random and it can't predict — back to reading from disk on the spot.",
 };
 
 // Each prover mode is its own series: their latency footprints have nothing in
@@ -31,11 +34,14 @@ const MODE_HINTS = {
 // not exist in this palette (no five-set clears the normal-vision floor with all
 // pairs on screen). Identity therefore never rests on hue alone.
 const MODE_STYLE = {
-  honest:   { hue: '--fast', shape: 'circle',   glyph: '●', family: 'holds it in RAM' },
-  mmapdisk: { hue: '--slow', shape: 'circle',   glyph: '●', family: 'reads it from storage' },
-  disk:     { hue: '--slow', shape: 'square',   glyph: '■', family: 'reads it from storage' },
-  partial:  { hue: '--slow', shape: 'triangle', glyph: '▲', family: 'reads it from storage' },
-  fake:     { hue: '--none', shape: 'diamond',  glyph: '◆', family: 'holds it nowhere' },
+  honest:    { hue: '--fast', shape: 'circle',   glyph: '●', family: 'holds it in RAM' },
+  mmapdisk:  { hue: '--slow', shape: 'circle',   glyph: '●', family: 'reads it from storage' },
+  disk:      { hue: '--slow', shape: 'square',   glyph: '■', family: 'reads it from storage' },
+  partial:   { hue: '--slow', shape: 'triangle', glyph: '▲', family: 'reads it from storage' },
+  fake:      { hue: '--none', shape: 'diamond',  glyph: '◆', family: 'holds it nowhere' },
+  recompute: { hue: '--none', shape: 'square',   glyph: '■', family: 'holds it nowhere' },
+  prefetch:  { hue: '--slow', shape: 'diamond',  glyph: '◆', family: 'reads it from storage' },
+  precompute: { hue: '--none', shape: 'triangle', glyph: '▲', family: 'holds it nowhere' },
 };
 const modeStyle = (mode) => MODE_STYLE[mode] || MODE_STYLE.mmapdisk;
 
@@ -56,7 +62,7 @@ function drawMarker(ctx, x, y, shape, r) {
 const REDUCED_MOTION = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const $ = (id) => document.getElementById(id);
 const el = {
-  mode: $('mode'), mem: $('mem'), memLabel: $('memLabel'), memHint: $('memHint'),
+  mode: $('mode'), gen: $('gen'), chain: $('chain'), nonce: $('nonce'), mem: $('mem'), memLabel: $('memLabel'), memHint: $('memHint'),
   modeHint: $('modeHint'), mb: $('mb'), k: $('k'), n: $('n'), warmup: $('warmup'),
   runBtn: $('runBtn'), stopBtn: $('stopBtn'), clearBtn: $('clearBtn'), themeBtn: $('themeBtn'),
   led: $('led'), statusText: $('statusText'),
@@ -820,6 +826,9 @@ function currentCfg() {
   const mib = MEM_STEPS[+el.mem.value];
   return {
     mode: el.mode.value,
+    gen: el.gen.value,
+    chain: el.chain.value,
+    nonce: el.nonce.value,
     mem: mib >= 1024 && mib % 1024 === 0 ? `${mib / 1024}g` : `${mib}m`,
     mb: +el.mb.value, k: +el.k.value, lanes: 32,
     n: +el.n.value, warmup: +el.warmup.value,
@@ -840,6 +849,19 @@ function syncControls() {
   el.modeHint.textContent = MODE_HINTS[el.mode.value] || '';
   if (el.mode.value === 'honest' && ratio < 1.2) {
     el.memHint.textContent += ' An honest prover needs the RAM: below ~1.2× it gets OOM-killed.';
+  }
+  if (el.mode.value === 'recompute') {
+    el.memHint.textContent = 'RAM budget is irrelevant for recompute — it holds no data, only the seed.';
+  }
+  if (el.mode.value === 'precompute') {
+    el.memHint.textContent = ratio < 1
+      ? `${ratio.toFixed(2)}× the buffer — starved RAM is where precompute shines: reading from disk on a cache miss is slow, so cache hits are a big win. Flip the nonce to random to break the prediction.`
+      : `⚠ ${ratio.toFixed(2)}× the buffer — the whole file fits in RAM (page map is 100% resident), so a random-nonce cache miss reads from RAM, not disk: precompute answers at honest speed no matter the nonce and this verdict does NOT test the defense. Drop below 1× (starved) to see sequential(fast) vs random(slow).`;
+  }
+  if (el.mode.value === 'prefetch') {
+    el.memHint.textContent = ratio < 1
+      ? `${ratio.toFixed(2)}× the buffer — starved RAM is where prefetch shines: it still stages the right pages up front, bypassing serial faults. Flip access pattern to dependent to break it.`
+      : `${ratio.toFixed(2)}× the buffer — give it less RAM to see prefetch's advantage over mmapdisk under pressure.`;
   }
 }
 
@@ -868,6 +890,8 @@ el.themeBtn.addEventListener('click', () => {
   el.mem.addEventListener(evt, syncControls);
   el.mode.addEventListener(evt, syncControls);
   el.mb.addEventListener(evt, syncControls);
+  el.chain.addEventListener(evt, syncControls);
+  el.nonce.addEventListener(evt, syncControls);
 });
 window.addEventListener('resize', () => {
   state.dirty.lat = state.dirty.map = state.dirty.collapse = true;
