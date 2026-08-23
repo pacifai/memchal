@@ -1,146 +1,199 @@
-# Low-latency memory-challenge PoC
+# Memchal — a memory-retention challenge
 
-A verifier sends a large random buffer to a prover, then repeatedly challenges
-the prover to prove the data is still resident in fast memory. The **latency
-profile** of the responses is the result: an honest prover holding the data in
-RAM (or VRAM) answers with a low, tight distribution; a prover that dropped the
-data, recomputes it, or let it swap to disk shows verification errors, a fat
-tail, or both.
+A verifier sends a prover a large buffer of random bytes, then repeatedly asks it
+to prove the buffer is still sitting in fast memory. Each challenge carries a
+nonce. From that nonce the prover derives thousands of unpredictable offsets,
+reads the word at each one, and folds them all into a single chained hash. The
+offsets aren't knowable until the nonce arrives, and every read changes the
+result — so the prover can't return the right answer without actually reading the
+data.
 
-This is a proof-of-retention / memory-binding primitive — spot-checking à la
-proof-of-retrievability, but with **timing** as the discriminator rather than
-just correctness.
+This is a proof-of-retention primitive: a spot check that someone still holds data
+they claim to hold, using two signals — the **correctness** of the answer and the
+**time** it takes to produce. It's a CPU precursor to a GPU/VRAM version aimed at
+AI-compute governance: proving a datacenter's memory really holds the workload it
+bills for.
 
-## Files
-- `common.hpp` — wire protocol + the sampling/hashing core. The templated
-  `answer_lane_t()` / `answer_challenge_t()` are the single source of truth;
-  every prover (honest or not) and the verifier call them, so a *correct*
-  answer is byte-identical to the verifier's local recomputation regardless of
-  where the bytes were sourced.
-- `prover.cpp` — honest TCP server. Receives the buffer into **pinned** memory
-  and answers challenges.
-- `cheating_prover.cpp` — dishonest server with selectable strategies (see
-  "Detecting dishonest provers"), for contrast.
-- `verifier.cpp` — TCP client. Generates + uploads the buffer, issues timed
-  challenges, verifies each response, prints the latency profile, writes a CSV,
-  and (optionally) runs a K-sweep.
-- `plot_latency.py` — histogram + ECDF for one run.
-- `plot_compare.py` — overlay ECDF across prover modes.
-- `compare_modes.sh` — runs the verifier against every mode and tabulates.
-- `Makefile`.
+The prover and the verifier share one definition of the challenge
+(`src/common.hpp`). The prover answers; the verifier recomputes the same answer
+locally and compares. Because both run the same code, a correct answer is
+identical no matter where the prover's bytes came from — so only a wrong answer or
+a slow one reveals a cheat.
 
-## Build & run
+## What it proves, and what it doesn't
+
+- **Correctness detection is solid.** A prover that fabricates any withheld data is
+  caught with probability `1 − (1−m)^k` (for `m=0.001, k=4096`, about 0.98). Tests
+  confirm it: the `fake` prover fails every challenge; honest and disk-backed
+  provers never do.
+- **Timing tracks residency, not the storage device.** The buffer being "on disk"
+  is not what makes a cheat slow; keeping it out of memory is. An adversary that
+  leaves the data on disk but memory-maps it answers at honest speed, because the
+  operating system's page cache is holding the file — the data genuinely is
+  resident. Take that RAM away (budget the prover below the buffer size) and it
+  collapses to hundreds of times slower, with about half its reads faulting to
+  storage. So timing tells you whether the data is in fast memory right now, which
+  is what the primitive cares about. See
+  [ADR 0003](docs/decisions/0003-timing-detector-scope-and-measurement.md) for the
+  measurements behind this.
+- **The shortcuts around actually reading the data are each defended.** A prover can
+  still try to regenerate the buffer from its seed, prefetch predictable offsets, or
+  precompute answers to predictable challenges. Each has a defense you toggle on, and
+  a test that shows the attack win with the defense off and lose with it on. See
+  [Attacks and defenses](#attacks-and-defenses) below.
+- **Two things are still open.** There's no decision rule yet — the harness reports
+  how far apart the modes sit, not an accept/reject classifier with stated error
+  rates. And the timing signal still needs a run on real hardware with a buffer
+  larger than RAM to confirm it against a serious adversary; the current numbers
+  come from a container whose memory limit stands in for physical RAM, so they're a
+  lower bound. See [NEXT_STEPS.md](NEXT_STEPS.md).
+
+## How a challenge works
+
+A challenge is `(nonce, k, lanes)`. Seeded by the nonce, the prover draws `k`
+pseudo-random offsets spread across the whole buffer, reads each word, and folds
+them into a chained hash. Three properties make this bind to memory:
+
+- **Unpredictable until issued.** The offsets come from the nonce, so nothing can
+  be prepared before the challenge arrives.
+- **Every read counts.** Because the hash is chained, changing or skipping any one
+  word changes the final result. There's no shortcut that reads only part of the
+  buffer.
+- **The work is dominated by random-access reads.** `k` scattered reads across a
+  large buffer. On this hardware about half the per-probe cost is the memory stall
+  and half is the hashing itself.
+
+`answer_lane_t` and `answer_challenge_t` in `src/common.hpp` are the single
+definition of this math, called by the prover, the cheating prover, and the
+verifier alike.
+
+## Attacks and defenses
+
+A cheating prover has several ways to look like it's holding the data without
+actually holding it. `src/cheating_prover.cpp` implements each one as a mode, so the
+defense is tested rather than asserted — run the attack, watch it win, turn the
+defense on, watch it lose. The first group is caught by the two built-in signals
+(a wrong answer, or a slow one). The last three are shortcuts that beat both signals
+until you turn on a matching defense.
+
+| `--mode` | What it tries | How it's caught |
+|---|---|---|
+| `honest` | Holds the whole buffer in locked RAM. The baseline every other mode is measured against. | — |
+| `disk` | Leaves the data on disk and issues one read system call per probe. | Slow — timing. |
+| `partial` | Keeps part of the buffer in RAM and the rest on disk. | Slow and bimodal — fast hits, slow misses — timing. |
+| `fake` | Fabricates any word it doesn't hold. | Wrong answers — correctness. |
+| `mmapdisk` | Leaves the data on disk but memory-maps it, so there's no per-probe system call. | Matches honest speed while the page cache holds the file (it really is resident), then runs ~840× slower once its RAM budget drops below the buffer — timing tracks residency, not the device. |
+| `recompute` | Throws the buffer away and regenerates each probed word from the generator seed. Correct *and* fast, so it beats both signals. | `--gen chacha`: the buffer comes from a random 256-bit ChaCha20 key, so the seed can't be recovered and the regenerated words are wrong — correctness. |
+| `prefetch` | Keeps the data on disk, derives all the offsets from the nonce up front, and prefetches those pages before answering — dodging the serial faults that make `mmapdisk` slow when starved. | `--chain dependent`: each offset depends on the previously read word, so the offsets can't be derived ahead of the reads, and the prover falls back to slow serial faults — timing. |
+| `precompute` | Exploits predictable nonces: a background thread infers the coming nonces and computes their answers from disk in the gaps between challenges, then serves them instantly. | `--nonce random`: each nonce comes from a cryptographic random generator, so there's nothing to precompute and the prover must read during the timed window — timing. |
+
+The last three defenses are verifier flags (`--gen chacha`, `--chain dependent`,
+`--nonce random`), and they ship **off** by default so the attacks are demonstrable
+out of the box. Any real use turns all three on. Selecting a defense isn't the same
+as it being effective: `--chain dependent`, for example, only helps if each lane
+runs a deep enough chain, so the verifier enforces `k / lanes ≥ 16`. The full
+reasoning is in [ADR 0004](docs/decisions/0004-adversary-taxonomy-and-defenses.md)
+and [ADR 0005](docs/decisions/0005-per-lane-chaining-vs-gpu-parallelism.md); the
+measurements behind the `prefetch` and `mmapdisk` rows are in
+[docs/investigations/](docs/investigations/).
+
+## Verified memory pinning
+
+The honest prover in `src/prover.cpp` maps an anonymous region, touches every
+page, and locks it into RAM with `mlock`. It does not trust the return value of
+`mlock`: it reads `VmLck` from `/proc/self/status` to confirm the lock took
+effect. If the buffer isn't genuinely pinned, the prover refuses to run, because
+an unpinned baseline is meaningless. Passing `--allow-unlocked` overrides this and
+records `locked=false` in every output, so no result can quietly rest on an
+unpinned baseline.
+
+## Build and run
+
+Everything builds and runs inside a linux/arm64 container (native on Apple
+Silicon — emulation would ruin the timing). `run.sh` grants the memory-lock
+privilege the honest prover needs and mounts `results/` back to the host.
+
 ```bash
-make
-./prover 9099                 # terminal 1 (listens, serves connections in a loop)
-./verifier --mb 256 --k 65536 --lanes 64 --n 2000   # terminal 2
-python3 plot_latency.py latency.csv latency.png      # optional
-```
-Verifier flags: `--host --port --mb --k --lanes --n --warmup --sweep --csv --seed`.
-
-## How the challenge binds to memory
-On challenge `(nonce, k, lanes)` the prover must, using a PRNG seeded by the
-nonce, draw `k` pseudo-random offsets spread across the **whole** buffer, read
-the word at each, and fold them into a chained hash. Key properties:
-
-- **Unpredictable until issued** — offsets derive from the nonce, so nothing can
-  be precomputed before the challenge arrives.
-- **Every probe matters** — the chained fold means dropping/altering any probed
-  word changes the final hash, so the prover can't shortcut with a subset.
-- **Memory-bound** — work is `k` random-access reads. If the data isn't in fast
-  memory the reads become page faults / disk seeks and the tail explodes.
-
-`lanes` partitions the `k` samples into independent streams. On CPU it's a plain
-loop; it exists so the exact same math maps onto GPU threads (see below).
-
-## Memory pinning (anti-swap)
-The prover `mmap`s an anonymous region, prefaults every page, and `mlock()`s it
-so the kernel may never swap it out; it also calls `mlockall(MCL_CURRENT |
-MCL_FUTURE)`. If the process lacks privilege, `mlock` fails and it continues
-**unlocked** after logging why. To guarantee locking:
-```bash
-ulimit -l unlimited            # or raise RLIMIT_MEMLOCK
-# or run with CAP_IPC_LOCK, e.g.: setcap cap_ipc_lock+ep ./prover
-```
-For very large buffers, consider transparent/explicit huge pages
-(`madvise(MADV_HUGEPAGE)` / `MAP_HUGETLB`) to cut TLB pressure.
-
-## Path to GPU
-The answer path is deliberately GPU-shaped — flat word buffer, no STL, no
-exceptions:
-- Buffer lives in device memory via `cudaMalloc` (VRAM is inherently
-  non-swappable — the GPU analog of `mlock`). Stage uploads through pinned host
-  memory (`cudaHostAlloc`) for fast H2D copies.
-- `answer_lane()` becomes the per-thread kernel body; launch `lanes` threads,
-  write partials to a scratch array, then reduce.
-- The only non-portable line is the 128-bit multiply in `map_index()` — on CUDA
-  replace `((__uint128)r*n)>>64` with `__umul64hi(r, n)`. `splitmix64`/`mix64`
-  are already identical.
-
-## Measured results (in-container: 1 vCPU, memory LOCKED, 128 MiB buffer)
-End-to-end run: **0 verification errors**, prover memory reported **LOCKED**.
-
-K-sweep (median round-trip latency, loopback TCP, single core):
-
-| samples/challenge | median latency | throughput |
-|------:|------:|------:|
-| 1,024   |   34.6 us |  28 probes/us |
-| 4,096   |  116.2 us |  34 probes/us |
-| 16,384  |  410.0 us |  40 probes/us |
-| 65,536  | 1478.6 us |  44 probes/us |
-| 262,144 | 5863.2 us |  44 probes/us |
-
-Latency is ~linear in `k` and throughput saturates near the memory-latency
-ceiling — the signature of genuine random-access probing. On real hardware,
-size `k` so the compute clears the transport floor (loopback TCP adds a few µs;
-a NIC/RDMA path more), and pin CPU affinity for cleaner tails.
-
-## Detecting dishonest provers
-`cheating_prover --mode X` implements strategies an adversary might try. All of
-them reuse the exact challenge math, so a correct answer still verifies — only
-timing or correctness gives them away:
-
-- `honest`  — full buffer pinned in RAM (baseline).
-- `disk`    — buffer only on disk; every probe is a `pread()`. Correct, slow.
-- `partial` — `--frac` in RAM, rest on disk; misses do `pread()`. Correct,
-  **bimodal** — the tail grows as `--frac` shrinks. A timing detector.
-- `fake`    — `--frac` in RAM, misses **fabricated**. Fast but wrong. A
-  correctness detector.
-
-Run the contrast:
-```bash
-make
-./compare_modes.sh
-python3 plot_compare.py            # -> latency_compare.png
+./run.sh                              # build, then a smoke test
+./run.sh bash tests/run_tests.sh      # known-answer test + invariants
+# repeat trials, then plot:
+./run.sh bash -c 'make && \
+  python3 scripts/run_trials.py --repeats 10 --n 3000 --k 4096 --mb 64 \
+      --modes floor,honest,disk,partial,fake,mmapdisk --out results/trials.json && \
+  python3 scripts/plot.py results/trials.json'
 ```
 
-Measured (in-container: 1 vCPU; 64 MiB buffer, k=4096, lanes=32, n=300, frac=0.5):
+### Live demo
 
-| mode | p50 | p99.9 | vs honest | verify errors |
-|------|----:|------:|----------:|--------------:|
-| honest  (RAM, pinned)        |  125 us |  224 us |  1x   | 0 / 300   |
-| disk    (0% resident)        | 2344 us | 3078 us | ~19x  | 0 / 300   |
-| partial (50% RAM / 50% disk) | 1317 us | 1572 us | ~10x  | 0 / 300   |
-| fake    (50% RAM, faked)     |  114 us |  205 us |  1x   | **300 / 300** |
+Run `python3 demo/bridge.py` on the host, then open `http://127.0.0.1:8777`. Pick
+a prover, give it a RAM budget, and watch it answer: a page map (blue for pages
+served from memory, orange for pages faulted to storage, taken from the kernel's
+own view), latency per challenge, and a log where `fake` gives itself away — fast,
+and wrong every time. Every number comes from a real prover and verifier running
+in containers; nothing is simulated. Tracing happens after each timed round trip,
+so it doesn't distort the measurement, but the headline numbers come from the
+terminal runs, not the demo.
 
-Two orthogonal detectors:
-- **Timing** exposes `disk`/`partial`: they answer correctly but 10–19x slower,
-  because probes hit storage instead of RAM. (These are page-cache `pread`s in a
-  64 MiB container; on genuinely cold SSD/HDD the gap widens to ms-scale seeks.)
-- **Correctness** exposes `fake`: it's as fast as honest but every challenge
-  fails. The chained fold makes this unavoidable — if a prover withholds a
-  fraction `m` of the data, a `k`-probe challenge catches it with probability
-  `1 - (1-m)^k`. For `m=0.5, k=4096` that's ~1; even `m=0.001, k=4096` ≈ 0.98.
-  Withholding even a sliver is caught with overwhelming probability.
+### Supporting investigations
 
-See `latency_compare.png`: honest and `fake` overlap at the fast end (timing
-can't separate them — hence the need for the correctness check), while `partial`
-and `disk` sit one to two orders of magnitude to the right.
+Two small experiments back the timing claim above. Each is a script plus a short
+writeup under `docs/investigations/`: `disk-is-syscalls/` shows the disk penalty is
+system-call overhead rather than storage distance, and `mmap-needs-ram/` shows the
+memory-mapped cheat collapses once it can't cache the buffer. Run them to reproduce
+[ADR 0003](docs/decisions/0003-timing-detector-scope-and-measurement.md).
 
-## Notes / next steps
-- 64-bit responses are fine for a PoC correctness check; a production protocol
-  wants ≥128-bit responses and a cryptographic PRF/hash so answers can't be
-  guessed or precomputed, plus a fresh random nonce per challenge.
-- Native byte order on the wire assumes same-endian peers (true on loopback).
-- To *see* the dishonest tail, run the prover under memory pressure without
-  locking (skip `ulimit -l`, allocate > RAM) and watch p99.9 diverge.
+## Results
+
+Measured on Docker Desktop on Apple Silicon: a linux/arm64 VM limited to 1 vCPU
+and 2 GiB, with a 64 MiB buffer, `k=4096`, and `lanes=32`. Absolute times are not
+comparable across sessions — the VM pins each container to performance or
+efficiency cores for its whole life, which swings absolute latency by about 1.6×.
+Only within-session ratios are trustworthy, and every output file is stamped with
+its session id.
+
+Representative within-session numbers (illustrative µs; compare within a session
+only):
+
+| mode | p50 (µs) | ratio to honest | verify errors |
+|------|---------:|----------------:|--------------:|
+| transport floor (`k=0`) | ~47 | ~0.4× | 0 |
+| honest (RAM, lock verified) | ~114 | 1× | 0 |
+| disk (a read syscall per probe) | ~1850 | ~15× | 0 |
+| fake (misses fabricated) | ~108 | ~0.95× | every challenge |
+| mmap-on-disk, RAM to spare | ~122 | ~1.05× | 0 |
+| mmap-on-disk, RAM below buffer size | ~81000 | ~840× | 0 |
+
+What the table says:
+
+- Correctness cleanly separates `fake` from everyone else: `fake` is wrong on every
+  challenge, and the rest are always right.
+- `fake` answers about as fast as honest, so timing alone is not a cheat detector —
+  correctness is what catches fabrication.
+- The memory-mapped adversary matches honest while it can cache the buffer, and
+  blows up to about 840× once it can't. That gap is the residency signal.
+- About 40% of the honest response time is TCP transport (the `k=0` floor), so
+  memory time is reported as `honest − floor` with propagated error, never as a raw
+  number.
+
+The fuller analysis — why `fake` is slightly faster, how latency scales with `k`,
+and the run-to-run variance — is in `docs/investigations/` and
+[ADR 0003](docs/decisions/0003-timing-detector-scope-and-measurement.md).
+
+## Toward a GPU version
+
+The answer path is written to port cleanly to a GPU: a flat word buffer, no STL,
+no exceptions. The buffer would live in VRAM through `cudaMalloc` (not swappable —
+the GPU equivalent of `mlock`), `answer_lane_t` becomes the per-thread kernel body,
+and the only non-portable line is the 128-bit multiply in `map_index`
+(`((__uint128)r * n) >> 64` becomes `__umul64hi(r, n)`). `splitmix64` and `mix64`
+are already identical. This is future work; see [NEXT_STEPS.md](NEXT_STEPS.md).
+
+## Learn more
+
+- [`CLAUDE.md`](CLAUDE.md) — orientation for anyone (human or agent) working in the
+  repo: goal, layout, and the rules that keep results trustworthy.
+- [Decision records](docs/decisions/) — why the challenge math is frozen, why the
+  prover refuses to run unpinned, and what the timing signal does and doesn't show.
+- [Investigations](docs/investigations/) — the question-script-result writeups that
+  back those decisions.
+- [NEXT_STEPS.md](NEXT_STEPS.md) — what's still open, and why it matters.

@@ -1,0 +1,7 @@
+buffer=64 MiB  k=2048 lanes=32 n=200 warmup=40
+regime    chain        mmapdisk    prefetch   
+cached    independent  39.83       426.62     
+cached    dependent    210.58      588.12     
+starved   independent  27438.75    6590.67    
+starved   dependent    27517.96    31934.42   
+(p50 us; prover held to the budget, verifier in a separate 1g container sharing its netns)

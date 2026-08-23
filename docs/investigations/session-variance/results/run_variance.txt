@@ -1,0 +1,12 @@
+### Part 1: one long session, honest 30x back-to-back (step-change check) ###
+  n=30  mean=60.8us  sd=1.6us  cv=2.6%
+  first-third=60.5us  last-third=61.6us  (a big step would mean mid-session migration)
+
+### Part 2: 6 independent sessions, honest baseline mean per session ###
+  session 1: honest p50 mean = 49.3 us
+  session 2: honest p50 mean = 49.1 us
+  session 3: honest p50 mean = 48.4 us
+  session 4: honest p50 mean = 48.9 us
+  session 5: honest p50 mean = 48.3 us
+  session 6: honest p50 mean = 50.9 us
+  between-session: mean=49.1us sd=0.9us  min=48.3 max=50.9  spread=1.05x

@@ -1,0 +1,59 @@
+make: Nothing to be done for 'all'.
+
+  buffer claimed:      64 MiB      k=4096 lanes=32 n=200 warmup=20
+  cheater budgets:     fits=1g   starved=32m
+
+--- honest (mlock'd RAM)  (prover budget 1g) ---
+    p50=96.708 us   majflt=-   oom=false
+--- mmapdisk, RAM to spare  (prover budget 1g) ---
+    p50=109.584 us   majflt=16384   oom=false
+--- mmapdisk, RAM < buffer  (prover budget 32m) ---
+    p50=81312.625 us   majflt=471363   oom=false
+--- disk/pread, RAM < buffer  (prover budget 32m) ---
+    p50=79471.417 us   majflt=0   oom=false
+
+╔════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
+║                                  EXPERIMENT 2 -- THE MMAP ADVERSARY NEEDS RAM IT DOESN'T HAVE                                  ║
+╠════════════════════════════╦═════════════════════════════╦════════════╦═══════════════╦═══════════════════════╦════════════════╣
+║  scenario                  ║  prover RAM budget          ║  p50 (us)  ║  vs honest    ║  probes from storage  ║  major faults  ║
+╟────────────────────────────┼─────────────────────────────┼────────────┼───────────────┼───────────────────────┼────────────────╢
+║  honest (mlock'd RAM)      ║  1,024 MiB (16.00x buffer)  ║      96.7  ║  1.00x (ref)  ║                    -  ║             -  ║
+║  mmapdisk, RAM to spare    ║  1,024 MiB (16.00x buffer)  ║     109.6  ║        1.13x  ║                   2%  ║        16,384  ║
+║  mmapdisk, RAM < buffer    ║  32 MiB (0.50x buffer)      ║  81,312.6  ║         841x  ║                  52%  ║       471,363  ║
+║  disk/pread, RAM < buffer  ║  32 MiB (0.50x buffer)      ║  79,471.4  ║         822x  ║                  52%  ║             0  ║
+╚════════════════════════════╩═════════════════════════════╩════════════╩═══════════════╩═══════════════════════╩════════════════╝
+  buffer=64 MiB  k=4096  lanes=32  n=200/run  warmup=20
+  'probes from storage' = prover's own block-layer reads / 4 KiB / probes issued
+  absolute us are within-session only -- compare rows of THIS run, never across runs
+  storage costs are a LOWER BOUND: Docker's disk is cached again by the macOS host
+
+╔═════════════════════════════════════════════════════════════════════════════════════╗
+║                 VERDICT -- TAKE THE RAM AWAY AND THE MMAP CHEAT DIES                ║
+╠═════════════════════════════════════════════════════════════════════════════════════╣
+║  mmapdisk, RAM to spare  =        109.6 us  (1.13x honest)                          ║
+║    2% of probes from storage -- the block-layer reads stop after one cold           ║
+║    sweep, because the page cache is holding the whole file. This adversary is       ║
+║    not evading residency; it IS resident, via the page cache instead of mlock.      ║
+║                                                                                     ║
+║  mmapdisk, RAM < buffer  =     81,312.6 us  (841x honest)                           ║
+║    52% of probes from storage, 471,363 major faults. Same binary, same              ║
+║    mmap, same file -- only the RAM is gone. cgroup reclaim unmaps the file's        ║
+║    pages, so probes fault through to storage with no syscall-free path left.        ║
+║                                                                                     ║
+║  disk/pread, RAM < buffer =    79,471.4 us  (822x honest)                           ║
+║    52% of probes from storage, 0 major faults (a pread pays no fault).              ║
+║    Within 2% of the mmap row: once the data genuinely is not resident,              ║
+║    the syscall overhead that dominated experiment 1 is lost in the noise.           ║
+║                                                                                     ║
+║  cross-check: that row moves 8.4 MiB of storage traffic per challenge;              ║
+║    at 108 MB/s (what this virtual disk sustains) that traffic alone accounts        ║
+║    for the measured latency. The slowdown is storage work, not measurement error.   ║
+║                                                                                     ║
+║  => The mmap trick is not a defeat of the timing detector; it is a demonstration    ║
+║     that the page cache counts as RAM. An adversary that genuinely does not hold    ║
+║     the data is still ~841x slower, mmap or not.                                    ║
+║  => Still unvalidated: a bare-metal >RAM test on real storage, and a decision rule  ║
+║     with stated false-positive/false-negative rates (see NEXT_STEPS.md).            ║
+╚═════════════════════════════════════════════════════════════════════════════════════╝
+
+  raw JSON + prover logs: docs/investigations/mmap-needs-ram/results/

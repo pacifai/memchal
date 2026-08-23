@@ -1,0 +1,16 @@
+# compiled binaries (repo root)
+/prover
+/verifier
+/cheating_prover
+# compiled test binary
+/tests/known_answer
+# scratch experiment artifacts
+/scratch/
+*.o
+# generated data/plots are kept as baseline for now; ignore future /tmp spills
+/tmp/
+# generated results (CSVs/plots) — regenerate with ./run.sh; summaries live in docs
+/results/
+# python bytecode
+__pycache__/
+*.pyc
