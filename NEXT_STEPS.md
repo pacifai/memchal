@@ -10,14 +10,6 @@ Three kinds of thing live in different places:
   promoted to `accepted` once agreed.
 - **Analyses** — the [investigations](docs/investigations/).
 
-## Now — near-term build
-
-- [ ] **Make the defenses safe by default.** The send-buffer defenses ship off
-  (`--gen splitmix64`, `--chain independent`, `--nonce sequential`) so the attacks
-  are demonstrable; any adversarial use needs all three on. Flip the defaults for
-  non-benchmark use and keep a documented benchmark opt-out. *Done when:* defaults
-  changed, tests updated, and the README says which mode is which.
-
 ## Next — proving residency of the real workload
 
 Today the challenge proves you're holding a specific random buffer the verifier sent.

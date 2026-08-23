@@ -6,9 +6,8 @@
 The stabilized detectors prove "you can't answer without *reading* the data." That is
 weaker than proof-of-retention: there are several ways to answer fast without
 genuinely holding the data, and each needs its own defense. Rather than assert the
-gap, we built each attack as a mode and each defense as a toggle (defaulting to the
-vulnerable behavior so the existing KAT/measurements are unchanged and the demo can
-flip a defense on and watch the attack get caught). This ADR records the taxonomy;
+gap, we built each attack as a mode and each defense as a toggle, so the demo can flip
+a defense on and watch the attack get caught. This ADR records the taxonomy;
 the numbers live in the investigations, the deeper framing in
 [NEXT_STEPS](../../NEXT_STEPS.md) and [ADR 0003](0003-timing-detector-scope-and-measurement.md).
 
@@ -28,17 +27,31 @@ problem.
 The **correctness detector** (`fake` always fails) is unaffected by all three and
 remains the one claim that survives regardless.
 
-## Safety: the defaults are the *vulnerable* settings
-`--gen splitmix64`, `--chain independent`, and `--nonce sequential` are the defaults,
-so that the existing KAT/measurements stay byte-identical and each attack is
-demonstrable out of the box. **This means the tool ships with every defense OFF.** Any
-adversarial or production use must (a) enable all three (`--gen chacha --chain
-dependent --nonce random`) **and** (b) *validate* the configuration — a config can
-look defended while being toothless (e.g. `dependent` with `k = lanes` gives chain
-depth 1; the verifier now rejects `k/lanes < 16`, but the demo/UI can still present
-"dependent" as on). Treat "a defense is selected" and "a defense is effective" as
-separate facts. See [ADR 0005](0005-per-lane-chaining-vs-gpu-parallelism.md) for the
-chain-depth caveat specifically.
+## Safety: the defaults are the *secure* settings
+The verifier ships with all three defenses on: `--gen chacha`, `--chain dependent`,
+and `--nonce random` are the defaults, so a bare `./verifier` is secure out of the box.
+The **benchmark opt-out** is to name the weak setting explicitly — `--gen splitmix64
+--chain independent --nonce sequential` — which reproduces the byte-identical
+independent/splitmix64/sequential path the KAT and the headline measurements are pinned
+to. Nothing about the reproducibility relies on the *default* being weak: the
+known-answer test computes the math directly, the harness (`run_trials.py`) always
+passes the toggles it measures explicitly, and the demo sets its own starting toggles
+(vulnerable, so a viewer can turn a defense on and watch the catch). Flipping the
+default only changes what an *unflagged* run does.
+
+> Earlier this ADR shipped the defaults the other way — every defense off — so the
+> attacks were demonstrable with no flags. That traded a safe out-of-the-box posture
+> for demo convenience the demo never needed (it sets its own toggles). The defaults
+> are now secure; the weak path is one explicit flag away.
+
+Selecting a defense is still not the same as it being effective: a config can look
+defended while being toothless (e.g. `dependent` with `k = lanes` gives chain depth 1).
+The verifier rejects `k/lanes < 16` and, because `dependent` is now the default, an
+unflagged small-`k` run is refused rather than silently toothless. The demo/UI can
+still *present* "dependent" as on without the depth to back it, so treat "a defense is
+selected" and "a defense is effective" as separate facts. See
+[ADR 0005](0005-per-lane-chaining-vs-gpu-parallelism.md) for the chain-depth caveat
+specifically.
 
 ## Consequences and caveats
 - **recompute** is cheap and devastating on `splitmix64` (~0.8× honest, 0 bytes held);

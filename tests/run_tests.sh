@@ -63,7 +63,12 @@ echo "=== INVARIANT TESTS ==="
 
 # Common verifier flags for all invariant runs.
 # Small: 8 MiB buffer, 2048 samples, 16 lanes, 100 measured, 20 warmup.
-VERIFIER_ARGS="--mb 8 --k 2048 --lanes 16 --n 100 --warmup 20 --csv /dev/null"
+# The verifier now defaults to the secure config (--gen chacha --chain dependent
+# --nonce random). These base cases pin --chain independent so the independent
+# path stays covered here while Step 3b covers the dependent path; the gen/nonce-
+# specific cases below name their generator/nonce explicitly rather than lean on
+# the default, so the suite is stable whichever way the binary defaults point.
+VERIFIER_ARGS="--mb 8 --k 2048 --lanes 16 --n 100 --warmup 20 --csv /dev/null --chain independent"
 JSON=/tmp/inv.json
 
 # Helper: read errors and samples from the JSON written by the verifier.
@@ -166,10 +171,12 @@ run_invariant "prefetch" 9109 \
 # The recompute adversary recovers the splitmix64 seed from buf[0] and
 # regenerates every word in O(1) with ~zero memory.  Against a splitmix64
 # buffer the regenerated data is correct -> 0 errors (attack wins).
+# splitmix64 is the weak generator, so name it explicitly (the default is chacha).
+_SAVE_ARGS="$VERIFIER_ARGS"; VERIFIER_ARGS="$VERIFIER_ARGS --gen splitmix64"
 run_invariant "recompute_vs_splitmix" 9106 \
     "e == 0" \
     ./cheating_prover --port 9106 --mode recompute --datafile /tmp/memchal_test_recompute.bin
-# Note: the verifier uses the default splitmix64 generator.
+VERIFIER_ARGS="$_SAVE_ARGS"
 
 # --- Case 7: recompute vs chacha20 verifier — defense WORKS, ALL errors ---
 # With a chacha20-generated buffer the recompute adversary cannot recover the
@@ -247,9 +254,12 @@ fi
 # --- Case 9: precompute vs sequential nonces — attack SUCCEEDS, 0 errors ---
 # The precompute adversary caches answers from predicted nonces; against
 # sequential nonces its predictions are all correct -> 0 verification errors.
+# sequential is the weak nonce mode, so name it explicitly (the default is random).
+_SAVE_ARGS="$VERIFIER_ARGS"; VERIFIER_ARGS="$VERIFIER_ARGS --nonce sequential"
 run_invariant "precompute_vs_sequential" 9110 \
     "e == 0" \
     ./cheating_prover --port 9110 --mode precompute --datafile /tmp/memchal_test_precompute_seq.bin
+VERIFIER_ARGS="$_SAVE_ARGS"
 
 # --- Case 10: precompute vs random nonces — correctness must still hold ---
 # Under random nonces the predictions miss -> the prover computes from disk on

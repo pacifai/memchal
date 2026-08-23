@@ -88,12 +88,15 @@ until you turn on a matching defense.
 | `precompute` | Exploits predictable nonces: a background thread infers the coming nonces and computes their answers from disk in the gaps between challenges, then serves them instantly. | `--nonce random`: each nonce comes from a cryptographic random generator, so there's nothing to precompute and the prover must read during the timed window — timing. |
 
 The last three defenses are verifier flags (`--gen chacha`, `--chain dependent`,
-`--nonce random`), and they ship **off** by default so the attacks are demonstrable
-out of the box. Any real use turns all three on. Selecting a defense isn't the same
-as it being effective: `--chain dependent`, for example, only helps if each lane
-runs a deep enough chain, so the verifier enforces `k / lanes ≥ 16`. The full
-reasoning is in [ADR 0004](docs/decisions/0004-adversary-taxonomy-and-defenses.md)
-and [ADR 0005](docs/decisions/0005-per-lane-chaining-vs-gpu-parallelism.md); the
+`--nonce random`), and they ship **on** by default — the verifier is secure out of
+the box. To reproduce an attack winning, name the weak setting explicitly as a
+benchmark opt-out: `--gen splitmix64 --chain independent --nonce sequential` (or
+just the one you want to defeat). Selecting a defense isn't the same as it being
+effective: `--chain dependent`, for example, only helps if each lane runs a deep
+enough chain, so the verifier enforces `k / lanes ≥ 16` and refuses a shallower
+config. The full reasoning is in
+[ADR 0004](docs/decisions/0004-adversary-taxonomy-and-defenses.md) and
+[ADR 0005](docs/decisions/0005-per-lane-chaining-vs-gpu-parallelism.md); the
 measurements behind the `prefetch` and `mmapdisk` rows are in
 [docs/investigations/](docs/investigations/).
 
