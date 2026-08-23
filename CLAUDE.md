@@ -118,9 +118,9 @@ core-affinity questions (see `NEXT_STEPS.md`).
 ## What's still open (see NEXT_STEPS.md)
 
 1. **Proving residency of the real workload** — the hardest open problem: prove the
-   prover holds the actual model weights (not filler), either by building a
-   weight-derived buffer from a short recipe or by challenging the weights directly.
-   See the roadmap for the two routes and their costs.
+   prover holds something tied to the actual model (not filler), via a memory-hard,
+   weight-bound generator built from a short recipe, without friction for model
+   providers. See the roadmap.
 2. **Timing/residency validation on real hardware** — the CPU-in-Docker environment
    can't measure it faithfully, and CPU-DRAM latencies don't transfer to GPU-VRAM, so
    the authoritative check rides on the GPU port (a bare-metal CPU cold read is an

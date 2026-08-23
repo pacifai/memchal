@@ -24,33 +24,29 @@ Three kinds of thing live in different places:
 ## Next — proving residency of the real workload
 
 Today the challenge proves you're holding a specific random buffer the verifier sent.
-The goal is to prove you're holding *the thing that matters* — the model weights the
-GPU is actually serving — so passing the challenge means the workload itself is
-resident, not filler.
+The goal is to prove you're holding something tied to the actual workload — not
+generic filler — while keeping friction with model providers low.
 [ADR 0004](docs/decisions/0004-adversary-taxonomy-and-defenses.md) explains why the
-send-buffer design doesn't get there. Two routes, each with a cost to weigh against
-the inference workload:
+send-buffer design doesn't get there.
 
-- [ ] **Option A — a memory-hard, weight-bound generator.** Ship a short recipe and
-  have both sides build a dataset from it that is expensive to regenerate on demand
-  (so the prover must store it) and derived from the weights. *Cost to weigh:* the
-  memory-hardness makes the one-time *generation* expensive, not the per-challenge
-  answer (the hot path stays cheap), so it doesn't tax every inference — but the
-  generated buffer is a *separate* block that competes with the model for VRAM and
-  spends GPU cycles/bandwidth each time it's probed. Size the parameters so setup and
-  per-challenge overhead stay tolerable next to inference. *Done when:* a proposed ADR
-  gives the construction, threat model, and a VRAM/throughput budget against a real
-  inference workload.
-- [ ] **Option B — challenge the weights directly.** The prover already holds the
-  weights in VRAM to serve inference, so challenge *their* residency (probe a function
-  of the weights) with no separate buffer to build or store. This avoids the
-  memory-hard generation cost and the double VRAM entirely; the hard part is doing it
-  without revealing the weights and while staying cheap per challenge. *Done when:* a
-  proposed ADR shows a weight-probing challenge with its privacy and per-challenge
-  cost analyzed.
-- [ ] **Prototype the chosen route on CPU.** *Done when:* a `cheating_prover` attack
-  that answers without genuinely holding the data (regenerate, or hold only part)
-  loses against it, pinned by a known-answer test and an invariant.
+The plan is a **memory-hard, weight-bound generator** (the build-buffer design): ship
+a short recipe, and both sides build a dataset from it that is expensive to regenerate
+on demand (so the prover must store it) and tied to the model. The memory-hardness
+falls on the one-time *generation*, not the per-challenge answer, so it does **not**
+multiply the per-challenge cost — that cost is inescapable and accepted either way.
+
+- [ ] **Design the generator.** *Done when:* a proposed ADR gives the construction
+  (Argon2- or scrypt-style), the threat model, its cost parameters, and the VRAM
+  footprint of the generated buffer against a real inference workload.
+- [ ] **Prototype it on CPU.** *Done when:* a `cheating_prover` attack that answers
+  without genuinely holding the data (regenerate, or hold only part) loses against it,
+  pinned by a known-answer test and an invariant.
+
+> Not in scope, noted for the future: **challenging the weights directly** (probe a
+> function of the weights the prover already holds for inference) would avoid a
+> separate buffer entirely, but it needs the provider to expose or cooperate on the
+> weights — the kind of friction we're trying to avoid. Revisit only if that
+> constraint changes.
 
 ## Later — GPU port and decision rule
 
