@@ -1,4 +1,4 @@
-# ADR 0004 — Adversary taxonomy and defenses (Model 1)
+# ADR 0004 — Adversary taxonomy and defenses (the send-buffer design)
 
 **Status:** accepted (implemented as toggles; all attacks are `cheating_prover` modes, all defenses are verifier flags)
 
@@ -12,9 +12,10 @@ flip a defense on and watch the attack get caught). This ADR records the taxonom
 the numbers live in the investigations, the deeper framing in
 [NEXT_STEPS](../../NEXT_STEPS.md) and [ADR 0003](0003-timing-detector-scope-and-measurement.md).
 
-All of this is **Model 1** (the prover only receives the bytes; the verifier keeps
-the seed). Model 2 (verifier ships a seed → needs a *memory-hard* generator) is out
-of scope and remains the research frontier.
+All of this is the **send-buffer** design (the prover receives the bytes; the
+verifier keeps the seed). The **build-buffer** design (the verifier ships a seed,
+which needs a *memory-hard* generator) is out of scope and remains the research
+frontier.
 
 ## The three escape hatches and their defenses
 
@@ -39,10 +40,10 @@ depth 1; the verifier now rejects `k/lanes < 16`, but the demo/UI can still pres
 separate facts. See [ADR 0005](0005-per-lane-chaining-vs-gpu-parallelism.md) for the
 chain-depth caveat specifically.
 
-## Consequences / caveats (measured, not smoothed)
+## Consequences and caveats
 - **recompute** is cheap and devastating on `splitmix64` (~0.8× honest, 0 bytes held);
-  `--gen chacha` fully closes it in Model 1. It is O(1) random-access, *not*
-  memory-hard, so it cannot carry Model 2.
+  `--gen chacha` fully closes it for send-buffer. It is O(1) random-access, *not*
+  memory-hard, so it cannot carry the build-buffer design.
 - **prefetch** is a **strawman in the cached regime** (its `madvise`-storm overhead
   loses to a plain mmap read) and a **real ~4× attack when starved**; the defense
   removes the edge only where the attack exists. See
@@ -58,5 +59,5 @@ chain-depth caveat specifically.
 ## Related
 Investigations: [disk-is-syscalls](../investigations/disk-is-syscalls/),
 [mmap-needs-ram](../investigations/mmap-needs-ram/),
-[prefetch-needs-pattern](../investigations/prefetch-needs-pattern/). The Model-1 vs
-Model-2 rationale and the weight-bound frontier are in NEXT_STEPS §1.
+[prefetch-needs-pattern](../investigations/prefetch-needs-pattern/). The send-buffer
+vs build-buffer rationale and the weight-bound frontier are in NEXT_STEPS §1.

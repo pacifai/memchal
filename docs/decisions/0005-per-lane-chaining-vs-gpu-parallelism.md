@@ -1,6 +1,6 @@
 # ADR 0005 — Per-lane chaining: latency-hardness vs GPU parallelism
 
-**Status:** accepted for CPU (Model 1); **explicitly to be revisited at the GPU port**
+**Status:** accepted for CPU (the send-buffer design); **explicitly to be revisited at the GPU port**
 
 ## Context
 The latency-hardness defense (`--chain dependent`, [ADR 0004](0004-adversary-taxonomy-and-defenses.md))
@@ -41,7 +41,7 @@ degrade to no hardness.
   `depth`), or a different memory-hard construction. This tradeoff — thread count vs
   chain depth vs total probes — should be decided deliberately when the kernel is
   written, not inherited by accident.
-- **Orthogonal to Model 2.** This is *latency*-hardness (can't prefetch a predictable
+- **Orthogonal to build-buffer.** This is *latency*-hardness (can't prefetch a predictable
   pattern). It does nothing for *capacity*-hardness / the recompute regime, which
   needs a memory-hard **generator** (Argon2-style) — a separate mechanism (NEXT_STEPS).
 

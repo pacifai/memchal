@@ -1,24 +1,38 @@
 // cheating_prover.cpp — a prover that does NOT honestly hold the data resident;
 // demonstrates what each cheat does to the latency profile / correctness.
 //
-// Modes (--mode):
-//   honest   full buffer pinned in RAM (baseline; same as prover.cpp)
-//   disk     buffer lives only on disk; every probe is a pread() -> slow tail
-//   partial  keep a fraction --frac in RAM, rest on disk; probes into the
-//            evicted part do pread() -> CORRECT but BIMODAL latency (fast hits +
-//            slow misses). Tail grows as --frac shrinks. A pure timing detector.
-//   fake     keep a fraction --frac in RAM; for misses, fabricate a value ->
-//            fast but WRONG -> verification errors. A pure correctness detector.
-//   mmapdisk data on disk (page-cache DONTNEED'd), read via a mmap'd view — NO
-//            per-probe pread syscall. Answers at ~honest speed *when it has the
-//            RAM to cache the file* (the page cache is then holding the data, so
-//            it really is resident); with a memory budget smaller than the buffer
-//            it claims, probes fault through to storage and it is ~1000x honest.
-//            See scripts/experiments/mmap_needs_ram.sh.
+// Modes (--mode). The first group is caught by the two built-in signals (a wrong
+// answer, or a slow one). The last three are shortcuts that beat both signals until
+// the matching verifier defense is turned on.
+//
+//   honest     full buffer pinned in RAM (baseline; same as prover.cpp)
+//   disk       buffer lives only on disk; every probe is a pread() -> slow tail
+//   partial    keep a fraction --frac in RAM, rest on disk; probes into the
+//              evicted part do pread() -> CORRECT but BIMODAL latency (fast hits +
+//              slow misses). Tail grows as --frac shrinks. A pure timing detector.
+//   fake       keep a fraction --frac in RAM; for misses, fabricate a value ->
+//              fast but WRONG -> verification errors. A pure correctness detector.
+//   mmapdisk   data on disk (page-cache DONTNEED'd), read via a mmap'd view — NO
+//              per-probe pread syscall. Answers at ~honest speed *when it has the
+//              RAM to cache the file* (the page cache is then holding the data, so
+//              it really is resident); with a memory budget smaller than the buffer
+//              it claims, probes fault through to storage and it is ~1000x honest.
+//              See docs/investigations/mmap-needs-ram/.
+//   recompute  hold nothing: recover the buffer's splitmix64 seed from one word and
+//              regenerate every probe in O(1). Correct AND fast against the default
+//              generator. Defeated by `--gen chacha` (seed unrecoverable -> wrong
+//              data -> correctness catches it). See docs/investigations/ + ADR 0004.
+//   prefetch   data on disk via mmap; enumerate the independent challenge's offsets
+//              up front and MADV_WILLNEED-batch the pages, dodging serial faults.
+//              Real only under memory pressure. Defeated by `--chain dependent`
+//              (offsets depend on prior reads -> can't be enumerated ahead).
+//   precompute exploit predictable nonces: a background thread infers coming nonces
+//              and precomputes their answers from disk between challenges, serving
+//              instantly. Defeated by `--nonce random` (nothing to precompute).
 //
 // All modes reuse answer_challenge_t() from common.hpp, so a correct answer is
-// byte-identical to the verifier's local recomputation — only latency (disk/
-// partial) or correctness (fake) exposes the cheat.
+// byte-identical to the verifier's local recomputation — only latency, or (for
+// fake / a defended recompute) correctness, exposes the cheat.
 #include "common.hpp"
 #include <cassert>
 #include <cstdio>

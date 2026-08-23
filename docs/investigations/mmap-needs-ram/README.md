@@ -44,7 +44,7 @@ virtual disk sustains, that traffic alone accounts for the latency.
 counts as RAM. Timing tracks residency; an adversary that genuinely doesn't hold
 the data is ~840× slower, mmap or not.**
 
-## Limits (stated, not smoothed)
+## Limits
 The budget is a **cgroup limit standing in for physical RAM**, and Docker's disk is
 cached again by the macOS host — so the storage penalty here is a **lower bound**.
 The settling experiment is still a bare-metal >RAM run on real storage (NEXT_STEPS).

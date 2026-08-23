@@ -1,246 +1,199 @@
-# Low-latency memory-challenge PoC
+# Memchal — a memory-retention challenge
 
-A verifier sends a large random buffer to a prover, then repeatedly challenges the
-prover to prove the data is still resident in fast memory. On each challenge the
-prover must derive thousands of unpredictable offsets from a nonce, read those
-words across the whole buffer, and fold them into a chained hash. Because the
-offsets aren't known until the nonce arrives and every probe affects the result,
-you can't answer correctly without actually reading the data.
+A verifier sends a prover a large buffer of random bytes, then repeatedly asks it
+to prove the buffer is still sitting in fast memory. Each challenge carries a
+nonce. From that nonce the prover derives thousands of unpredictable offsets,
+reads the word at each one, and folds them all into a single chained hash. The
+offsets aren't knowable until the nonce arrives, and every read changes the
+result — so the prover can't return the right answer without actually reading the
+data.
 
-This is a proof-of-retention / memory-binding primitive — spot-checking à la
-proof-of-retrievability, with **timing** and **correctness** as the two
-discriminators. It is a CPU precursor to a GPU/VRAM version for AI-compute
-governance (proving a datacenter's memory holds the workload it claims).
+This is a proof-of-retention primitive: a spot check that someone still holds data
+they claim to hold, using two signals — the **correctness** of the answer and the
+**time** it takes to produce. It's a CPU precursor to a GPU/VRAM version aimed at
+AI-compute governance: proving a datacenter's memory really holds the workload it
+bills for.
 
-## What this PoC does and does NOT establish (read this first)
+The prover and the verifier share one definition of the challenge
+(`src/common.hpp`). The prover answers; the verifier recomputes the same answer
+locally and compares. Because both run the same code, a correct answer is
+identical no matter where the prover's bytes came from — so only a wrong answer or
+a slow one reveals a cheat.
 
-This repo was stabilized to make its numbers trustworthy. The honest summary:
+## What it proves, and what it doesn't
 
-- **Correctness detection is robust.** A prover that fabricates any withheld data
-  is caught with overwhelming probability (`1 − (1−m)^k`; for `m=0.001, k=4096`
-  ≈ 0.98). Verified by test: `fake` fails **every** challenge; `honest`/`disk`/
-  `mmapdisk` never do.
-- **Timing does NOT measure storage distance; it measures residency.** The
-  measured "disk is ~15× slower" signal is **pread syscall overhead, not storage
-  distance** — the identical probe loop over a tmpfs (pure RAM, zero block I/O)
-  costs ~94% as much as over the container disk (experiment 1). An **mmap
-  adversary** (data on disk, read through a memory-mapped view, no per-probe
-  syscall) answers at ~honest speed and passes correctness — but experiment 2
-  shows *why*: with RAM to spare the page cache holds the whole file, so that
-  adversary **is** resident, via the page cache instead of `mlock`. Give the same
-  adversary a memory budget **smaller than the buffer it claims to hold** and it
-  collapses to **~840× honest** with **~52% of its probes faulting through to
-  storage**. So the timing signal tracks *whether the data is in fast memory*, not
-  *what device it came from* — which is what the primitive actually cares about.
-- **What is still unvalidated.** Experiment 2 constrains the page cache with a
-  cgroup memory budget, not physical RAM on real storage, and Docker's disk sits
-  on the macOS host's own cache — so its storage costs are a **lower bound**. A
-  bare-metal >RAM run is still the settling experiment. See [NEXT_STEPS.md](NEXT_STEPS.md).
-- **There is no decision rule yet.** This measures separations; it does not yet
-  classify a prover with stated false-positive/false-negative rates.
+- **Correctness detection is solid.** A prover that fabricates any withheld data is
+  caught with probability `1 − (1−m)^k` (for `m=0.001, k=4096`, about 0.98). Tests
+  confirm it: the `fake` prover fails every challenge; honest and disk-backed
+  provers never do.
+- **Timing tracks residency, not the storage device.** The buffer being "on disk"
+  is not what makes a cheat slow; keeping it out of memory is. An adversary that
+  leaves the data on disk but memory-maps it answers at honest speed, because the
+  operating system's page cache is holding the file — the data genuinely is
+  resident. Take that RAM away (budget the prover below the buffer size) and it
+  collapses to hundreds of times slower, with about half its reads faulting to
+  storage. So timing tells you whether the data is in fast memory right now, which
+  is what the primitive cares about. See
+  [ADR 0003](docs/decisions/0003-timing-detector-scope-and-measurement.md) for the
+  measurements behind this.
+- **The shortcuts around actually reading the data are each defended.** A prover can
+  still try to regenerate the buffer from its seed, prefetch predictable offsets, or
+  precompute answers to predictable challenges. Each has a defense you toggle on, and
+  a test that shows the attack win with the defense off and lose with it on. See
+  [Attacks and defenses](#attacks-and-defenses) below.
+- **Two things are still open.** There's no decision rule yet — the harness reports
+  how far apart the modes sit, not an accept/reject classifier with stated error
+  rates. And the timing signal still needs a run on real hardware with a buffer
+  larger than RAM to confirm it against a serious adversary; the current numbers
+  come from a container whose memory limit stands in for physical RAM, so they're a
+  lower bound. See [NEXT_STEPS.md](NEXT_STEPS.md).
 
-## Repository layout
+## How a challenge works
 
-```
-CLAUDE.md       agent entry point (goal, architecture, rules, open issues)
-src/            common.hpp (challenge math — single source of truth), prover.cpp,
-                verifier.cpp, cheating_prover.cpp
-scripts/        mc_stats.py (stats + error propagation, single source),
-                run_trials.py (interleaved repeat-trials harness),
-                plot.py (self-describing chart), fmt_table.py (aligned output)
-tests/          kat.cpp (known-answer test), run_tests.sh (KAT + invariants)
-docs/decisions/       ADRs — why the harness/claims are what they are
-docs/investigations/  analyses (question → script → results) backing the ADRs,
-                      incl. disk-is-syscalls/ and mmap-needs-ram/
-demo/           bridge.py (local server driving real containers) + static/ (live page)
-results/        generated CSVs/plots (gitignored)
-Dockerfile, run.sh, Makefile
-```
+A challenge is `(nonce, k, lanes)`. Seeded by the nonce, the prover draws `k`
+pseudo-random offsets spread across the whole buffer, reads each word, and folds
+them into a chained hash. Three properties make this bind to memory:
 
-Deeper docs: [`CLAUDE.md`](CLAUDE.md), the [decision records](docs/decisions/) and
-the [investigations](docs/investigations/) that back them.
+- **Unpredictable until issued.** The offsets come from the nonce, so nothing can
+  be prepared before the challenge arrives.
+- **Every read counts.** Because the hash is chained, changing or skipping any one
+  word changes the final result. There's no shortcut that reads only part of the
+  buffer.
+- **The work is dominated by random-access reads.** `k` scattered reads across a
+  large buffer. On this hardware about half the per-probe cost is the memory stall
+  and half is the hashing itself.
 
-## Build & run
+`answer_lane_t` and `answer_challenge_t` in `src/common.hpp` are the single
+definition of this math, called by the prover, the cheating prover, and the
+verifier alike.
 
-The code is built and run inside a **linux/arm64** container (native on Apple
-Silicon — no emulation, which would destroy timing fidelity). `run.sh` grants the
-lock privileges the honest baseline needs and mounts `results/` to the host.
+## Attacks and defenses
+
+A cheating prover has several ways to look like it's holding the data without
+actually holding it. `src/cheating_prover.cpp` implements each one as a mode, so the
+defense is tested rather than asserted — run the attack, watch it win, turn the
+defense on, watch it lose. The first group is caught by the two built-in signals
+(a wrong answer, or a slow one). The last three are shortcuts that beat both signals
+until you turn on a matching defense.
+
+| `--mode` | What it tries | How it's caught |
+|---|---|---|
+| `honest` | Holds the whole buffer in locked RAM. The baseline every other mode is measured against. | — |
+| `disk` | Leaves the data on disk and issues one read system call per probe. | Slow — timing. |
+| `partial` | Keeps part of the buffer in RAM and the rest on disk. | Slow and bimodal — fast hits, slow misses — timing. |
+| `fake` | Fabricates any word it doesn't hold. | Wrong answers — correctness. |
+| `mmapdisk` | Leaves the data on disk but memory-maps it, so there's no per-probe system call. | Matches honest speed while the page cache holds the file (it really is resident), then runs ~840× slower once its RAM budget drops below the buffer — timing tracks residency, not the device. |
+| `recompute` | Throws the buffer away and regenerates each probed word from the generator seed. Correct *and* fast, so it beats both signals. | `--gen chacha`: the buffer comes from a random 256-bit ChaCha20 key, so the seed can't be recovered and the regenerated words are wrong — correctness. |
+| `prefetch` | Keeps the data on disk, derives all the offsets from the nonce up front, and prefetches those pages before answering — dodging the serial faults that make `mmapdisk` slow when starved. | `--chain dependent`: each offset depends on the previously read word, so the offsets can't be derived ahead of the reads, and the prover falls back to slow serial faults — timing. |
+| `precompute` | Exploits predictable nonces: a background thread infers the coming nonces and computes their answers from disk in the gaps between challenges, then serves them instantly. | `--nonce random`: each nonce comes from a cryptographic random generator, so there's nothing to precompute and the prover must read during the timed window — timing. |
+
+The last three defenses are verifier flags (`--gen chacha`, `--chain dependent`,
+`--nonce random`), and they ship **off** by default so the attacks are demonstrable
+out of the box. Any real use turns all three on. Selecting a defense isn't the same
+as it being effective: `--chain dependent`, for example, only helps if each lane
+runs a deep enough chain, so the verifier enforces `k / lanes ≥ 16`. The full
+reasoning is in [ADR 0004](docs/decisions/0004-adversary-taxonomy-and-defenses.md)
+and [ADR 0005](docs/decisions/0005-per-lane-chaining-vs-gpu-parallelism.md); the
+measurements behind the `prefetch` and `mmapdisk` rows are in
+[docs/investigations/](docs/investigations/).
+
+## Verified memory pinning
+
+The honest prover in `src/prover.cpp` maps an anonymous region, touches every
+page, and locks it into RAM with `mlock`. It does not trust the return value of
+`mlock`: it reads `VmLck` from `/proc/self/status` to confirm the lock took
+effect. If the buffer isn't genuinely pinned, the prover refuses to run, because
+an unpinned baseline is meaningless. Passing `--allow-unlocked` overrides this and
+records `locked=false` in every output, so no result can quietly rest on an
+unpinned baseline.
+
+## Build and run
+
+Everything builds and runs inside a linux/arm64 container (native on Apple
+Silicon — emulation would ruin the timing). `run.sh` grants the memory-lock
+privilege the honest prover needs and mounts `results/` back to the host.
 
 ```bash
-./run.sh                       # build + smoke test
-./run.sh bash tests/run_tests.sh                          # KAT + invariant tests
-# repeat-trials (interleaved cycles) + plot:
+./run.sh                              # build, then a smoke test
+./run.sh bash tests/run_tests.sh      # known-answer test + invariants
+# repeat trials, then plot:
 ./run.sh bash -c 'make && \
   python3 scripts/run_trials.py --repeats 10 --n 3000 --k 4096 --mb 64 \
       --modes floor,honest,disk,partial,fake,mmapdisk --out results/trials.json && \
   python3 scripts/plot.py results/trials.json'
-# the two discriminator experiments, in demo order:
-./run.sh bash docs/investigations/disk-is-syscalls/disk_is_syscalls.sh   # 1: the penalty is syscalls
-bash docs/investigations/mmap-needs-ram/run_mmap_needs_ram.sh            # 2: the mmap cheat needs RAM
 ```
 
-Experiment 2 runs on the **host**, not via `run.sh`: it drives docker itself,
-putting the prover in a container whose memory budget is smaller than the buffer
-it claims to hold, and the verifier in a second container sharing the prover's
-network namespace (same loopback path as experiment 1, separate memory
-accounting). Knobs: `MB K LANES N WARMUP FIT_MEM STARVED_MEM CPUS`.
+### Live demo
 
-Running natively on real Linux hardware is the same commands without the VM (see
-NEXT_STEPS — that is the environment that would settle the storage-physics and
-core-affinity questions this VM cannot).
+Run `python3 demo/bridge.py` on the host, then open `http://127.0.0.1:8777`. Pick
+a prover, give it a RAM budget, and watch it answer: a page map (blue for pages
+served from memory, orange for pages faulted to storage, taken from the kernel's
+own view), latency per challenge, and a log where `fake` gives itself away — fast,
+and wrong every time. Every number comes from a real prover and verifier running
+in containers; nothing is simulated. Tracing happens after each timed round trip,
+so it doesn't distort the measurement, but the headline numbers come from the
+terminal runs, not the demo.
 
-## The live demo (browser)
+### Supporting investigations
 
-```bash
-python3 demo/bridge.py          # on the host; then open http://127.0.0.1:8777
-```
+Two small experiments back the timing claim above. Each is a script plus a short
+writeup under `docs/investigations/`: `disk-is-syscalls/` shows the disk penalty is
+system-call overhead rather than storage distance, and `mmap-needs-ram/` shows the
+memory-mapped cheat collapses once it can't cache the buffer. Run them to reproduce
+[ADR 0003](docs/decisions/0003-timing-detector-scope-and-measurement.md).
 
-The same two experiments, driven interactively. Pick a prover (honest, mmapdisk,
-disk, partial, fake), give it a RAM budget, and interrogate it. Nothing is
-simulated: each run starts a real prover container at that budget and a real
-verifier, and every number on the page comes off their stdout.
+## Results
 
-- **Buffer page map** — one cell per 4 KiB page. Which pages were probed comes from
-  the verifier's own index sequence (`answer_challenge_t` with a recording loader);
-  whether a page was resident comes from the prover calling `mincore()` on its own
-  mapping. Blue = served from memory, orange = faulted through to storage.
-- **Latency per challenge / where it breaks** — log axis (40 µs and 60 ms share a
-  screen); walk the budget down and the curve finds the cliff.
-- **Challenge log** — nonce, response, latency, and whether it matched the
-  verifier's recomputation. This is where `fake` gives itself away: fast, and wrong
-  every time.
+Measured on Docker Desktop on Apple Silicon: a linux/arm64 VM limited to 1 vCPU
+and 2 GiB, with a 64 MiB buffer, `k=4096`, and `lanes=32`. Absolute times are not
+comparable across sessions — the VM pins each container to performance or
+efficiency cores for its whole life, which swings absolute latency by about 1.6×.
+Only within-session ratios are trustworthy, and every output file is stamped with
+its session id.
 
-**The demo is not the measurement.** Live tracing (`--stream` / `--trace`) emits an
-event and a periodic `mincore()` snapshot per challenge, *after* the timed round
-trip, so it's outside the measurement window but it spaces challenges out. The
-numbers in this README come from the terminal experiments, which never enable
-tracing. A prover starved below ~half the buffer can be OOM-killed mid-transfer;
-the bridge detects that, retries once, and says so.
+Representative within-session numbers (illustrative µs; compare within a session
+only):
 
-## How the challenge binds to memory
+| mode | p50 (µs) | ratio to honest | verify errors |
+|------|---------:|----------------:|--------------:|
+| transport floor (`k=0`) | ~47 | ~0.4× | 0 |
+| honest (RAM, lock verified) | ~114 | 1× | 0 |
+| disk (a read syscall per probe) | ~1850 | ~15× | 0 |
+| fake (misses fabricated) | ~108 | ~0.95× | every challenge |
+| mmap-on-disk, RAM to spare | ~122 | ~1.05× | 0 |
+| mmap-on-disk, RAM below buffer size | ~81000 | ~840× | 0 |
 
-On challenge `(nonce, k, lanes)` the prover, using a PRNG seeded by the nonce,
-draws `k` pseudo-random offsets across the **whole** buffer, reads each word, and
-folds them into a chained hash (`answer_lane_t` / `answer_challenge_t` in
-`src/common.hpp` — the single source of truth called by prover, cheating prover,
-and verifier alike, so a *correct* answer is byte-identical regardless of where
-the bytes came from).
+What the table says:
 
-- **Unpredictable until issued** — offsets derive from the nonce; nothing can be
-  precomputed before the challenge arrives.
-- **Every probe matters** — the chained fold means altering/withholding any word
-  changes the final hash, so no subset shortcut.
-- **Memory-bound work** — `k` random-access reads. On this hardware roughly half
-  the per-probe cost is the DRAM random-access stall and half is the hash-chain
-  ALU (measured, see below); "memory-bound" is only half-true.
+- Correctness cleanly separates `fake` from everyone else: `fake` is wrong on every
+  challenge, and the rest are always right.
+- `fake` answers about as fast as honest, so timing alone is not a cheat detector —
+  correctness is what catches fabrication.
+- The memory-mapped adversary matches honest while it can cache the buffer, and
+  blows up to about 840× once it can't. That gap is the residency signal.
+- About 40% of the honest response time is TCP transport (the `k=0` floor), so
+  memory time is reported as `honest − floor` with propagated error, never as a raw
+  number.
 
-## Memory pinning (verified, fail-loud)
+The fuller analysis — why `fake` is slightly faster, how latency scales with `k`,
+and the run-to-run variance — is in `docs/investigations/` and
+[ADR 0003](docs/decisions/0003-timing-detector-scope-and-measurement.md).
 
-`prover.cpp` mmaps an anonymous region, prefaults every page, and `mlock()`s it.
-Crucially it does **not trust `mlock`'s return value** — it verifies the lock
-took effect by reading `VmLck` from `/proc/self/status`. If the buffer is not
-genuinely pinned, the prover prints a FATAL banner and **refuses to run** (an
-unpinned honest baseline is meaningless). `--allow-unlocked` overrides this,
-prints a prominent UNLOCKED banner, and records `locked=false` all the way into
-the JSON/CSV/plots so no result can silently rest on an unpinned baseline.
+## Toward a GPU version
 
-## Measured results
+The answer path is written to port cleanly to a GPU: a flat word buffer, no STL,
+no exceptions. The buffer would live in VRAM through `cudaMalloc` (not swappable —
+the GPU equivalent of `mlock`), `answer_lane_t` becomes the per-thread kernel body,
+and the only non-portable line is the 128-bit multiply in `map_index`
+(`((__uint128)r * n) >> 64` becomes `__umul64hi(r, n)`). `splitmix64` and `mix64`
+are already identical. This is future work; see [NEXT_STEPS.md](NEXT_STEPS.md).
 
-**Environment.** Docker Desktop on Apple Silicon (6 performance + 4 efficiency
-cores); a linux/arm64 VM (kernel 6.10), **4 KiB pages inside the VM** (the host
-is 16 KiB), container limited to **1 vCPU / 2 GiB**. Buffer 64 MiB, `k=4096`,
-`lanes=32`, `n≥1500` samples/run, results aggregated over R **interleaved
-cycles** (every mode measured once per cycle in randomized order, so slow drift
-cancels in within-session comparisons).
+## Learn more
 
-**Critical caveat — absolute latencies are not portable across sessions.** The
-VM's vCPUs land on performance vs efficiency cores, fixed for a whole container
-session, producing a **~1.6× swing** in absolute latency between sessions (a long
-single session is stable — placement does not migrate mid-run). macOS gives no
-affinity control. **Only within-session ratios and paired differences are
-trustworthy;** every CSV/plot is stamped with its session id and this caveat.
-
-Representative within-session results (illustrative absolute µs from one session;
-compare within-session only):
-
-| mode | p50 (µs, illustrative) | ratio to honest | verify errors |
-|------|-----------------------:|----------------:|--------------:|
-| transport floor (`k=0`) |   ~47 | ~0.4× | 0 |
-| honest (RAM, mlock-verified) | ~114 | 1× | 0 / n |
-| disk (pread per probe) | ~1850 | **~15× ± 0.2** | 0 / n |
-| fake (misses fabricated) | ~108 | **0.95× ± 0.01** | **n / n** |
-| mmapdisk (on disk, mmap'd), RAM to spare | ~122 | **~1.05× ± 0.02** | 0 / n |
-| mmapdisk, prover RAM budget < buffer | ~81000 | **~840×** | 0 / n |
-
-What the numbers say, checked against the six open questions:
-
-1. **Is the RAM-vs-disk gap real?** Not as originally claimed — the *device* is
-   not what the gap measures. The same pread loop over tmpfs (RAM, `read_bytes=0`)
-   costs ~94% of the container-disk latency; the disk file is read from the block
-   layer exactly **once** (one full sweep) then served from page cache. The ~15×
-   is **syscall overhead**. What the timing *does* track is residency: run the mmap
-   adversary with a memory budget of half the buffer and ~52% of its probes fault
-   through to storage (verified by its own `read_bytes`/`majflt` counters), costing
-   **~840× honest** — and a pread prover under the same budget lands within ~2% of
-   it, because real storage work swamps the syscall difference from experiment 1.
-2. **Why is `fake` faster than `honest`?** Genuinely, not noise. `fake --frac 0.5`
-   fabricates half its probes (pure ALU, no memory traffic) over a smaller
-   resident buffer; `fake --frac 0` (no memory at all) is faster still but only
-   ~33% — memory access is real but **not dominant**.
-3. **How much is TCP?** A lot at the fast end. The `k=0` transport floor is ~40%
-   of honest in-container (and ~15 µs natively). Memory-time is reported as
-   `honest − floor` **with propagated error**, never as a bare number — the floor
-   itself has ~12% run-to-run variance.
-4. **Are the modes separable given real variance?** Yes for the correctness split
-   (`fake` errors = n, always) and for disk-vs-honest (~15×, non-overlapping).
-   `fake`-vs-`honest` on *timing* is a clean but tiny ~5% separation — not a
-   detector.
-5. **Linear in k?** Yes, ~linear with mild upward curvature at large k
-   (per-probe ~9.6 → 11.1 ns as k grows) — consistent with genuine random
-   probing plus growing TLB/cache pressure.
-6. **VM tail noise?** The dominant environmental effect is the ~1.6× P/E-core
-   between-session swing above; within a session, per-run p50 is tight (sd ~1–3%).
-
-**The headline retraction, and what replaced it.** The original README claimed
-disk/partial are "10–19× slower because probes hit storage instead of RAM,"
-presenting timing as a RAM-vs-storage detector. That specific claim is wrong: the
-gap is **pread syscall overhead**, and it **vanishes under a one-line mmap
-adversary** for a buffer the page cache can hold. What replaced it is narrower and
-survives contact: **timing tracks residency, not device.** The mmap adversary is
-fast precisely because the page cache is holding its file — it is resident, just
-not via `mlock` — and when its memory budget cannot hold the buffer it claims, it
-is ~840× honest with ~52% of probes going to storage (a pread prover on the same
-budget is within ~2%). Two limits remain: the budget is a **cgroup limit standing
-in for physical RAM**, and Docker's disk sits on the macOS host's cache, so the
-storage penalty measured here is a **lower bound**. A bare-metal >RAM run is still
-the settling experiment (NEXT_STEPS).
-
-## What each detector actually catches
-
-- **Correctness (robust).** `fake` answers fast but wrong; the chained fold makes
-  withholding any fraction catchable with probability `1 − (1−m)^k`. This is the
-  one claim that survives adversarial contact.
-- **Timing (residency, not device).** Detects whether the probed data is in fast
-  memory *right now*. An mmap adversary looks honest only because the page cache is
-  holding its file (it really is resident); starve its RAM below the buffer and it
-  is ~840× honest. What timing does *not* establish is the storage medium, or a
-  real-RAM/real-storage figure — that needs the bare-metal >RAM run. Absolute
-  numbers are non-portable (transport floor + P/E-core swing).
-
-## Path to GPU
-
-The answer path is deliberately GPU-shaped — flat word buffer, no STL, no
-exceptions. Buffer would live in VRAM via `cudaMalloc` (inherently non-swappable,
-the GPU analog of `mlock`), `answer_lane_t()` becomes the per-thread kernel body,
-and the only non-portable line is the 128-bit multiply in `map_index()` (replace
-`((__uint128)r*n)>>64` with `__umul64hi(r, n)`). `splitmix64`/`mix64` are already
-identical. This is future work; see NEXT_STEPS.
-
-## Next steps
-
-See [NEXT_STEPS.md](NEXT_STEPS.md): the **recompute adversary** (beats both
-detectors), a **genuinely-cold-read test on bare metal** (now load-bearing, not
-optional — it's the only thing that would validate the timing detector), the
-**mmap adversary above RAM size**, a **decision rule with FP/FN rates**, and the
-**CUDA port**. Protocol hardening (≥128-bit responses, a cryptographic PRF, fresh
-per-challenge nonces) is also required before this is more than a PoC.
+- [`CLAUDE.md`](CLAUDE.md) — orientation for anyone (human or agent) working in the
+  repo: goal, layout, and the rules that keep results trustworthy.
+- [Decision records](docs/decisions/) — why the challenge math is frozen, why the
+  prover refuses to run unpinned, and what the timing signal does and doesn't show.
+- [Investigations](docs/investigations/) — the question-script-result writeups that
+  back those decisions.
+- [NEXT_STEPS.md](NEXT_STEPS.md) — what's still open, and why it matters.

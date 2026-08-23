@@ -32,7 +32,7 @@ within a session.)
   you *cannot rely* on cross-session absolute comparability, even though it
   sometimes happens to hold.
 
-## Consequence (the load-bearing one)
+## Consequence
 **Only within-session ratios and paired differences are trustworthy.** The harness
 therefore measures every mode in ONE session, interleaved in randomized order, and
 reports ratios / `honest − floor` with propagated error — never portable absolute

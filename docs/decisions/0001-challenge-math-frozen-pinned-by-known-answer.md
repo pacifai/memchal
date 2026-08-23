@@ -12,7 +12,7 @@ number without any test failing.
 
 ## Decision
 Treat the challenge math in `common.hpp` as **frozen** for stabilization — no
-changes to those functions. Pin them with a **known-answer test** (`tests/kat.cpp`)
+changes to those functions. Pin them with a **known-answer test** (`tests/known_answer.cpp`)
 that asserts fixed `(seed, nonce, k, lanes)` vectors produce fixed hashes. The
 values are pure 64-bit integer arithmetic (no memory byte-order dependence), so
 they are architecture-independent (verified identical on macOS/arm64 and

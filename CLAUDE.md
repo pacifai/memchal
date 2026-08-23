@@ -1,102 +1,138 @@
-# CLAUDE.md — memchal (memory-challenge PoC)
+# CLAUDE.md — memchal (a memory-retention challenge)
 
-Context for any agent working in this repo. Read this first, then the linked docs
-as needed. Keep this file current when you change how the project works.
+Orientation for anyone working in this repo, human or agent. Read this first, then
+follow the links as you need them. Keep this file current when you change how the
+project works.
 
 ## What this is
-A **proof-of-retention** primitive: a verifier uploads a large random buffer to a
-prover, then issues timed nonce challenges. Each challenge forces the prover to
-read thousands of nonce-derived offsets across the whole buffer and fold them into
-a chained hash — you can't answer correctly without actually reading the data. Two
-detectors emerge: **correctness** (a prover that fabricates data answers wrong) and
-**timing** (a prover whose data isn't in fast memory answers slow).
 
-It is the **CPU precursor** to a GPU/VRAM version for AI-compute governance
-(proving a datacenter's memory holds the workload it claims). The GPU port is
-future work; the answer path is deliberately GPU-shaped (flat buffer, no STL).
+A proof-of-retention primitive. A verifier uploads a large buffer of random bytes
+to a prover, then issues timed challenges. Each challenge makes the prover derive
+thousands of nonce-based offsets across the whole buffer, read those words, and
+fold them into a chained hash. You can't answer correctly without reading the
+data. Two signals expose a cheat: the answer is **wrong** (the prover fabricated
+data) or the answer is **slow** (the data isn't in fast memory).
 
-## Status — what is and isn't trustworthy (important)
-This repo has been **stabilized** (results made trustworthy, repo made legible). No
-new capability was added. Current honest position:
-- ✅ **Correctness detection is robust.** `fake` fails every challenge; catch
-  probability `1 − (1−m)^k`. This is the claim that survives adversarial contact.
-- ⚠️ **Timing tracks residency, not storage distance.** The "disk is ~15× slower"
-  gap is `pread` **syscall overhead**; an **mmap adversary** looks honest only
-  because the page cache holds its file (it *is* resident). Starve its RAM below
-  the buffer and it is **~840× honest** (~52% of probes fault to storage). Not yet
-  validated: a real-RAM/real-storage figure (needs a bare-metal >RAM run — the
-  cgroup/host-cache result is a lower bound).
-  See [ADR 0003](docs/decisions/0003-timing-detector-scope-and-measurement.md).
-- ⚠️ **Absolute latencies are not portable across sessions** (Apple-Silicon P/E-core
-  swing, up to ~1.6×, load-dependent). Only within-session ratios/differences are
-  trustworthy. See [ADR 0003](docs/decisions/0003-timing-detector-scope-and-measurement.md).
-- ❌ **There is no decision rule yet** (no classifier with FP/FN rates).
+It's the CPU precursor to a GPU/VRAM version for AI-compute governance — proving a
+datacenter's memory holds the workload it claims. The GPU port is future work; the
+answer path is written to port cleanly (a flat buffer, no STL).
 
-## Architecture / current implementation
-- `src/common.hpp` — wire protocol + the challenge math (`answer_lane_t` /
-  `answer_challenge_t`, `splitmix64`, `mix64`, `map_index`, `fill_random`).
-  **Single source of truth**, called by prover, cheating prover, and verifier.
-  **Frozen** — do not modify; pinned by a KAT ([ADR 0001](docs/decisions/0001-challenge-math-frozen-pinned-by-kat.md)).
-- `src/prover.cpp` — honest TCP server; mmap+prefault+`mlock`, **verifies the lock
-  (VmLck) and refuses to run if unpinned** ([ADR 0002](docs/decisions/0002-verify-and-refuse-on-mlock.md)).
-- `src/verifier.cpp` — client; generates the buffer (`fill_random`, seeded),
-  uploads it, times challenges, verifies answers, emits **JSON** (`--json`) + CSV.
-- `src/cheating_prover.cpp` — adversaries: `honest|disk|partial|fake|mmapdisk`.
-- `scripts/mc_stats.py` — single source for stats + error propagation.
-- `scripts/run_trials.py` — the harness: interleaved cycles, `floor` (k=0) mode,
-  ratios/paired-diffs with propagated error, drift detection, session-stamped output.
+## Status — what to trust
+
+- **Correctness detection is solid.** `fake` fails every challenge; the catch
+  probability is `1 − (1−m)^k`. This is the claim that holds up under attack.
+- **Timing tracks residency, not the storage device.** The old "disk is ~15×
+  slower" gap was `pread` system-call overhead. A memory-mapped adversary looks
+  honest only because the page cache holds its file — it really is resident. Starve
+  its RAM below the buffer size and it runs about 840× slower, with roughly half
+  its reads faulting to storage. Not yet confirmed on real hardware with a buffer
+  larger than RAM, so the current figure is a lower bound. See
+  [ADR 0003](docs/decisions/0003-timing-detector-scope-and-measurement.md).
+- **The three shortcut attacks are defended.** A prover can recompute the buffer
+  from the seed, prefetch predictable offsets, or precompute answers under
+  predictable nonces. Each has a defense — ChaCha20 keyed-stream generation,
+  data-dependent (chained) offsets, and an unpredictable nonce — with tests that
+  show each attack win with the defense off and lose with it on. See
+  [ADR 0004](docs/decisions/0004-adversary-taxonomy-and-defenses.md) and
+  [ADR 0005](docs/decisions/0005-per-lane-chaining-vs-gpu-parallelism.md).
+- **Absolute latencies don't carry across sessions.** Apple Silicon places each
+  container's vCPUs on performance or efficiency cores for its whole life, swinging
+  absolute latency by up to ~1.6×. Trust only within-session ratios and paired
+  differences. See [ADR 0003](docs/decisions/0003-timing-detector-scope-and-measurement.md).
+- **There's no decision rule yet.** The harness reports how far apart the modes
+  sit, not an accept/reject classifier with error rates.
+
+## Architecture
+
+- `src/common.hpp` — the wire protocol and the challenge math (`answer_lane_t`,
+  `answer_challenge_t`, `splitmix64`, `mix64`, `map_index`, `fill_buffer`). The
+  single source of truth, called by the prover, the cheating prover, and the
+  verifier. **Frozen** — don't change it; a known-answer test pins it
+  ([ADR 0001](docs/decisions/0001-challenge-math-frozen-pinned-by-known-answer.md)).
+- `src/chacha20.hpp` — a small vendored ChaCha20 (RFC 8439) for keyed-stream buffer
+  generation.
+- `src/prover.cpp` — the honest TCP server. Maps, prefaults, and `mlock`s the
+  buffer, verifies the lock through `VmLck`, and refuses to run if it isn't pinned
+  ([ADR 0002](docs/decisions/0002-verify-and-refuse-on-mlock.md)).
+- `src/verifier.cpp` — the client. Generates the buffer (`--gen splitmix64|chacha`),
+  uploads it, times challenges, checks answers, and writes JSON and CSV. Toggles the
+  defenses: `--chain dependent`, `--nonce random`.
+- `src/cheating_prover.cpp` — the adversaries: `honest`, `disk`, `partial`, `fake`,
+  `mmapdisk`, `recompute`, `prefetch`, `precompute`.
+- `scripts/mc_stats.py` — the one place stats and error propagation live.
+- `scripts/run_trials.py` — the harness: interleaved cycles, a `k=0` transport
+  floor, ratios and paired differences with propagated error, drift detection, and
+  session-stamped output.
 - `scripts/plot.py` — one self-describing chart from `trials.json`.
-- `tests/` — `kat.cpp` (pins the math) + `run_tests.sh` (KAT + invariants).
+- `tests/` — `known_answer.cpp` (pins the math) and `run_tests.sh` (the known-answer
+  test plus invariants).
 
-## Build / run / test (everything goes through the container)
+## Build, run, test
+
+Everything goes through the container.
+
 ```bash
 ./run.sh                                   # build + smoke test
-./run.sh bash tests/run_tests.sh           # KAT + invariants (expect 5/5)
+./run.sh bash tests/run_tests.sh           # known-answer test + invariants
 ./run.sh bash -c 'make && \
   python3 scripts/run_trials.py --repeats 10 --n 3000 --k 4096 --mb 64 \
      --modes floor,honest,disk,partial,fake,mmapdisk --out results/trials.json && \
   python3 scripts/plot.py results/trials.json'
 ```
-`run.sh` builds a linux/arm64 image and runs with `--cap-add=IPC_LOCK
---ulimit memlock=-1`, a tmpfs at `/ram`, explicit `--cpus`/`--memory`, and mounts
-`results/` to the host. Binaries build to the repo root from `src/`.
 
-## Run environment (and its limits)
-Docker Desktop on Apple Silicon → a **linux/arm64 VM** (kernel 6.10). **4 KiB
-pages in the VM** (host is 16 KiB). **Storage is virtualized** (overlay/tmpfs
-through the host page cache) so it **cannot measure real storage physics**. vCPUs
-land on P/E cores per session → absolute-latency swing. What it *can* measure
-reliably: correctness, k-scaling shape, the transport floor, run-to-run variance,
-and within-session mode ratios. A bare-metal Linux rerun is one command away and is
-what would settle storage-physics and affinity (see `NEXT_STEPS.md`).
+`run.sh` builds a linux/arm64 image and runs it with `--cap-add=IPC_LOCK
+--ulimit memlock=-1`, a tmpfs at `/ram`, explicit `--cpus` and `--memory`, and
+`results/` mounted to the host. Binaries build to the repo root from `src/`.
+
+## The run environment, and its limits
+
+Docker Desktop on Apple Silicon runs a linux/arm64 VM (kernel 6.10) with 4 KiB
+pages (the host uses 16 KiB). Storage is virtualized through the host page cache,
+so this environment **can't measure real storage physics**, and vCPU placement on
+performance vs efficiency cores makes absolute latency swing between sessions. What
+it measures reliably: correctness, how latency scales with `k`, the transport
+floor, run-to-run variance, and within-session ratios between modes. A run on bare
+metal Linux is one command away and is what would settle the storage-physics and
+core-affinity questions (see `NEXT_STEPS.md`).
 
 ## Rules for agents working here
-- **Never modify the challenge math** in `common.hpp` (frozen; KAT will fail). If a
-  change is truly intended, add new KAT vectors and say so loudly.
-- **Compare within-session only.** Never present absolute µs as portable; use the
-  harness's ratios / `honest − floor` with propagated error.
-- **Don't tune parameters to make results look better.** A cheat that isn't caught
-  is a finding. Report negative/nuanced results plainly (see the session-variance
-  investigation, where a rerun showed 1.05× instead of the earlier 1.6×).
-- **Keep the honest-baseline lock guarantee** — don't weaken the verify/refuse path.
-- **Stay buildable with g++ + stdlib + python3/matplotlib.** Ask before adding deps.
-- Investigations/experiments that aren't core PoC go under `docs/investigations/`
-  (doc + script + results), not mixed into `src/` or `scripts/`.
 
-## Open issues to resolve (see NEXT_STEPS.md for detail)
-1. **Recompute adversary** — regenerates probed words from the PRNG seed; beats
-   *both* detectors. The most important gap; needs a memory-hard derivation.
-2. **Genuinely-cold-read validation** on bare metal (buffer > RAM and/or O_DIRECT)
-   — the only thing that would validate any timing teeth. Load-bearing.
-3. **Decision rule** with FP/FN rates — there's no classifier yet.
-4. **mmap adversary above RAM size** — cheap falsification of whether timing has a
-   viable regime.
-5. **Bare-metal / affinity rerun** for portable absolute numbers.
-6. **CUDA port**; protocol hardening (≥128-bit responses, crypto PRF, fresh nonces).
+- **Never change the challenge math** in `common.hpp` (it's frozen; the known-answer
+  test will fail). If a change is genuinely intended, add new test vectors and say
+  so loudly.
+- **Compare within a session only.** Never present absolute microseconds as
+  portable; use the harness's ratios or `honest − floor` with propagated error.
+- **Don't tune parameters to make results look better.** A cheat that isn't caught
+  is a finding. Report negative or nuanced results plainly (see the session-variance
+  investigation, where a rerun showed 1.05× instead of an earlier 1.6×).
+- **Keep the honest-baseline lock guarantee.** Don't weaken the verify-and-refuse
+  path.
+- **Stay buildable with g++, the standard library, and python3/matplotlib.** Ask
+  before adding dependencies.
+- **Put investigations under `docs/investigations/`** (doc, script, results), not
+  mixed into `src/` or `scripts/`.
+- **`NEXT_STEPS.md` holds only pending work.** When something ships, move its
+  description to `README.md` or an ADR and delete it from `NEXT_STEPS.md` — the file
+  must never accumulate already-implemented changes.
+
+## What's still open (see NEXT_STEPS.md)
+
+1. A **build-buffer, memory-hard, weight-bound generator** — the real frontier: the
+   verifier sends a short recipe instead of the whole buffer, which scales past
+   uploading N bytes per check and ties residency to the actual workload.
+2. A **cold-read test on bare metal** (buffer larger than RAM, or `O_DIRECT`) — the
+   one experiment that would validate the timing detector against a serious
+   adversary.
+3. A **decision rule** with stated false-positive and false-negative rates.
+4. The **GPU port**, plus protocol hardening (≥128-bit responses, and making the
+   unpredictable nonce the default).
 
 ## Map of the repo
-- `README.md` — human-facing overview + honest results section.
-- `NEXT_STEPS.md` — out-of-scope work with rationale.
-- `docs/decisions/` — [ADRs](docs/decisions/README.md): why the harness/claims are what they are.
-- `docs/investigations/` — [analyses](docs/investigations/README.md) (question → script → results) that back the decisions.
-- `src/`, `scripts/`, `tests/` — the core PoC.
+
+- `README.md` — the human-facing overview.
+- `NEXT_STEPS.md` — pending work, with rationale.
+- `docs/decisions/` — [ADRs](docs/decisions/README.md): why the design and claims
+  are what they are.
+- `docs/investigations/` — [analyses](docs/investigations/README.md) (question,
+  script, result) that back the decisions.
+- `src/`, `scripts/`, `tests/` — the core of the project.

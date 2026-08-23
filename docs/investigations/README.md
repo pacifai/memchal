@@ -2,9 +2,9 @@
 
 Self-contained analyses that answered a technical question during stabilization.
 Each folder has a `README.md` (question → method → finding → reproduce), the
-script that produced it, and a `results/` snapshot. These are **supporting
-analysis, not part of the core PoC** — they explain *why* the harness and the
-claims are what they are.
+script that produced it, and a `results/` snapshot. These are supporting analysis,
+not part of the core project — they explain why the harness and the claims are what
+they are.
 
 Absolute microseconds in any result are **within-session illustrative only** and
 not comparable across sessions (see [decisions/0003](../decisions/0003-timing-detector-scope-and-measurement.md)).
