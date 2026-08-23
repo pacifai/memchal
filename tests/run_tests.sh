@@ -17,6 +17,23 @@ FAILED_TESTS=()
 pass() { echo "PASS: $1"; PASS_COUNT=$((PASS_COUNT + 1)); }
 fail() { echo "FAIL: $1"; FAIL_COUNT=$((FAIL_COUNT + 1)); FAILED_TESTS+=("$1"); }
 
+# Wait until a TCP listener is accepting on 127.0.0.1:<port> (up to ~10s). The
+# provers print "listening on" and bind before their accept loop, so a fixed
+# sleep is a race on both ends: too short and the verifier fails to connect, too
+# long and every case pays for it. Polling the port is faster when the server is
+# quick and reliable when the machine is loaded. A probe connection that sends
+# nothing is harmless — the server logs a short/bad hello and loops back to
+# accept the real verifier.
+wait_for_port() {
+    local port="$1" waited=0
+    while ! (echo >"/dev/tcp/127.0.0.1/$port") 2>/dev/null; do
+        sleep 0.05
+        waited=$((waited + 1))
+        [ "$waited" -gt 200 ] && { echo "  ERROR: no listener on port $port after ~10s" >&2; return 1; }
+    done
+    return 0
+}
+
 # ---------------------------------------------------------------------------
 # Step 1: build binaries and KAT
 # ---------------------------------------------------------------------------
@@ -24,7 +41,7 @@ cd /work
 
 echo "=== BUILD ==="
 make
-g++ -O3 -std=c++17 -I/work/src -o tests/kat tests/kat.cpp
+g++ -O3 -std=c++17 -I/work/src -o tests/known_answer tests/known_answer.cpp
 echo "Build complete."
 
 # ---------------------------------------------------------------------------
@@ -32,7 +49,7 @@ echo "Build complete."
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== KAT (known-answer test) ==="
-if tests/kat; then
+if tests/known_answer; then
     pass "KAT"
 else
     fail "KAT"
@@ -79,8 +96,8 @@ run_invariant() {
     "${server_cmd[@]}" >/tmp/inv_server_${name}.log 2>&1 &
     local srv_pid=$!
 
-    # Give the server a moment to bind.
-    sleep 0.6
+    # Wait for the server to bind before connecting.
+    wait_for_port "$port"
 
     local verifier_ok=1
     ./verifier --port "$port" $VERIFIER_ARGS --json "$JSON" >/tmp/inv_verifier_${name}.log 2>&1 || verifier_ok=0
@@ -164,7 +181,7 @@ echo "--- INVARIANT: recompute_vs_chacha (chacha20 verifier) ---"
 ./cheating_prover --port 9108 --mode recompute --datafile /tmp/memchal_test_recompute3.bin \
     >/tmp/inv_server_recompute_chacha.log 2>&1 &
 RCHACHA_PID=$!
-sleep 0.6
+wait_for_port 9108
 RCHACHA_OK=1
 ./verifier --port 9108 $VERIFIER_ARGS --gen chacha --json "$JSON" \
     >/tmp/inv_verifier_recompute_chacha.log 2>&1 || RCHACHA_OK=0
@@ -200,7 +217,7 @@ echo ""
 echo "--- INVARIANT: honest_vs_chacha (--gen chacha) ---"
 ./prover 9112 >/tmp/inv_server_honest_chacha.log 2>&1 &
 HCHACHA_PID=$!
-sleep 0.6
+wait_for_port 9112
 HCHACHA_OK=1
 ./verifier --port 9112 $VERIFIER_ARGS --gen chacha --json "$JSON" \
     >/tmp/inv_verifier_honest_chacha.log 2>&1 || HCHACHA_OK=0
@@ -243,7 +260,7 @@ echo "--- INVARIANT: precompute_vs_random (--nonce random) ---"
 ./cheating_prover --port 9111 --mode precompute --datafile /tmp/memchal_test_precompute_rnd.bin \
     >/tmp/inv_server_precompute_random.log 2>&1 &
 PC_RAND_PID=$!
-sleep 0.6
+wait_for_port 9111
 PC_RAND_OK=1
 ./verifier --port 9111 $VERIFIER_ARGS --nonce random --json "$JSON" \
     >/tmp/inv_verifier_precompute_random.log 2>&1 || PC_RAND_OK=0
@@ -317,9 +334,12 @@ STREAM_DIR=$(mktemp -d /tmp/memchal_stream_XXXXXX)
 ./cheating_prover --port 9105 --mode mmapdisk --datafile /tmp/memchal_test_stream.bin \
     --trace 10 >"$STREAM_DIR/prover.log" 2>&1 &
 STREAM_PID=$!
-sleep 1
+wait_for_port 9105
 ./verifier --port 9105 --mb 8 --k 512 --lanes 8 --n 30 --warmup 10 \
     --csv /dev/null --stream "$STREAM_DIR/verifier.jsonl" --probe-map 10 >/dev/null 2>&1 || true
+# Not a bind wait: the prover emits its trace events AFTER each response (outside
+# the timed window), so give it a moment to flush the last ones to its log before
+# we kill it, or check_stream.py sees a truncated trace.
 sleep 0.4
 kill "$STREAM_PID" 2>/dev/null || true
 wait "$STREAM_PID" 2>/dev/null || true

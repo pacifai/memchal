@@ -6,7 +6,7 @@
 //
 // This is a table-free, pure-ARX implementation derived from the RFC 8439
 // reference description (§2.1 quarter round, §2.3 block function).  It has
-// been verified against the RFC §2.3.2 test vector (see tests/kat.cpp).
+// been verified against the RFC §2.3.2 test vector (see tests/known_answer.cpp).
 //
 // No external dependencies; header-only.
 #pragma once

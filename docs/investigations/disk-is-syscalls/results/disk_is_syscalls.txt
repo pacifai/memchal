@@ -1,10 +1,3 @@
-
-
-
-
-
-
-
 make: 'verifier' is up to date.
 make: 'cheating_prover' is up to date.
 make: 'prover' is up to date.

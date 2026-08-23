@@ -3,7 +3,7 @@
 /verifier
 /cheating_prover
 # compiled test binary
-/tests/kat
+/tests/known_answer
 # scratch experiment artifacts
 /scratch/
 *.o

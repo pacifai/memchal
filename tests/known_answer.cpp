@@ -1,4 +1,4 @@
-// tests/kat.cpp — Known-Answer Test for the memory-challenge math.
+// tests/known_answer.cpp — Known-Answer Test for the memory-challenge math.
 //
 // PURPOSE
 // -------
@@ -24,7 +24,7 @@
 // were computed on both macOS/arm64 and Linux/arm64 and matched exactly.
 //
 // COMPILE
-//   g++ -O3 -std=c++17 -I/work/src -o tests/kat tests/kat.cpp
+//   g++ -O3 -std=c++17 -I/work/src -o tests/known_answer tests/known_answer.cpp
 //
 // EXIT CODE
 //   0 — all vectors pass

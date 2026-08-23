@@ -15,6 +15,6 @@ cheating_prover: src/cheating_prover.cpp src/common.hpp
 	$(CXX) $(CXXFLAGS) -o $@ src/cheating_prover.cpp
 
 clean:
-	rm -f prover verifier cheating_prover tests/kat
+	rm -f prover verifier cheating_prover tests/known_answer
 
 .PHONY: all clean
