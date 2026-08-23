@@ -55,8 +55,10 @@ answer path is written to port cleanly (a flat buffer, no STL).
   buffer, verifies the lock through `VmLck`, and refuses to run if it isn't pinned
   ([ADR 0002](docs/decisions/0002-verify-and-refuse-on-mlock.md)).
 - `src/verifier.cpp` — the client. Generates the buffer (`--gen splitmix64|chacha`),
-  uploads it, times challenges, checks answers, and writes JSON and CSV. Toggles the
-  defenses: `--chain dependent`, `--nonce random`.
+  uploads it, times challenges, checks answers, and writes JSON and CSV. The three
+  defenses default **on** (`--gen chacha --chain dependent --nonce random`); the
+  benchmark opt-out is to name the weak setting (`--gen splitmix64 --chain
+  independent --nonce sequential`).
 - `src/cheating_prover.cpp` — the adversaries: `honest`, `disk`, `partial`, `fake`,
   `mmapdisk`, `recompute`, `prefetch`, `precompute`.
 - `scripts/mc_stats.py` — the one place stats and error propagation live.
@@ -126,8 +128,7 @@ core-affinity questions (see `NEXT_STEPS.md`).
    the authoritative check rides on the GPU port (a bare-metal CPU cold read is an
    optional early de-risk).
 3. A **decision rule** with stated false-positive and false-negative rates.
-4. The **GPU port**, plus protocol hardening (≥128-bit responses, and making the
-   unpredictable nonce the default).
+4. The **GPU port**, plus protocol hardening (≥128-bit responses).
 
 ## Map of the repo
 

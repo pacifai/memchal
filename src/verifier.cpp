@@ -62,13 +62,16 @@ struct Args {
     const char* json = nullptr;  // machine-readable summary (scripts consume this)
     const char* label = "";      // free-form environment/run label, copied into JSON
     uint64_t seed = 0xABCDEF0123456789ULL;
-    Gen gen = Gen::SPLITMIX64;  // buffer generator: splitmix64 (default) or chacha20
+    // The three defenses default ON (secure by default). The benchmark opt-out is
+    // to name the weak setting explicitly: --gen splitmix64 / --chain independent /
+    // --nonce sequential. See ADR 0004 (Safety) and the README adversary table.
+    Gen gen = Gen::CHACHA20;    // buffer generator: chacha20 (default) or splitmix64
     // Live streaming for the browser demo (demo/bridge.py). Off unless asked for:
     // the experiment scripts must keep measuring an uninstrumented loop.
     const char* stream = nullptr;   // "-" for stdout, else a path
     uint32_t probe_map_every = 0;   // emit the probed-page bitmap every N challenges
-    bool chained = false;           // --chain dependent -> data-dependent index path
-    NonceMode nonce_mode = NonceMode::SEQUENTIAL; // --nonce sequential|random
+    bool chained = true;            // --chain independent -> off; dependent is default
+    NonceMode nonce_mode = NonceMode::RANDOM; // --nonce sequential|random (random default)
     uint32_t gap_us = 0;            // --gap-us N: sleep N microseconds between challenges
 };
 
@@ -147,8 +150,8 @@ static Args parse(int argc, char** argv) {
 // Run `count` challenges at fixed k, return latencies (ns) and #errors.
 // `st` (optional) streams one event per challenge for the browser demo; `seq` is
 // the running challenge counter across warmup+run so map sampling is stable.
-// `chained` selects the data-dependent index path (see common.hpp).
-// `nonce_mode` selects sequential (default) or random (CSPRNG) nonces.
+// `chained` selects the data-dependent index path (see common.hpp; default on).
+// `nonce_mode` selects sequential or random/CSPRNG nonces (random is the default).
 // `gap_us` sleeps that many microseconds after recording each challenge latency
 // (simulates a periodic verifier; outside the timed window).
 static void run_batch(int fd, const uint64_t* buf, uint64_t num_words,
@@ -255,7 +258,7 @@ int main(int argc, char** argv) {
         fprintf(stderr,
                 "[verifier] ERROR: chain depth k/lanes = %u < %u; "
                 "dependent access gives ~1/%u latency-hardness — "
-                "raise k or lower lanes\n",
+                "raise k, lower lanes, or (benchmark only) pass --chain independent\n",
                 chain_depth, kMinChainDepth, chain_depth);
         return 1;
     }
