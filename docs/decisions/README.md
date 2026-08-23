@@ -15,4 +15,4 @@ are documented in [`CLAUDE.md`](../../CLAUDE.md) and `README.md`, not here.)
 | [0003](0003-timing-detector-scope-and-measurement.md) | Timing detector: syscalls not storage; within-session only | The main claim correction — read before trusting timing |
 | [0004](0004-adversary-taxonomy-and-defenses.md) | Adversary taxonomy: recompute / prefetch / precompute + defenses | The three escape hatches from proof-of-retention and their toggled defenses |
 | [0005](0005-per-lane-chaining-vs-gpu-parallelism.md) | Per-lane chaining: latency-hardness vs GPU parallelism | The chain shape decision the GPU port will re-open |
-| [0006](0006-chacha20-vendored-vs-dependency.md) | ChaCha20: vendored vs a dependency (**proposed**) | Whether to keep our own crypto bytes or take on a dependency |
+| [0006](0006-chacha20-vendored-vs-dependency.md) | ChaCha20: keep the vendored implementation | Why we own ~120 lines of crypto instead of taking a dependency |
