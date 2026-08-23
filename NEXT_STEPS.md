@@ -1,82 +1,86 @@
-# Next steps
+# Roadmap
 
-Pending work, ordered by how much each changes what memchal can claim. What's
-already built lives in the [README](README.md) and the
-[decision records](docs/decisions/); this file holds only what's left to do.
+Pending work, grouped by phase and ordered by what unblocks what. Each item is
+actionable and carries a "done when" line so it's clear when to check it off.
 
-## 1. A build-buffer, memory-hard, weight-bound generator (the frontier)
+Three kinds of thing live in different places:
 
-There are two ways to set up a check. In the **send-buffer** design, the verifier
-sends the prover the whole buffer and keeps the seed. In the **build-buffer**
-design, the verifier sends only a short recipe (a seed) and both sides build the
-buffer from it.
+- **Work to do** — this file.
+- **Decisions to agree** — an [ADR](docs/decisions/) with `Status: proposed`,
+  promoted to `accepted` once agreed.
+- **Analyses** — the [investigations](docs/investigations/).
 
-The three ways to fake retention — recompute, prefetch, and precompute — and their
-defenses are built and measured (see
-[ADR 0004](docs/decisions/0004-adversary-taxonomy-and-defenses.md) and
-[ADR 0005](docs/decisions/0005-per-lane-chaining-vs-gpu-parallelism.md)). Those
-close the **send-buffer** design: because the buffer is crypto-random and the nonce
-is unpredictable, the prover has to store every byte it was sent.
+## Now — decisions and near-term build
 
-What's left is the design the parent goal needs:
+- [ ] **Agree the cipher choice.** Vendored ChaCha20 vs a dependency
+  ([ADR 0006](docs/decisions/0006-chacha20-vendored-vs-dependency.md), proposed).
+  *Done when:* the ADR is accepted and the code matches it.
+- [ ] **Make the defenses safe by default.** The send-buffer defenses ship off
+  (`--gen splitmix64`, `--chain independent`, `--nonce sequential`) so the attacks
+  are demonstrable; any adversarial use needs all three on. Flip the defaults for
+  non-benchmark use and keep a documented benchmark opt-out. *Done when:* defaults
+  changed, tests updated, and the README says which mode is which.
 
-- **From send-buffer to build-buffer.** Sending the buffer binds the check to the
-  exact bytes you uploaded, but it doesn't scale — you upload the whole buffer every
-  time. Building the buffer from a ~32-byte recipe scales, but handing the prover the
-  recipe reopens the recompute attack unless the generator is **memory-hard** (Argon2-
-  or scrypt-style): cheap to send, expensive to build, so a rational prover stores the
-  result rather than regenerating it. That generator is the missing piece.
-- **The frontier.** A build-buffer generator whose dataset is derived from the real
-  model weights, so residency implies holding something tied to the actual workload
-  without revealing it. That is proof-of-retrievability meeting proof-of-space for
-  machine learning — a research problem, not a build task, and the destination this
-  CPU version is clearing the way for.
+## Next — proving residency of the real workload
 
-## 2. A cold-read test on real hardware (the settling experiment)
+Today the challenge proves you're holding a specific random buffer the verifier sent.
+The goal is to prove you're holding *the thing that matters* — the model weights the
+GPU is actually serving — so passing the challenge means the workload itself is
+resident, not filler.
+[ADR 0004](docs/decisions/0004-adversary-taxonomy-and-defenses.md) explains why the
+send-buffer design doesn't get there. Two routes, each with a cost to weigh against
+the inference workload:
 
-The timing signal is validated only inside a Docker VM, whose storage is
-virtualized through the host's page cache. The starved memory-mapped adversary runs
-about 840× slower than honest with roughly half its reads faulting to storage, but
-its budget is a container memory limit standing in for physical RAM, and the host
-caches the virtual disk underneath — so that penalty is a lower bound.
+- [ ] **Option A — a memory-hard, weight-bound generator.** Ship a short recipe and
+  have both sides build a dataset from it that is expensive to regenerate on demand
+  (so the prover must store it) and derived from the weights. *Cost to weigh:* the
+  memory-hardness makes the one-time *generation* expensive, not the per-challenge
+  answer (the hot path stays cheap), so it doesn't tax every inference — but the
+  generated buffer is a *separate* block that competes with the model for VRAM and
+  spends GPU cycles/bandwidth each time it's probed. Size the parameters so setup and
+  per-challenge overhead stay tolerable next to inference. *Done when:* a proposed ADR
+  gives the construction, threat model, and a VRAM/throughput budget against a real
+  inference workload.
+- [ ] **Option B — challenge the weights directly.** The prover already holds the
+  weights in VRAM to serve inference, so challenge *their* residency (probe a function
+  of the weights) with no separate buffer to build or store. This avoids the
+  memory-hard generation cost and the double VRAM entirely; the hard part is doing it
+  without revealing the weights and while staying cheap per challenge. *Done when:* a
+  proposed ADR shows a weight-probing challenge with its privacy and per-challenge
+  cost analyzed.
+- [ ] **Prototype the chosen route on CPU.** *Done when:* a `cheating_prover` attack
+  that answers without genuinely holding the data (regenerate, or hold only part)
+  loses against it, pinned by a known-answer test and an invariant.
 
-Running on bare-metal Linux would settle it, with either:
+## Later — GPU port and decision rule
 
-- a buffer **larger than RAM**, so most probes force real page faults and the
-  memory-mapped trick stops working; or
-- `O_DIRECT` reads that bypass the page cache (mind the 512-byte / 4-KiB alignment
-  against the 8-byte probe).
+Timing is a core signal (it's what proves the data is in *fast* memory, not just
+stored somewhere), but the CPU-in-Docker environment can't measure it faithfully and
+CPU-DRAM latencies don't transfer to GPU-VRAM. So the authoritative timing/residency
+validation rides on the deployment target — the GPU port — rather than a bare-metal
+CPU run. The CPU version's job is to prove the design: the challenge math, the
+correctness detector, and the *shapes* of the defenses (chaining defeats prefetch,
+resident-vs-not is distinguishable in principle).
 
-This is the one experiment that would show whether the timing detector has any
-teeth against a serious adversary. The same bare-metal run would also give portable
-absolute latencies: inside the VM, vCPU placement on performance vs efficiency
-cores swings absolute time by up to ~1.6×, so today only within-session ratios are
-trustworthy. `run.sh` already works on native Linux, so this is close to one
-command once the larger-than-RAM (or `O_DIRECT`) mode exists.
+- [ ] **The GPU port**, with timing validation built in. *Done when:* the answer path
+  runs as a CUDA kernel with the buffer in VRAM (`cudaMalloc`) and `map_index`'s
+  128-bit multiply replaced by `__umul64hi`, **and** a cold read on real hardware
+  shows the timing gap separates VRAM-resident from host-RAM or disk with the true
+  per-access cost. Settle the adversaries and the design on CPU first.
+- [ ] **A decision rule with error rates.** Turn the harness's separations into an
+  accept/reject classifier. *Done when:* it outputs a verdict given a response and a
+  claimed configuration, with measured false-positive and false-negative rates.
+  Depends on the timing regime being settled on real hardware (the GPU validation
+  above).
 
-## 3. A decision rule with stated error rates
+## Backlog
 
-The harness reports how far apart the modes sit, not a classifier. A real proof
-needs a threshold that, given a response (time and correctness) and a claimed
-configuration, returns accept or reject with measured false-positive and
-false-negative rates. This depends on the timing regime from #2 being settled
-first — otherwise you'd calibrate the detector against adversaries you already know
-it can't catch.
-
-## 4. The GPU port
-
-The point of the parent project. The answer path is already GPU-shaped (a flat
-buffer, no STL or exceptions, `answer_lane_t` as the per-thread kernel body). Port
-`map_index`'s 128-bit multiply to `__umul64hi`, put the buffer in VRAM
-(`cudaMalloc`, the non-swappable equivalent of `mlock`), and stage uploads through
-pinned host memory. Settle the adversaries, the cold-read validation, and the
-decision rule on CPU first.
-
-## 5. Protocol hardening (before any production use)
-
-- Make responses at least 128 bits with a cryptographic hash; 64 bits is guessable
-  or precomputable against a real adversary.
-- Make the unpredictable nonce (`--nonce random`) the default for any adversarial
-  (non-benchmark) use. It's built, but currently opt-in.
-- The wire format uses native byte order, which assumes both peers are the same
-  endianness (true on loopback).
+- [ ] **Responses ≥128 bits with a cryptographic hash.** 64 bits is guessable or
+  precomputable against a real adversary. *Done when:* the response width grows, the
+  known-answer test is updated, and the wire version bumps.
+- [ ] **Optional: a bare-metal CPU cold read** (buffer > RAM and/or `O_DIRECT`,
+  pinned with `taskset`). Not on the path — the real timing check happens on the GPU
+  — but it's a cheap one-command early signal of whether the timing gap survives real
+  storage. Run it only if you want that signal before the port.
+- [ ] **Wire byte-order** is native and assumes same-endian peers; make it explicit
+  if the protocol ever leaves loopback.

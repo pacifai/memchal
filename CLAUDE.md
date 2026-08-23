@@ -117,12 +117,14 @@ core-affinity questions (see `NEXT_STEPS.md`).
 
 ## What's still open (see NEXT_STEPS.md)
 
-1. A **build-buffer, memory-hard, weight-bound generator** — the real frontier: the
-   verifier sends a short recipe instead of the whole buffer, which scales past
-   uploading N bytes per check and ties residency to the actual workload.
-2. A **cold-read test on bare metal** (buffer larger than RAM, or `O_DIRECT`) — the
-   one experiment that would validate the timing detector against a serious
-   adversary.
+1. **Proving residency of the real workload** — the hardest open problem: prove the
+   prover holds the actual model weights (not filler), either by building a
+   weight-derived buffer from a short recipe or by challenging the weights directly.
+   See the roadmap for the two routes and their costs.
+2. **Timing/residency validation on real hardware** — the CPU-in-Docker environment
+   can't measure it faithfully, and CPU-DRAM latencies don't transfer to GPU-VRAM, so
+   the authoritative check rides on the GPU port (a bare-metal CPU cold read is an
+   optional early de-risk).
 3. A **decision rule** with stated false-positive and false-negative rates.
 4. The **GPU port**, plus protocol hardening (≥128-bit responses, and making the
    unpredictable nonce the default).

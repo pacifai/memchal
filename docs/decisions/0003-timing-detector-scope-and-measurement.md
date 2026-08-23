@@ -55,10 +55,11 @@ the *trustworthiness* of the numbers:
 - README results rewritten; `mmapdisk` promoted to a first-class cheat mode; the
   harness (`scripts/run_trials.py`) is built around interleaved single-session
   measurement.
-- The genuinely-cold-read test on bare metal (buffer > RAM and/or `O_DIRECT`) and a
-  `taskset`-pinned rerun are now *load-bearing, not optional* — they are the only
-  things that would validate any timing teeth and give portable absolute numbers.
-  See NEXT_STEPS.md.
+- Validating the timing teeth on real storage still matters, but it belongs on the
+  deployment target: CPU-DRAM latencies don't transfer to GPU-VRAM, so the
+  authoritative residency/timing check rides on the GPU port rather than a bare-metal
+  CPU run. A bare-metal CPU cold read stays an optional early de-risk. See the roadmap
+  in `NEXT_STEPS.md`.
 
 ---
 

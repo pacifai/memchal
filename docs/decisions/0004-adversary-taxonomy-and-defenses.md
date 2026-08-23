@@ -14,8 +14,8 @@ the numbers live in the investigations, the deeper framing in
 
 All of this is the **send-buffer** design (the prover receives the bytes; the
 verifier keeps the seed). The **build-buffer** design (the verifier ships a seed,
-which needs a *memory-hard* generator) is out of scope and remains the research
-frontier.
+which needs a *memory-hard* generator) is out of scope and remains an open research
+problem.
 
 ## The three escape hatches and their defenses
 
@@ -60,4 +60,5 @@ chain-depth caveat specifically.
 Investigations: [disk-is-syscalls](../investigations/disk-is-syscalls/),
 [mmap-needs-ram](../investigations/mmap-needs-ram/),
 [prefetch-needs-pattern](../investigations/prefetch-needs-pattern/). The send-buffer
-vs build-buffer rationale and the weight-bound frontier are in NEXT_STEPS §1.
+vs build-buffer rationale and the weight-bound goal are in the NEXT_STEPS roadmap
+("Next — proving residency of the real workload").
