@@ -32,12 +32,17 @@ on demand (so the prover must store it) and tied to the model. The memory-hardne
 falls on the one-time *generation*, not the per-challenge answer, so it does **not**
 multiply the per-challenge cost — that cost is inescapable and accepted either way.
 
-- [ ] **Design the generator.** *Done when:* a proposed ADR gives the construction
-  (Argon2- or scrypt-style), the threat model, its cost parameters, and the VRAM
-  footprint of the generated buffer against a real inference workload.
+- [ ] **Design the generator.** The construction and the decision fork are written up in
+  [ADR 0007](docs/decisions/0007-buffer-generator-memory-hard-function.md) (proposed):
+  a memory-hard function (lean: Argon2d, scrypt fallback), why the recompute defense
+  migrates from correctness to timing/TMTO, and the effect on the protocol and each
+  prover. *Done when:* ADR 0007 is accepted and its cost parameters (`m`, `t`, `p`) and
+  VRAM footprint are fixed against a real inference workload — measured with the
+  prototype below, not asserted.
 - [ ] **Prototype it on CPU.** *Done when:* a `cheating_prover` attack that answers
-  without genuinely holding the data (regenerate, or hold only part) loses against it,
-  pinned by a known-answer test and an invariant.
+  without genuinely holding the data (regenerate, or hold only part — a new
+  `partial-recompute` mode) loses against it, pinned by a known-answer test and an
+  invariant, and its TMTO curve backs the cost parameters chosen in ADR 0007.
 
 > Not in scope, noted for the future: **challenging the weights directly** (probe a
 > function of the weights the prover already holds for inference) would avoid a

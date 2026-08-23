@@ -2,6 +2,12 @@
 
 **Status:** accepted — keep the vendored implementation. Revisit if the security bar rises (see "When to revisit").
 
+> **Revisited for the build-buffer scope by [ADR 0007](0007-buffer-generator-memory-hard-function.md) (proposed).**
+> The decision below stands for the send-buffer scope it was made in. The build-buffer
+> design moves the generator onto a real security boundary — exactly the trigger named in
+> "When to revisit" — so ADR 0007 re-decides the crypto primitive (a memory-hard function)
+> for that larger scope. This ADR is not withdrawn; read the two together.
+
 ## Context
 
 The crypto buffer generator (`--gen chacha`) uses a small vendored ChaCha20 in
