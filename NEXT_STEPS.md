@@ -10,11 +10,8 @@ Three kinds of thing live in different places:
   promoted to `accepted` once agreed.
 - **Analyses** — the [investigations](docs/investigations/).
 
-## Now — decisions and near-term build
+## Now — near-term build
 
-- [ ] **Agree the cipher choice.** Vendored ChaCha20 vs a dependency
-  ([ADR 0006](docs/decisions/0006-chacha20-vendored-vs-dependency.md), proposed).
-  *Done when:* the ADR is accepted and the code matches it.
 - [ ] **Make the defenses safe by default.** The send-buffer defenses ship off
   (`--gen splitmix64`, `--chain independent`, `--nonce sequential`) so the attacks
   are demonstrable; any adversarial use needs all three on. Flip the defaults for

@@ -1,6 +1,6 @@
 # ADR 0006 — ChaCha20: vendored implementation vs a dependency
 
-**Status:** proposed (to be agreed before any production or security use)
+**Status:** accepted — keep the vendored implementation. Revisit if the security bar rises (see "When to revisit").
 
 ## Context
 
@@ -25,16 +25,26 @@ GPU-portable, but it's code we maintain and vouch for ourselves.
   dependency, isn't header-only, and isn't GPU-portable — which conflicts with the
   repo's "g++ + standard library only" rule and the GPU-shaped answer path.
 
-## Open question
+## Decision
 
-Is external provenance worth more than zero dependencies plus GPU portability? The
-answer depends on how high the security bar needs to be for the eventual use.
+Keep the vendored implementation. At the PoC's current bar, what carries trust is the
+known-answer test that pins the bytes to the RFC vectors, not the provenance of the
+source file — and zero dependencies plus GPU portability are worth more here than
+external review of ~120 audited lines. The other options stay on the table for the day
+the bar rises.
 
-Non-binding lean: keep the vendored implementation — its known-answer test is what
-actually carries trust — and revisit if the security bar rises (for example, if the
-generator moves onto a real security boundary in the build-buffer design).
+## When to revisit
+
+Reopen this decision if the generator moves onto a real security boundary — most
+concretely, the build-buffer design, where a memory-hard, weight-bound generator would
+sit on the trust path rather than filling a benchmark buffer. At that point prefer a
+public-domain single-file implementation (DJB's reference `chacha.c` or Monocypher's
+core) for external provenance with no build dependency, and take on libsodium/OpenSSL
+only if the boundary demands an audited, maintained library and the GPU path can absorb
+the dependency.
 
 ## Consequences
 
-- Until this is agreed, the vendored implementation stays. Promoting this ADR to
-  accepted records the choice and, if it changes, the swap plus its test.
+- The vendored `src/chacha20.hpp` stays as the crypto buffer generator, pinned by its
+  known-answer test. If this decision is reversed, this ADR records the swap and the
+  test that must accompany it.
