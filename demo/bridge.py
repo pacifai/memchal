@@ -174,6 +174,21 @@ def docker(*args, **kw):
     return subprocess.run(["docker", *args], capture_output=True, text=True, **kw)
 
 
+def build_image():
+    """Build the toolchain image. run.sh and both experiment scripts build it
+    themselves, and the bridge used not to — so on a machine that had never built
+    it (or had its images pruned) every run died with a generic "build failed"
+    while the real reason, `pull access denied for memchal`, sat in the log."""
+    return docker("build", "--platform", PLATFORM, "-t", IMAGE, str(ROOT))
+
+
+def docker_hint(proc):
+    """The most useful line docker gave us, for a status line that has one line."""
+    text = (proc.stderr or "") + (proc.stdout or "")
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    return lines[-1][:300] if lines else "no output from docker"
+
+
 def remove_container(name=None, timeout=8.0):
     """Remove the prover container and wait until the name is actually free.
 
@@ -288,13 +303,22 @@ class Run:
         self.saw_end = False
         try:
             self._status("building")
+            image = build_image()          # cached and quick once it exists
+            if image.returncode != 0:
+                for line in (image.stderr or "").splitlines()[-8:]:
+                    self._log(line, "docker build")
+                return self._status("error",
+                                    error=f"could not build the {IMAGE} image: "
+                                          f"{docker_hint(image)}")
+
             build = docker("run", "--rm", "--platform", PLATFORM,
                            "-v", f"{ROOT}:/work", IMAGE, "make")
             for line in (build.stdout or "").splitlines():
                 self._log(line, "make")
             if build.returncode != 0:
-                self._log(build.stderr.strip() or "build failed", "make")
-                return self._status("error", error="build failed")
+                for line in (build.stderr or "").splitlines()[-8:]:
+                    self._log(line, "make")
+                return self._status("error", error=f"make failed: {docker_hint(build)}")
 
             remove_container()
             self._status("starting prover")
@@ -483,6 +507,11 @@ def preflight():
         raise SystemExit("ERROR: docker is installed but not responding. Is Docker Desktop up?")
     if not (STATIC / "index.html").is_file():
         raise SystemExit(f"ERROR: missing {STATIC/'index.html'}")
+    print(f"[bridge] building the {IMAGE} image (cached after the first time)...")
+    image = build_image()
+    if image.returncode != 0:
+        raise SystemExit("ERROR: could not build the toolchain image:\n"
+                         + (image.stderr or image.stdout or "").strip()[-1500:])
 
 
 def main():
