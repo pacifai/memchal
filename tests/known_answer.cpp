@@ -50,7 +50,7 @@ static const uint64_t kExpected[3] = {
 };
 
 // ---------------------------------------------------------------------------
-// KAT 1: original fill_random / answer_challenge vectors (must not change)
+// Vector group 1: original fill_random / answer_challenge vectors (must not change)
 // ---------------------------------------------------------------------------
 
 // Independent path (chained=false) — same 3 vectors, unchanged.
@@ -76,7 +76,7 @@ static int kat_challenge() {
                                             vecs[i].nonce, vecs[i].k, vecs[i].lanes);
         bool pass = (got == kExpected[i]);
         if (!pass) ++failed;
-        printf("KAT challenge vector %d: %s  (got=0x%016llX  expected=0x%016llX)\n",
+        printf("challenge vector %d: %s  (got=0x%016llX  expected=0x%016llX)\n",
                i + 1,
                pass ? "PASS" : "FAIL",
                (unsigned long long)got,
@@ -85,15 +85,15 @@ static int kat_challenge() {
     free(buf);
 
     if (failed == 0) {
-        printf("KAT challenge: all 3 vectors PASS\n");
+        printf("challenge math: all 3 vectors PASS\n");
     } else {
-        fprintf(stderr, "KAT challenge: %d/3 vectors FAILED — challenge math has changed!\n", failed);
+        fprintf(stderr, "challenge math: %d/3 vectors FAILED — challenge math has changed!\n", failed);
     }
     return failed;
 }
 
 // ---------------------------------------------------------------------------
-// KAT 1b: chained (data-dependent) path — same buffer and vectors, different
+// Vector group 1b: chained (data-dependent) path — same buffer and vectors, different
 // expected values because idx_{i+1} depends on w_i = load(idx_i).
 //
 // Values computed once from the current chained loop implementation and
@@ -132,7 +132,7 @@ static int kat_challenge_chained() {
                                             /*chained=*/true);
         bool pass = (got == kExpectedChained[i]);
         if (!pass) ++failed;
-        printf("KAT challenge (chained) vector %d: %s  (got=0x%016llX  expected=0x%016llX)\n",
+        printf("chained challenge vector %d: %s  (got=0x%016llX  expected=0x%016llX)\n",
                i + 1,
                pass ? "PASS" : "FAIL",
                (unsigned long long)got,
@@ -141,15 +141,15 @@ static int kat_challenge_chained() {
     free(buf);
 
     if (failed == 0) {
-        printf("KAT challenge (chained): all 3 vectors PASS\n");
+        printf("chained challenge math: all 3 vectors PASS\n");
     } else {
-        fprintf(stderr, "KAT challenge (chained): %d/3 vectors FAILED — chained math has changed!\n", failed);
+        fprintf(stderr, "chained challenge math: %d/3 vectors FAILED — chained math has changed!\n", failed);
     }
     return failed;
 }
 
 // ---------------------------------------------------------------------------
-// KAT 2: ChaCha20 RFC 8439 §2.3.2 test vector
+// Vector group 2: ChaCha20 RFC 8439 §2.3.2 test vector
 //
 // key   = 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
 //         10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f
@@ -189,7 +189,7 @@ static int kat_chacha20() {
 
     // Assert the first 16 bytes (minimum required); we check all 64 for strictness.
     bool pass = (memcmp(out, expected, 64) == 0);
-    printf("KAT chacha20 RFC 8439 §2.3.2: %s", pass ? "PASS" : "FAIL");
+    printf("chacha20 RFC 8439 §2.3.2: %s", pass ? "PASS" : "FAIL");
     if (!pass) {
         printf("\n  expected: ");
         for (int i = 0; i < 16; ++i) printf("%02x ", expected[i]);
@@ -201,7 +201,7 @@ static int kat_chacha20() {
 }
 
 // ---------------------------------------------------------------------------
-// KAT 3: splitmix64 recompute round-trip
+// Vector group 3: splitmix64 recompute round-trip
 //
 // Fill a buffer with a fixed seed using fill_random().
 // Assert splitmix64_recover_seed(buf[0]) == seed.
@@ -220,7 +220,7 @@ static int kat_recompute() {
     uint64_t recovered = mc::splitmix64_recover_seed(buf[0]);
     bool seed_ok = (recovered == kSeed);
     if (!seed_ok) ++failed;
-    printf("KAT recompute seed recovery: %s  (recovered=0x%016llX  expected=0x%016llX)\n",
+    printf("recompute seed recovery: %s  (recovered=0x%016llX  expected=0x%016llX)\n",
            seed_ok ? "PASS" : "FAIL",
            (unsigned long long)recovered, (unsigned long long)kSeed);
 
@@ -230,20 +230,20 @@ static int kat_recompute() {
         uint64_t word = mc::splitmix64_word(kSeed, idx);
         bool ok = (word == buf[idx]);
         if (!ok) ++failed;
-        printf("KAT recompute word[%4llu]: %s  (got=0x%016llX  buf=0x%016llX)\n",
+        printf("recompute word[%4llu]: %s  (got=0x%016llX  buf=0x%016llX)\n",
                (unsigned long long)idx, ok ? "PASS" : "FAIL",
                (unsigned long long)word, (unsigned long long)buf[idx]);
     }
 
     if (failed == 0)
-        printf("KAT recompute: all checks PASS\n");
+        printf("recompute: all checks PASS\n");
     else
-        fprintf(stderr, "KAT recompute: %d check(s) FAILED\n", failed);
+        fprintf(stderr, "recompute: %d check(s) FAILED\n", failed);
     return failed;
 }
 
 // ---------------------------------------------------------------------------
-// KAT 4: fill_buffer_chacha with a fixed 32-byte key
+// Vector group 4: fill_buffer_chacha with a fixed 32-byte key
 //
 // Pins the byte→word ordering and key handling in fill_buffer_chacha() so that
 // a silent change to the fill or the chacha20_fill 64-bit addressing logic
@@ -278,43 +278,43 @@ static int kat_fill_chacha() {
     for (int i = 0; i < 4; ++i) {
         bool pass = (buf[i] == kExpectedFill[i]);
         if (!pass) ++failed;
-        printf("KAT fill_buffer_chacha word[%d]: %s  (got=0x%016llX  expected=0x%016llX)\n",
+        printf("fill_buffer_chacha word[%d]: %s  (got=0x%016llX  expected=0x%016llX)\n",
                i, pass ? "PASS" : "FAIL",
                (unsigned long long)buf[i],
                (unsigned long long)kExpectedFill[i]);
     }
 
     if (failed == 0)
-        printf("KAT fill_buffer_chacha: all 4 words PASS\n");
+        printf("fill_buffer_chacha: all 4 words PASS\n");
     else
-        fprintf(stderr, "KAT fill_buffer_chacha: %d word(s) FAILED — fill or byte-order changed!\n", failed);
+        fprintf(stderr, "fill_buffer_chacha: %d word(s) FAILED — fill or byte-order changed!\n", failed);
     return failed;
 }
 
 int main() {
     int total_failed = 0;
 
-    printf("=== KAT: challenge math (original vectors) ===\n");
+    printf("=== Known-answer test: challenge math (original vectors) ===\n");
     total_failed += kat_challenge();
 
-    printf("\n=== KAT: challenge math (chained / data-dependent path) ===\n");
+    printf("\n=== Known-answer test: challenge math (chained / data-dependent path) ===\n");
     total_failed += kat_challenge_chained();
 
-    printf("\n=== KAT: ChaCha20 RFC 8439 §2.3.2 ===\n");
+    printf("\n=== Known-answer test: ChaCha20 RFC 8439 §2.3.2 ===\n");
     total_failed += kat_chacha20();
 
-    printf("\n=== KAT: splitmix64 recompute round-trip ===\n");
+    printf("\n=== Known-answer test: splitmix64 recompute round-trip ===\n");
     total_failed += kat_recompute();
 
-    printf("\n=== KAT: fill_buffer_chacha (keyed fill, fixed key) ===\n");
+    printf("\n=== Known-answer test: fill_buffer_chacha (keyed fill, fixed key) ===\n");
     total_failed += kat_fill_chacha();
 
     printf("\n");
     if (total_failed == 0) {
-        printf("KAT: all vectors PASS\n");
+        printf("All vectors PASS\n");
         return 0;
     } else {
-        fprintf(stderr, "KAT: %d vector(s) FAILED\n", total_failed);
+        fprintf(stderr, "%d vector(s) FAILED\n", total_failed);
         return 1;
     }
 }

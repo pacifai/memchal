@@ -207,7 +207,8 @@ static inline uint64_t map_index(uint64_t r, uint64_t n) {
 // direct global-memory read from a cudaMalloc buffer. Each thread owns one lane.
 //
 // When chained==false (default): the EXACT current independent code path — do
-// not change a single operation, so existing KAT vectors remain bit-identical.
+// not change a single operation, so existing known-answer vectors remain
+// bit-identical.
 // When chained==true: pointer-chasing loop where each index depends on the
 // previously-read word, preventing any pre-enumeration of offsets.
 template <typename Load>
@@ -263,7 +264,8 @@ static inline uint64_t answer_challenge_t(Load&& load, uint64_t num_words,
 }
 
 // Raw-buffer wrappers — the honest prover and the verifier use these.
-// chained defaults to false so all existing callers and KAT are unchanged.
+// chained defaults to false so all existing callers and the known-answer test
+// are unchanged.
 static inline uint64_t answer_lane(const uint64_t* buf, uint64_t num_words,
                                    uint64_t nonce, uint32_t lane, uint32_t samples,
                                    bool chained = false) {

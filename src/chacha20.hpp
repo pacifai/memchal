@@ -119,9 +119,10 @@ static inline void chacha20_block(const uint8_t key[32], const uint8_t nonce[12]
 //     nonce bytes 0-3   = high 32 bits of start_block (little-endian)
 //     nonce bytes 4-11  = nonce[4..11] passed in (caller-controlled)
 //   This gives unique keystream for any of the 2^64 possible block indices.
-//   The existing RFC 8439 KAT uses start_block=1 with a nonce whose bytes
-//   0-3 happen to be {0,0,0,9}, which maps to counter=1, nonce[0..3]={0,0,0,9}
-//   — bit-identical to the RFC layout — so the KAT is unaffected.
+//   The existing RFC 8439 known-answer test uses start_block=1 with a nonce
+//   whose bytes 0-3 happen to be {0,0,0,9}, mapping to counter=1 and
+//   nonce[0..3]={0,0,0,9}
+//   — bit-identical to the RFC layout — so the known-answer test is unaffected.
 // ---------------------------------------------------------------------------
 static inline void chacha20_fill(uint8_t* out, size_t nbytes,
                                  const uint8_t key[32], const uint8_t nonce[12],

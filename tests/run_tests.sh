@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/run_tests.sh — build + KAT + invariant tests for the memory-challenge PoC.
+# tests/run_tests.sh — build + known-answer + invariant tests for the memory-challenge PoC.
 #
 # Must be run inside the Docker container via:
 #   ./run.sh bash tests/run_tests.sh
@@ -35,7 +35,7 @@ wait_for_port() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 1: build binaries and KAT
+# Step 1: build binaries and the known-answer tests
 # ---------------------------------------------------------------------------
 cd /work
 
@@ -45,14 +45,14 @@ g++ -O3 -std=c++17 -I/work/src -o tests/known_answer tests/known_answer.cpp
 echo "Build complete."
 
 # ---------------------------------------------------------------------------
-# Step 2: KAT
+# Step 2: known-answer tests
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== KAT (known-answer test) ==="
+echo "=== KNOWN-ANSWER TEST (challenge math) ==="
 if tests/known_answer; then
-    pass "KAT"
+    pass "known-answer test"
 else
-    fail "KAT"
+    fail "known-answer test"
 fi
 
 # ---------------------------------------------------------------------------
