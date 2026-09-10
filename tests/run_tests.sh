@@ -42,6 +42,7 @@ cd /work
 echo "=== BUILD ==="
 make
 g++ -O3 -std=c++17 -I/work/src -o tests/known_answer tests/known_answer.cpp
+g++ -O3 -std=c++17 -I/work/src -o tests/known_answer_argon2d tests/known_answer_argon2d.cpp
 echo "Build complete."
 
 # ---------------------------------------------------------------------------
@@ -53,6 +54,17 @@ if tests/known_answer; then
     pass "known-answer test"
 else
     fail "known-answer test"
+fi
+
+# The buffer generator is pinned separately, against vectors published by other
+# people (RFC 7693 for Blake2b, RFC 9106 for Argon2d). A failure here means the
+# generator is no longer Argon2d, so ADR 0007's analysis no longer applies to it.
+echo ""
+echo "=== KNOWN-ANSWER TEST (buffer generator) ==="
+if tests/known_answer_argon2d; then
+    pass "known-answer test (generator)"
+else
+    fail "known-answer test (generator)"
 fi
 
 # ---------------------------------------------------------------------------
