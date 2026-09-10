@@ -121,6 +121,9 @@ information. The pairing is deliberate.
 
 ## Where the three fit in the verification stack
 
+The four-layer stack from `2026-08-16-advisor-review.md` still holds. Adding a
+layer for boundary accounting places all three resources:
+
 | Layer | Question it answers | Who occupies it |
 |---|---|---|
 | L0: capacity estimation | What hardware physically exists? (the denominator) | The external advisor's capacity-estimation notes: die photos, PHY area, HBM supply chain |

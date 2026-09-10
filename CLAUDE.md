@@ -174,9 +174,10 @@ Follow a link into these when a living file cites one.
   are what they are.
 - `docs/investigations/` — [measurements](docs/investigations/README.md)
   (question, script, result) that back the decisions.
-- `docs/analysis/` — dated reasoning documents from working sessions (the GPU
-  port plan, advisor feedback, the external landscape, provider setup). Private
-  names are replaced with role labels here, so these are safe to share as-is.
+- `docs/analysis/` — dated reasoning documents from working sessions: the
+  advisor review that originates the layered stack, the GPU port plan, the
+  external landscape, the advisor feedback, and provider setup. Private names
+  are replaced with role labels here, so these are safe to share as-is.
 
 `src/`, `scripts/`, `tests/` are the core of the project.
 

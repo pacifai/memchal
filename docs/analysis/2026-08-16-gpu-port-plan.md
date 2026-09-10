@@ -6,8 +6,8 @@
 
 # memchal to GPU: what the port is, how to validate it without hardware, and what to do first
 
-Reads on top of `2026-08-16-memchal-state.md` (open issues) and the advisor
-review (bandwidth-vs-latency framing). Assumes a B200-class node; figures from
+Reads on top of `2026-08-16-memchal-state.md` (open issues) and
+`2026-08-16-advisor-review.md` (bandwidth-vs-latency framing). Assumes a B200-class node; figures from
 the memory-ladder figures doc.
 
 ---
@@ -89,7 +89,7 @@ inside jitter. You cannot exclude a peer GPU on latency.
 **Why bandwidth works.** NVLink5 is 1.8 TB/s *bidirectional* per GPU, so
 **900 GB/s ingress**, and that is a hard per-GPU cap: an adversary with 71 NVL72
 peers does not get more ingress than an adversary with one. Local HBM is 8 TB/s.
-That is an **8.9x ceiling**, not 4.4x — the advisor-review draft used 1.8 TB/s as
+That is an **8.9x ceiling**, not 4.4x — `2026-08-16-advisor-review.md` used 1.8 TB/s as
 unidirectional and understated the margin by half.
 
 **Why sparse probes cannot work.** The CPU PoC's `k=4096` probes x 8 B = 33 KB.

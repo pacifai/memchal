@@ -26,8 +26,14 @@ survives.
 The two candidate families differ by orders of magnitude in cost. A VerInf-class
 prover is prohibitively slow for continuous operation — the published full-scale
 run is 14.3 hours to prove and 17.7 hours to verify for 1,000 tokens.
-Komargodski-Weinstein matmul certificates are near-zero overhead. If it's the
-first, "run PoUW continuously alongside memchal" isn't a design, it's a wish.
+Komargodski-Weinstein matmul certificates (arXiv:2504.09971) are near-zero
+overhead at 1+o(1). If it's the first, "run PoUW continuously alongside memchal"
+isn't a design, it's a wish.
+
+The external advisor's four-layer stack already puts the Komargodski-Weinstein
+certificates at this layer (`analysis/2026-08-16-advisor-review.md`), so the
+cheap option is at least the one an outside collaborator assumes. That is not
+the same as the project manager having chosen it.
 
 **Closes when:** the project manager names the scheme. Then either the
 architecture proceeds or the memory half stands alone.

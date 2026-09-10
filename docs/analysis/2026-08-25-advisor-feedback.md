@@ -300,12 +300,12 @@ Status of each edit as of 2026-09-10 in brackets.
 - `2026-08-16-gpu-port-plan.md` §5: add the ODP memory region as the RDMA-layer
   twin of adversary #1, and add the persistent-kernel decompressor as a new
   adversary. **[done — amendment note added]**
-- The advisor review: the bandwidth-vs-latency conclusion needs a caveat. Latency
-  is the worst-attested property when the adversary wants to look *slower* than it
-  is. Against the compression attack the adversary needs to look *faster*, which
-  physics forbids — so a latency-shaped detector is defensible in that direction,
-  provided the window is derived from specs rather than calibrated from the prover.
-  **[not done — the advisor review is not yet on disk]**
+- `2026-08-16-advisor-review.md`: the bandwidth-vs-latency conclusion needs a
+  caveat. Latency is the worst-attested property when the adversary wants to look
+  *slower* than it is. Against the compression attack the adversary needs to look
+  *faster*, which physics forbids — so a latency-shaped detector is defensible in
+  that direction, provided the window is derived from specs rather than
+  calibrated from the prover. **[done — amendment note added]**
 - `2026-08-23-external-landscape.md`: the Interlock timing conflict has a
   resolution now — in-device timestamping — and a stronger reason to talk to the
   Interlock authors. **[done — amendment note added]**
