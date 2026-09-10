@@ -186,6 +186,32 @@ run_invariant "fake" 9104 \
     "e == s and s > 0" \
     ./cheating_prover --port 9104 --mode fake --frac 0.5 --datafile /tmp/memchal_test_fake.bin
 
+# --- Build-buffer path (--gen argon2d): the verifier sends a recipe instead of
+# the buffer and both sides build it. The prover's independently built copy has
+# to agree with the verifier's on every challenge, so 0 errors here also proves
+# the two builds are byte-identical. fake still fabricates, so it still fails
+# every challenge — the correctness detector is unaffected by where bytes came
+# from, which is the point of leaving the challenge math alone.
+_SAVE_ARGS="$VERIFIER_ARGS"; VERIFIER_ARGS="$VERIFIER_ARGS --gen argon2d"
+
+run_invariant "build_honest" 9121 \
+    "e == 0 and s > 0" \
+    ./prover 9121
+
+run_invariant "build_cheat_honest" 9122 \
+    "e == 0 and s > 0" \
+    ./cheating_prover --port 9122 --mode honest
+
+run_invariant "build_fake" 9123 \
+    "e == s and s > 0" \
+    ./cheating_prover --port 9123 --mode fake --frac 0.5 --datafile /tmp/memchal_build_fake.bin
+
+run_invariant "build_mmapdisk" 9124 \
+    "e == 0 and s > 0" \
+    ./cheating_prover --port 9124 --mode mmapdisk --datafile /tmp/memchal_build_mmap.bin
+
+VERIFIER_ARGS="$_SAVE_ARGS"
+
 # --- Case 5: cheating_prover prefetch mode — correct answers (timing attack only), errors must be 0 ---
 run_invariant "prefetch" 9109 \
     "e == 0" \

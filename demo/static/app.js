@@ -15,6 +15,12 @@
 'use strict';
 
 const MEM_STEPS = [32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024]; // MiB
+const GEN_HINTS = {
+  splitmix64: "Weak: the seed is recoverable from a single word, so recompute regenerates the whole buffer and wins.",
+  chacha: "The buffer is still uploaded, but a random 256-bit key means the seed can't be recovered, so recompute regenerates wrong data and every challenge fails.",
+  argon2d: "Build-buffer: the verifier sends a 92-byte recipe instead of the whole buffer, and both sides build it with Argon2d. Each 1 KiB block is built from the previous one and an earlier block the data itself picks, so a prover that discards blocks has to rebuild a cascade of ancestors to get any one of them back.",
+};
+
 const MODE_HINTS = {
   honest: "Holds the whole buffer in RAM and mlock()s it. The baseline every other row is measured against.",
   mmapdisk: "Keeps the data on disk and reads it through a memory-mapped view — no syscall per probe. Fast while it has the RAM to cache the file; give it less and watch.",
@@ -63,7 +69,7 @@ const REDUCED_MOTION = window.matchMedia('(prefers-reduced-motion: reduce)').mat
 const $ = (id) => document.getElementById(id);
 const el = {
   mode: $('mode'), gen: $('gen'), chain: $('chain'), nonce: $('nonce'), mem: $('mem'), memLabel: $('memLabel'), memHint: $('memHint'),
-  modeHint: $('modeHint'), mb: $('mb'), k: $('k'), n: $('n'), warmup: $('warmup'),
+  modeHint: $('modeHint'), genHint: $('genHint'), mb: $('mb'), k: $('k'), n: $('n'), warmup: $('warmup'),
   runBtn: $('runBtn'), stopBtn: $('stopBtn'), clearBtn: $('clearBtn'), themeBtn: $('themeBtn'),
   led: $('led'), statusText: $('statusText'),
   latency: $('latency'), pagemap: $('pagemap'), collapse: $('collapse'),
@@ -847,6 +853,14 @@ function syncControls() {
       ? `${ratio.toFixed(2)}× the buffer — barely enough; expect it to hold most of the file.`
       : `${ratio.toFixed(2)}× the buffer — the page cache CANNOT keep the file. Probes have to fault to storage.`;
   el.modeHint.textContent = MODE_HINTS[el.mode.value] || '';
+  el.genHint.textContent = GEN_HINTS[el.gen.value] || '';
+  // Argon2d cannot build part of a matrix, so the whole buffer has to exist in
+  // RAM once before a disk-backed cheat can spill it. Starved budgets fail
+  // during the build rather than running slowly, which is a different result
+  // from the one this control is usually used to produce.
+  if (el.gen.value === 'argon2d' && ratio < 1 && el.mode.value !== 'honest') {
+    el.genHint.textContent += ` ⚠ At ${ratio.toFixed(2)}× the buffer this prover cannot build it: Argon2d needs buffer-sized RAM once, even for a cheat that means to spill to disk. Raise the budget above 1× to run.`;
+  }
   if (el.mode.value === 'honest' && ratio < 1.2) {
     el.memHint.textContent += ' An honest prover needs the RAM: below ~1.2× it gets OOM-killed.';
   }

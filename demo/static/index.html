@@ -47,11 +47,12 @@
       <label class="field">
         <span class="lab">buffer generator</span>
         <select id="gen">
-          <option value="splitmix64" selected>splitmix64 (weak)</option>
-          <option value="chacha">chacha (crypto)</option>
+          <option value="splitmix64" selected>splitmix64 (weak) — uploaded</option>
+          <option value="chacha">chacha (crypto) — uploaded</option>
+          <option value="argon2d">argon2d (memory-hard) — built from a recipe</option>
         </select>
       </label>
-      <p class="prose">Flip to chacha to defend against recompute — the seed can't be recovered, so the attack regenerates wrong data and every challenge fails.</p>
+      <p class="prose" id="genHint"></p>
 
       <label class="field">
         <span class="lab">access pattern</span>

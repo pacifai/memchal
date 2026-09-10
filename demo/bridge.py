@@ -20,6 +20,13 @@ numeric ranges) and every container is spawned with an argument list, never a
 shell string — a browser page must not be able to talk the bridge into running
 something else.
 
+TWO PROTOCOLS. gen=splitmix64 and gen=chacha upload the buffer. gen=argon2d sends
+a 92-byte recipe instead and both sides build the buffer with Argon2d (ADR 0007).
+Building needs buffer-sized RAM, so a prover whose memory budget is below the
+buffer cannot set up at all under argon2d — it fails during the build rather than
+running slowly. The page warns about that pairing; the bridge lets it through and
+reports the real error.
+
 MEASUREMENT NOTE. Live streaming makes both processes emit an event per challenge
 (and a mincore() residency snapshot every N), all of it after the response has
 been sent, so it is outside the verifier's timed window — but it does space the
@@ -50,7 +57,7 @@ CONTAINER = "memchal_demo_prover"
 
 # ── what the browser may ask for ─────────────────────────────────────────────
 MODES = ("honest", "disk", "partial", "fake", "mmapdisk", "recompute", "prefetch", "precompute")
-GENS = ("splitmix64", "chacha")
+GENS = ("splitmix64", "chacha", "argon2d")
 CHAINS = ("independent", "dependent")
 NONCES = ("sequential", "random")
 MEM_RE = re.compile(r"^[0-9]{1,5}[mg]$")
@@ -440,7 +447,8 @@ class Handler(BaseHTTPRequestHandler):
             HUB.publish({"t": "log", "src": "bridge",
                          "line": f"run requested from {self.client_address[0]}: "
                                  f"{cfg['mode']} at {cfg['mem']}, buffer {cfg['mb']} MiB, "
-                                 f"chain={cfg['chain']} n={cfg['n']} warmup={cfg['warmup']}"})
+                                 f"gen={cfg['gen']} chain={cfg['chain']} "
+                                 f"n={cfg['n']} warmup={cfg['warmup']}"})
             MANAGER.start(cfg)
             return self._json({"started": cfg})
         if path == "/stop":

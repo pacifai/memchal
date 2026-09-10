@@ -233,10 +233,30 @@ cheaper, and are the existing `partial` / `mmapdisk` story).
 ## Implementation status
 
 Landed: `src/argon2d.hpp` (the generator, with `mc::build_buffer()` handing back the
-matrix as the challenge buffer), `tests/known_answer_argon2d.cpp` (RFC-pinned), and
-`src/bench_build.cpp` (build cost). The protocol still uploads the buffer — the recipe
-handshake, the prover and verifier build paths, and the `partial-recompute` adversary are
-the remaining work in [NEXT_STEPS](../../NEXT_STEPS.md).
+matrix as the challenge buffer), `tests/known_answer_argon2d.cpp` (RFC-pinned),
+`tests/differential_argon2d.cpp` (swept against `libargon2`), `src/bench_build.cpp`
+(build cost), and the recipe handshake: `--gen argon2d` sends a 92-byte `RecipeMsg`
+behind wire version 2, and the prover builds inside its already-locked region. The
+send-buffer path is untouched, so every earlier result and the demo still run.
+
+Invariants cover the new path: an honest prover's independently built copy agrees with
+the verifier's on every challenge, `fake` still fails every challenge, and `mmapdisk` is
+still caught by timing. That the two independent builds agree on every answer is itself a
+byte-equality check on the generator across two processes.
+
+The `partial-recompute` adversary remains, in [NEXT_STEPS](../../NEXT_STEPS.md).
+
+### An unplanned consequence: build-time memory is not optional
+
+Argon2d cannot produce part of a matrix, so **every prover must hold buffer-sized memory
+at least once, during the build**. A cheat that intends to spill to disk still needs the
+full buffer in RAM to construct it, and one whose budget is below the buffer size cannot
+set up at all — it fails during the build rather than answering slowly.
+
+This raises the floor, and it is worth *not* overclaiming: it proves a prover once had
+the memory, not that it still does. Nothing stops it freeing the buffer the instant the
+build finishes, which is exactly the `partial-recompute` cheat. Treat it as a property of
+the design, not a second detector.
 
 ### A first, preliminary reading
 

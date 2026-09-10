@@ -67,18 +67,10 @@ on demand (so the prover must store it) and tied to the model. The memory-hardne
 falls on the one-time *generation*, not the per-challenge answer, so it does **not**
 multiply the per-challenge cost — that cost is inescapable and accepted either way.
 
-The generator itself is built: `src/argon2d.hpp` is vendored Argon2d (RFC 9106), pinned
-against RFC vectors by `tests/known_answer_argon2d.cpp`, and `bench_build` reports what a
-block costs. `mc::build_buffer()` hands back the Argon2d matrix as the challenge buffer.
-What remains is wiring it in and attacking it.
+The generator runs on the wire. `--gen argon2d` sends a 92-byte recipe instead of the
+buffer, both sides build it, and the invariant suite covers the path. What remains is
+attacking it.
 
-- [ ] **Ship the recipe handshake.** Replace the buffer upload with a small `Recipe`
-  message (key, salt, `m`/`t`/`p`, reserved workload tag) behind a wire-version bump, and
-  add build paths to the prover (build inside the already-`mlock`ed region) and the
-  verifier (build its own reference copy). Keep the send-buffer path working — every
-  existing investigation, result, and the demo ride on it. *Done when:* a build-buffer
-  challenge runs end to end against the honest prover with zero verify errors, and the
-  existing invariant suite still passes unchanged.
 - [ ] **Attack it: a `partial-recompute` mode.** Hold fraction `f` of the blocks and
   genuinely rebuild missing ancestors on demand, with a give-up cap. *Done when:* it
   loses on timing against the defended generator, an invariant pins that, and its TMTO

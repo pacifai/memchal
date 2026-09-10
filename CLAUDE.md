@@ -57,7 +57,8 @@ answer path is written to port cleanly (a flat buffer, no STL).
   — memchal wants the scratch memory, not the tag. Argon2d only, and **frozen the same
   way `common.hpp` is**: it is pinned against RFC vectors, so a change that breaks them
   means it is no longer Argon2d and ADR 0007's analysis no longer covers it. Not yet on
-  the wire; see [ADR 0007](docs/decisions/0007-buffer-generator-memory-hard-function.md).
+  the wire behind `--gen argon2d`: the verifier sends a `RecipeMsg` and both sides
+  build. See [ADR 0007](docs/decisions/0007-buffer-generator-memory-hard-function.md).
 - `src/bench_build.cpp` → `bench_build` — what one 1 KiB block costs to build, which is
   the attacker's unit of work in the build-buffer design. Not a protocol participant.
 - `src/prover.cpp` — the honest TCP server. Maps, prefaults, and `mlock`s the
