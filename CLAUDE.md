@@ -51,6 +51,15 @@ answer path is written to port cleanly (a flat buffer, no STL).
   ([ADR 0001](docs/decisions/0001-challenge-math-frozen-pinned-by-known-answer.md)).
 - `src/chacha20.hpp` — a small vendored ChaCha20 (RFC 8439) for keyed-stream buffer
   generation.
+- `src/argon2d.hpp` — vendored Argon2d (RFC 9106) for the build-buffer design: the
+  memory-hard generator that makes "regenerate on demand" more expensive than "keep the
+  bytes". `mc::build_buffer()` hands back the Argon2d **matrix** as the challenge buffer
+  — memchal wants the scratch memory, not the tag. Argon2d only, and **frozen the same
+  way `common.hpp` is**: it is pinned against RFC vectors, so a change that breaks them
+  means it is no longer Argon2d and ADR 0007's analysis no longer covers it. Not yet on
+  the wire; see [ADR 0007](docs/decisions/0007-buffer-generator-memory-hard-function.md).
+- `src/bench_build.cpp` → `bench_build` — what one 1 KiB block costs to build, which is
+  the attacker's unit of work in the build-buffer design. Not a protocol participant.
 - `src/prover.cpp` — the honest TCP server. Maps, prefaults, and `mlock`s the
   buffer, verifies the lock through `VmLck`, and refuses to run if it isn't pinned
   ([ADR 0002](docs/decisions/0002-verify-and-refuse-on-mlock.md)).
@@ -66,8 +75,9 @@ answer path is written to port cleanly (a flat buffer, no STL).
   floor, ratios and paired differences with propagated error, drift detection, and
   session-stamped output.
 - `scripts/plot.py` — one self-describing chart from `trials.json`.
-- `tests/` — `known_answer.cpp` (pins the math) and `run_tests.sh` (the known-answer
-  test plus invariants).
+- `tests/` — `known_answer.cpp` (pins the challenge math), `known_answer_argon2d.cpp`
+  (pins the generator against RFC 7693 and RFC 9106 vectors — values this codebase did
+  not produce), and `run_tests.sh` (both known-answer tests plus invariants).
 
 ## Build, run, test
 
