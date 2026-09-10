@@ -43,6 +43,7 @@ echo "=== BUILD ==="
 make
 g++ -O3 -std=c++17 -I/work/src -o tests/known_answer tests/known_answer.cpp
 g++ -O3 -std=c++17 -I/work/src -o tests/known_answer_argon2d tests/known_answer_argon2d.cpp
+g++ -O3 -std=c++17 -I/work/src -o tests/differential_argon2d tests/differential_argon2d.cpp -largon2
 echo "Build complete."
 
 # ---------------------------------------------------------------------------
@@ -65,6 +66,17 @@ if tests/known_answer_argon2d; then
     pass "known-answer test (generator)"
 else
     fail "known-answer test (generator)"
+fi
+
+# The published vectors pin one point each. This sweeps the parameter space
+# against the reference implementation, so a bug that the RFC vector happens to
+# miss still shows up. libargon2 is a test-only dependency.
+echo ""
+echo "=== DIFFERENTIAL TEST (generator vs libargon2) ==="
+if tests/differential_argon2d; then
+    pass "differential test (generator)"
+else
+    fail "differential test (generator)"
 fi
 
 # ---------------------------------------------------------------------------

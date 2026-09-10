@@ -77,7 +77,9 @@ answer path is written to port cleanly (a flat buffer, no STL).
 - `scripts/plot.py` — one self-describing chart from `trials.json`.
 - `tests/` — `known_answer.cpp` (pins the challenge math), `known_answer_argon2d.cpp`
   (pins the generator against RFC 7693 and RFC 9106 vectors — values this codebase did
-  not produce), and `run_tests.sh` (both known-answer tests plus invariants).
+  not produce), `differential_argon2d.cpp` (sweeps the generator against `libargon2`, a
+  **test-only** dependency; nothing that ships links it), and `run_tests.sh` (all three
+  plus invariants).
 
 ## Build, run, test
 

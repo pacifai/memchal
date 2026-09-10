@@ -10,9 +10,15 @@ FROM debian:stable-slim
 
 # g++/make to build; python3 + matplotlib (via apt, no pip) for aggregation and
 # plotting. procps gives /proc tooling; ca-certificates for completeness.
+#
+# libargon2-dev is TEST-ONLY. tests/differential_argon2d.cpp cross-checks our
+# vendored Argon2d against the reference implementation over a parameter sweep.
+# Nothing that ships links it: the Makefile targets, the prover, the verifier,
+# and the GPU path stay dependency-free.
 RUN apt-get update -qq \
  && apt-get install -y --no-install-recommends \
       g++ make python3 python3-matplotlib python3-numpy procps ca-certificates \
+      libargon2-dev \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /work

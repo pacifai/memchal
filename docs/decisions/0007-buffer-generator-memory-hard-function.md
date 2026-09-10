@@ -195,6 +195,26 @@ revisit clause named this exact trigger and asked for external provenance when i
 Runtime cost of the choice is nil (Blake2b's round function is no slower than ChaCha's,
 and `G` dominates either way); the cost is implementation size, paid once.
 
+A dependency was reconsidered before the branch went up, and rejected for a concrete
+reason rather than a stylistic one: **no C or C++ Argon2 library can return the block
+matrix**, which is the only thing memchal wants. The reference implementation's
+`finalize()` unconditionally calls `free_memory()`, which wipes the matrix before
+deallocating it, and no public API exposes it; retaining it needs custom allocator
+callbacks plus clearing the library-internal global `FLAG_clear_internal_memory`, which
+exists to erase secrets and is process-wide. libsodium omits Argon2d entirely. OpenSSL's
+`EVP_KDF` returns the derived key only. Rust's `argon2` crate does hand back
+caller-supplied blocks, at the cost of a Rust toolchain in a C++ project heading for a
+CUDA kernel. The tempting shortcut — seed a stream cipher from a library's Argon2 tag —
+throws away the memory-hardness, because the hardness lives in the matrix and nowhere
+else.
+
+The reference implementation is used **as a test oracle instead**:
+`tests/differential_argon2d.cpp` links `libargon2` and compares tags across a random
+sweep of `m`, `t`, `p`, tag length, and input lengths, with the library's threads set to
+its lane count so the comparison covers its threaded fill. Assurance moves from one
+published vector to agreement across the parameter space, and nothing that ships or ports
+to the GPU gains a dependency.
+
 Argon2d **only** — no Argon2i or Argon2id. Their data-independent addressing buys
 side-channel resistance memchal has no use for, at a proven TMTO ceiling, and a knob
 nobody should turn invites turning it.
