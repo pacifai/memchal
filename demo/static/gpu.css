@@ -1,0 +1,34 @@
+/* gpu.css — styles specific to the GPU page, loaded after app.css.
+ *
+ * Every canvas gets an explicit height here. That is not cosmetic: a canvas
+ * with no CSS height falls back to its own bitmap height, which the drawing
+ * code sets, so the element grows on every redraw until the tab dies. The CSS
+ * box has to be the authority. */
+#residency { height: 96px; }
+#timesplit { height: 132px; }
+#detect    { height: 210px; }
+#latency   { height: 200px; }
+
+/* A caveat you can see without reading a paragraph. */
+.badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-family: var(--face-num); font-size: 9.5px; letter-spacing: .02em;
+  color: var(--muted); border: 1px solid var(--hair); border-radius: 3px;
+  padding: 1px 5px; white-space: nowrap;
+}
+.badge.warn { color: var(--slow); border-color: var(--slow); }
+.badge-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+
+/* Shown only when the page is being fed by fake_feed.py, so a recording made
+ * against synthetic data can never be mistaken for a measurement. */
+#synthetic {
+  display: none; background: var(--slow); color: #12080a;
+  font-family: var(--face-num); font-size: 11px; font-weight: 700;
+  letter-spacing: .08em; text-align: center; padding: 3px;
+}
+#synthetic.on { display: block; }
+
+.screen-top .legend { margin-left: auto; }
+.mini { font-family: var(--face-num); font-size: 10px; color: var(--muted); }
+.knob { margin-top: 8px; }
+.knob input[type=range] { width: 100%; }

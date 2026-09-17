@@ -404,6 +404,26 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# The GPU demo page's canvas sizing.
+#
+# Not C++, and not part of the protocol — but a canvas that grows on every
+# redraw took a live demo session down, and the failure mode (read back a value
+# you just wrote) is invisible in review. Needs node, which the measurement
+# container does not ship, so it skips there and runs on a developer machine.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== GPU demo: canvas sizing ==="
+if command -v node >/dev/null 2>&1; then
+    if node "$(dirname "$0")/canvas_fit_test.js"; then
+        pass "canvas fit (demo page cannot grow itself to death)"
+    else
+        fail "canvas fit"
+    fi
+else
+    echo "  SKIP: node not available in this environment"
+fi
+
 # Final summary
 # ---------------------------------------------------------------------------
 echo ""
