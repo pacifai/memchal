@@ -71,6 +71,8 @@ struct Args {
     const char* stream = nullptr;   // "-" for stdout, else a path
     uint32_t probe_map_every = 0;   // emit the probed-page bitmap every N challenges
     bool chained = true;            // --chain independent -> off; dependent is default
+    bool tree = false;              // --fold tree -> parallel Merkle fold (different answers)
+    uint32_t verify_every = 1;      // check 1 in N answers; 1 = check all
     NonceMode nonce_mode = NonceMode::RANDOM; // --nonce sequential|random (random default)
     uint32_t gap_us = 0;            // --gap-us N: sleep N microseconds between challenges
 };
@@ -136,6 +138,15 @@ static Args parse(int argc, char** argv) {
         else if (!strcmp(k, "--chain")) {
             a.chained = (!strcmp(v, "dependent"));
         }
+        else if (!strcmp(k, "--verify-every")) {
+            a.verify_every = (uint32_t)strtoul(v, nullptr, 10);
+            if (a.verify_every == 0) a.verify_every = 1;
+        }
+        else if (!strcmp(k, "--fold")) {
+            // The tree fold is a different protocol with different answers, so
+            // it is opt-in and travels on the wire. Default stays sequential.
+            a.tree = (!strcmp(v, "tree"));
+        }
         else if (!strcmp(k, "--nonce")) {
             if (!strcmp(v, "random")) a.nonce_mode = NonceMode::RANDOM;
             else                     a.nonce_mode = NonceMode::SEQUENTIAL;
@@ -159,6 +170,9 @@ static void run_batch(int fd, const uint64_t* buf, uint64_t num_words,
                       uint64_t nonce_base, std::vector<double>* out_ns, uint64_t* errors,
                       Stream* st = nullptr, const char* phase = "r", uint64_t* seq = nullptr,
                       bool chained = false,
+                      bool tree = false,
+                      uint32_t verify_every = 1,
+                      uint64_t* checked = nullptr,
                       NonceMode nonce_mode = NonceMode::SEQUENTIAL,
                       uint32_t gap_us = 0,
                       uint8_t* cc20_key = nullptr,   // 32-byte key for random nonces
@@ -167,6 +181,7 @@ static void run_batch(int fd, const uint64_t* buf, uint64_t num_words,
     for (uint32_t i = 0; i < count; ++i) {
         Challenge ch{}; ch.k = k; ch.lanes = lanes;
         if (chained) ch.flags |= kFlagChained;
+        if (tree)    ch.flags |= kFlagTreeFold;
 
         // Nonce selection: sequential (original) or CSPRNG (unpredictable).
         if (nonce_mode == NonceMode::RANDOM && cc20_key && cc20_ctr) {
@@ -188,18 +203,44 @@ static void run_batch(int fd, const uint64_t* buf, uint64_t num_words,
         uint64_t idx = seq ? (*seq)++ : i;
         bool map = st && st->wants_map(idx);
 
-        uint64_t expect;
-        if (map) {
+        // Checking an answer means redoing every probe on the CPU, which at
+        // large k costs hundreds of times what the prover spent producing it.
+        // Sampling keeps the timing series dense while the check stays
+        // affordable. It weakens the correctness detector in proportion: a
+        // prover wrong on a fraction f of challenges is caught with probability
+        // 1-(1-f)^(checked). Against `fake`, which is wrong on every challenge,
+        // one check is enough. The real fix is opening a subset of lanes from
+        // the Merkle root, which is still owed.
+        bool do_check = (verify_every <= 1) || (i % verify_every == 0);
+        if (map) do_check = true;   // a probe map is only meaningful if computed
+
+        uint64_t expect = 0;
+        if (!do_check) {
+            // fall through: nothing computed, nothing compared
+        } else if (map) {
             // Same loader, plus a note of which page each probe landed on. The
             // index sequence comes from answer_challenge_t itself, so the map is
             // exactly what the prover was asked for — not a reconstruction.
             std::fill(st->pages.begin(), st->pages.end(), (uint8_t)0);
             uint8_t* pg = st->pages.data();
             uint64_t pw = st->page_words;
-            expect = answer_challenge_t([buf, pg, pw](uint64_t j) {
+            auto probe = [buf, pg, pw](uint64_t j) {
                 pg[j / pw] = 1;
                 return buf[j];
-            }, num_words, ch.nonce, ch.k, ch.lanes, chained);
+            };
+            if (tree) {
+                uint32_t nl = ch.lanes ? ch.lanes : 1u;
+                std::vector<uint64_t> scratch(nl);
+                answer_lanes_t(probe, num_words, ch.nonce, ch.k, nl, chained, scratch.data());
+                expect = tree_fold(scratch.data(), nl, ch.nonce, ch.k);
+            } else {
+                expect = answer_challenge_t(probe, num_words, ch.nonce, ch.k, ch.lanes, chained);
+            }
+        } else if (tree) {
+            uint32_t nl = ch.lanes ? ch.lanes : 1u;
+            std::vector<uint64_t> scratch(nl);
+            expect = answer_challenge_tree(buf, num_words, ch.nonce, ch.k, nl, chained,
+                                           scratch.data());
         } else {
             expect = answer_challenge(buf, num_words, ch.nonce, ch.k, ch.lanes, chained);
         }
@@ -210,18 +251,22 @@ static void run_batch(int fd, const uint64_t* buf, uint64_t num_words,
         if (!recv_all(fd, &r, sizeof(r))) { fprintf(stderr, "recv fail\n"); return; }
         auto t1 = Clock::now();
 
-        bool ok = (r.hash == expect);
-        if (!ok) (*errors)++;
+        bool ok = do_check ? (r.hash == expect) : true;
+        if (do_check) {
+            if (checked) (*checked)++;
+            if (!ok) (*errors)++;
+        }
         double ns = std::chrono::duration<double, std::nano>(t1 - t0).count();
         if (out_ns) out_ns->push_back(ns);
 
         if (st && st->f) {   // strictly after the timed window
             fprintf(st->f, "@{\"t\":\"c\",\"i\":%llu,\"ph\":\"%s\",\"us\":%.3f,"
                            "\"nonce\":\"0x%016llx\",\"hash\":\"0x%016llx\",\"exp\":\"0x%016llx\","
-                           "\"ok\":%s",
+                           "\"ok\":%s,\"checked\":%s",
                     (unsigned long long)idx, phase, ns / 1000.0,
                     (unsigned long long)ch.nonce, (unsigned long long)r.hash,
-                    (unsigned long long)expect, ok ? "true" : "false");
+                    (unsigned long long)expect, ok ? "true" : "false",
+                    do_check ? "true" : "false");
             if (map) {
                 fprintf(st->f, ",\"map\":\"");
                 b64_bits(st->f, st->pages.data(), st->pages.size());
@@ -263,8 +308,9 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    printf("[verifier] buffer=%.1f MiB k=%u lanes=%u n=%u warmup=%u host=%s:%u gen=%s chain=%s nonce=%s gap_us=%u\n",
-           bytes / 1048576.0, a.k, a.lanes, a.n, a.warmup, a.host, a.port, gen_name, chain_name, nonce_name, a.gap_us);
+    printf("[verifier] buffer=%.1f MiB k=%u lanes=%u n=%u warmup=%u host=%s:%u gen=%s chain=%s fold=%s nonce=%s gap_us=%u verify_every=%u\n",
+           bytes / 1048576.0, a.k, a.lanes, a.n, a.warmup, a.host, a.port, gen_name, chain_name, a.tree ? "tree" : "sequential",
+           nonce_name, a.gap_us, a.verify_every);
 
     // For random nonce mode: derive a 32-byte CSPRNG key from std::random_device.
     // The key is seeded fresh per run so the prover cannot predict future nonces
@@ -350,11 +396,12 @@ int main(int argc, char** argv) {
         }
     }
     uint64_t seq = 0;
+    uint64_t checked = 0;
 
     // Warmup (fault in pages, warm caches/branch predictors) — not measured.
     uint64_t werr = 0;
     run_batch(fd, buf, num_words, a.k, a.lanes, a.warmup, base, nullptr, &werr,
-              stream.f ? &stream : nullptr, "w", &seq, a.chained,
+              stream.f ? &stream : nullptr, "w", &seq, a.chained, a.tree, a.verify_every, &checked,
               a.nonce_mode, a.gap_us,
               (a.nonce_mode == NonceMode::RANDOM) ? cc20_key : nullptr, &cc20_ctr);
     base += a.warmup;
@@ -363,7 +410,7 @@ int main(int argc, char** argv) {
     std::vector<double> lat; lat.reserve(a.n);
     uint64_t errors = 0;
     run_batch(fd, buf, num_words, a.k, a.lanes, a.n, base, &lat, &errors,
-              stream.f ? &stream : nullptr, "r", &seq, a.chained,
+              stream.f ? &stream : nullptr, "r", &seq, a.chained, a.tree, a.verify_every, &checked,
               a.nonce_mode, a.gap_us,
               (a.nonce_mode == NonceMode::RANDOM) ? cc20_key : nullptr, &cc20_ctr);
 
@@ -381,8 +428,8 @@ int main(int argc, char** argv) {
                            {"p99.9",99.9}, {"max",100} };
     size_t n = lat.size();
 
-    printf("\n=== latency profile (%zu samples, %llu errors) ===\n",
-           n, (unsigned long long)errors);
+    printf("\n=== latency profile (%zu samples, %llu errors in %llu checked) ===\n",
+           n, (unsigned long long)errors, (unsigned long long)checked);
     for (const Pctl& q : pctls) {
         size_t tail = tail_count(q.p, n);
         // For min/max "tail" is degenerate; only flag the high inner percentiles.
@@ -454,9 +501,11 @@ int main(int argc, char** argv) {
     }
 
     if (stream.f) {
-        fprintf(stream.f, "@{\"t\":\"end\",\"samples\":%zu,\"errors\":%llu,\"p50\":%.3f,"
+        fprintf(stream.f, "@{\"t\":\"end\",\"samples\":%zu,\"errors\":%llu,"
+                          "\"checked\":%llu,\"p50\":%.3f,"
                           "\"p99\":%.3f,\"min\":%.3f,\"max\":%.3f,\"mean\":%.3f}\n",
-                n, (unsigned long long)errors, pctile(s, 50) / 1000.0, pctile(s, 99) / 1000.0,
+                n, (unsigned long long)errors, (unsigned long long)checked,
+                pctile(s, 50) / 1000.0, pctile(s, 99) / 1000.0,
                 pctile(s, 0) / 1000.0, pctile(s, 100) / 1000.0, mean / 1000.0);
         if (stream.f != stdout) fclose(stream.f);
     }
