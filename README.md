@@ -182,14 +182,74 @@ The fuller analysis — why `fake` is slightly faster, how latency scales with `
 and the run-to-run variance — is in `docs/investigations/` and
 [ADR 0003](docs/decisions/0003-timing-detector-scope-and-measurement.md).
 
-## Toward a GPU version
+## The GPU version
 
-The answer path is written to port cleanly to a GPU: a flat word buffer, no STL,
-no exceptions. The buffer would live in VRAM through `cudaMalloc` (not swappable —
-the GPU equivalent of `mlock`), `answer_lane_t` becomes the per-thread kernel body,
-and the only non-portable line is the 128-bit multiply in `map_index`
-(`((__uint128)r * n) >> 64` becomes `__umul64hi(r, n)`). `splitmix64` and `mix64`
-are already identical. This is future work; see [NEXT_STEPS.md](NEXT_STEPS.md).
+The GPU port **runs, and the correctness gate passes.** On an NVIDIA A40 the CUDA
+kernel reproduced all six constants pinned before any CUDA existed — twice, once
+over an uploaded buffer and once over one the GPU generated itself.
+
+The answer path ported cleanly, as intended. `answer_lane_t` is now the
+per-thread kernel body, and the only non-portable line was the 128-bit multiply
+in `map_index`, which became `mulhi64()`. Three things were less obvious:
+
+- **`common.hpp` had to be split first.** It mixed the challenge math with
+  `<sys/socket.h>` and `/proc` readers, so it could not be included from a `.cu`
+  file at all. The math now lives in `src/challenge.hpp`.
+- **The cross-lane fold cannot be a tree reduction.** It is a sequential chain,
+  so a warp-shuffle reduction would produce a different hash while looking
+  perfectly reasonable.
+- **`mlock` has no GPU equivalent, and the gap matters.** `cudaMallocManaged`
+  returns a pointer that looks identical to `cudaMalloc`'s and migrates silently
+  under pressure. The prover asks the driver what backs its buffer and refuses to
+  serve unless the answer is device memory
+  ([ADR 0008](docs/decisions/0008-gpu-residency-check-substitutes-for-mlock.md)).
+  Like `VmLck`, that is self-reported: it stops the honest prover publishing a
+  bad baseline and proves nothing about a remote one.
+
+### Measured, on one A40, in one session
+
+Clock locking is denied on a container provider, so the card's clocks wandered.
+The ratios are meaningful; the absolute microseconds do not travel.
+
+| mode | p50 | vs honest | verify errors | caught by |
+|---|---:|---:|---:|---|
+| honest | 629 us | 1.00x | 0 | — |
+| `fake` | 580 us | 0.92x | **100/100** | correctness |
+| `uvm`, buffer fits in free HBM | 653 us | 1.04x | 0 | **nothing — and correctly so** |
+| `uvm`, buffer does not fit | 2.92 s | **4643x** | 0 | timing |
+| `zerocopy` (host DRAM over PCIe) | 9.44 ms | **15x** | 0 | timing |
+
+4096 MiB buffer, k=262144, lanes=16384, chain depth 16, defenses on.
+
+The `uvm` pair is worth reading twice. Managed memory that fits on the card
+migrates there once and is genuinely resident, so passing it is a true negative
+rather than a miss — the same shape as the CPU finding that a memory-mapped cheat
+looks honest while the page cache holds its file. The cliff falls exactly where
+free HBM stops being able to hold the buffer, with nothing in between: the
+detector has no early warning. See
+[uvm-needs-hbm](docs/investigations/uvm-needs-hbm/README.md).
+
+Two honest limitations from the same session. Over half the response time is the
+host-side lane fold (~312 us against the kernel's ~86 us at 16384 lanes), which
+is what keeping the sequential chain correct costs. And useful-bytes bandwidth
+came out near 25 GB/s against the A40's ~696 GB/s peak, because 8-byte probes
+discard most of each memory transaction and a depth-16 dependent chain is
+latency-bound rather than bandwidth-bound. Both are in
+[NEXT_STEPS.md](NEXT_STEPS.md).
+
+### Running it
+
+```bash
+bash scripts/gpu_pod_setup.sh      # machine record, refusals, build, then the gate
+bash scripts/gpu_adversaries.sh    # honest plus all three cheats, interleaved
+python3 demo/bridge_gpu.py         # the live demo, on the GPU box
+```
+
+The GPU demo spawns processes directly rather than containers, because RunPod
+runs the container for you and forbids nesting another. It shows HBM occupancy
+where the CPU page shows a page map — there is no GPU `mincore()`, so per-page
+residency simply is not available — and puts SM clock, temperature, and any
+active throttle reason next to every measurement.
 
 ## Learn more
 

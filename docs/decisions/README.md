@@ -17,3 +17,4 @@ are documented in [`CLAUDE.md`](../../CLAUDE.md) and `README.md`, not here.)
 | [0005](0005-per-lane-chaining-vs-gpu-parallelism.md) | Per-lane chaining: latency-hardness vs GPU parallelism | The chain shape decision the GPU port will re-open |
 | [0006](0006-chacha20-vendored-vs-dependency.md) | ChaCha20: keep the vendored implementation (send-buffer scope; revisited by 0007) | Why we own ~120 lines of crypto instead of taking a dependency |
 | [0007](0007-buffer-generator-memory-hard-function.md) | Buffer generator: a memory-hard function for the build-buffer design (**proposed**) | Why the recompute defense needs an MHF once the prover holds the recipe, and which one |
+| [0008](0008-gpu-residency-check-substitutes-for-mlock.md) | GPU: cudaMalloc + a pointer-attribute check replaces mlock/VmLck (**proposed**) | What ADR 0002's guarantee becomes on a device with no mlock and no /proc — and why that makes timing the only signal that survives a lying prover |
