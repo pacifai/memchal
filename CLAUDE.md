@@ -36,9 +36,10 @@ answer path is written to port cleanly (a flat buffer, no STL).
   [ADR 0004](docs/decisions/0004-adversary-taxonomy-and-defenses.md) and
   [ADR 0005](docs/decisions/0005-per-lane-chaining-vs-gpu-parallelism.md).
 - **Absolute latencies don't carry across sessions.** Apple Silicon places each
-  container's vCPUs on performance or efficiency cores for its whole life, swinging
-  absolute latency by up to ~1.6×. Trust only within-session ratios and paired
-  differences. See [ADR 0003](docs/decisions/0003-timing-detector-scope-and-measurement.md).
+  container's vCPUs on performance or efficiency cores for its whole life,
+  swinging absolute latency by up to ~1.6×. Trust only within-session ratios and
+  paired differences. See [ADR
+  0003](docs/decisions/0003-timing-detector-scope-and-measurement.md).
 - **There's no decision rule yet.** The harness reports how far apart the modes
   sit, not an accept/reject classifier with error rates.
 
@@ -51,6 +52,16 @@ answer path is written to port cleanly (a flat buffer, no STL).
   ([ADR 0001](docs/decisions/0001-challenge-math-frozen-pinned-by-known-answer.md)).
 - `src/chacha20.hpp` — a small vendored ChaCha20 (RFC 8439) for keyed-stream buffer
   generation.
+- `src/argon2d.hpp` — vendored Argon2d (RFC 9106) for the build-buffer design:
+  the memory-hard generator that makes "regenerate on demand" more expensive
+  than "keep the bytes". `mc::build_buffer()` hands back the Argon2d **matrix**
+  as the challenge buffer — memchal wants the scratch memory, not the tag.
+  Argon2d only, and **frozen the same way `common.hpp` is**: it is pinned
+  against RFC vectors, so a change that breaks them means it is no longer
+  Argon2d and ADR 0007's analysis no longer covers it. Not yet on the wire; see
+  [ADR 0007](docs/decisions/0007-buffer-generator-memory-hard-function.md).
+- `src/bench_build.cpp` → `bench_build` — what one 1 KiB block costs to build, which is
+  the attacker's unit of work in the build-buffer design. Not a protocol participant.
 - `src/prover.cpp` — the honest TCP server. Maps, prefaults, and `mlock`s the
   buffer, verifies the lock through `VmLck`, and refuses to run if it isn't pinned
   ([ADR 0002](docs/decisions/0002-verify-and-refuse-on-mlock.md)).
@@ -66,8 +77,11 @@ answer path is written to port cleanly (a flat buffer, no STL).
   floor, ratios and paired differences with propagated error, drift detection, and
   session-stamped output.
 - `scripts/plot.py` — one self-describing chart from `trials.json`.
-- `tests/` — `known_answer.cpp` (pins the math) and `run_tests.sh` (the known-answer
-  test plus invariants).
+- `tests/` — `known_answer.cpp` (pins the challenge math), `known_answer_argon2d.cpp`
+  (pins the generator against RFC 7693 and RFC 9106 vectors — values this codebase did
+  not produce), `differential_argon2d.cpp` (sweeps the generator against `libargon2`, a
+  **test-only** dependency; nothing that ships links it), and `run_tests.sh` (all three
+  plus invariants).
 
 ## Build, run, test
 
@@ -116,6 +130,16 @@ core-affinity questions (see `NEXT_STEPS.md`).
 - **`NEXT_STEPS.md` holds only pending work.** When something ships, move its
   description to `README.md` or an ADR and delete it from `NEXT_STEPS.md` — the file
   must never accumulate already-implemented changes.
+- **Merge conversations into the living files; don't stack up new documents.**
+  When a working session produces something durable, it belongs in whichever
+  living file already owns that subject — new work in `NEXT_STEPS.md`, a settled
+  choice as an ADR, a changed claim in the status section above and in the
+  warehouse visual, a thread waiting on someone in `docs/open-questions.md`. Write
+  a dated document under `docs/analysis/` only for reasoning long enough to be
+  worth keeping whole, and even then write its consequences into the living files
+  in the same pass. `/sync`, run from the pacifai folder, does this end to end.
+- **Say a thing once.** If a fact is in an ADR, the living files cite it rather
+  than restating it. Two copies of a number is how they drift.
 
 ## What's still open (see NEXT_STEPS.md)
 
@@ -130,12 +154,65 @@ core-affinity questions (see `NEXT_STEPS.md`).
 3. A **decision rule** with stated false-positive and false-negative rates.
 4. The **GPU port**, plus protocol hardening (≥128-bit responses).
 
-## Map of the repo
+## Claim tags and voice
 
-- `README.md` — the human-facing overview.
-- `NEXT_STEPS.md` — pending work, with rationale.
+Every claim carries its evidence, in the living files and the analysis documents
+alike. Don't let a number lose its tag when you restate it.
+
+- **[MEASURED]**: measured in this repo. CPU only so far; nothing about GPUs is
+  measured.
+- **[LIT]**: a published third-party figure, not verified here.
+- **[ASSESS]**: reasoning in this project, not measurement.
+- **[HYPOTHESIS]**: an assumption, untested.
+
+Write in plain language, without filler or hedging. For governance readers, lead
+with a sentence rather than a plot. For hardware, use the warehouse analogy first,
+then the technical term. Present design forks as options with the tradeoff stated.
+
+## Where knowledge lives
+
+<!-- living-files: CLAUDE.md README.md NEXT_STEPS.md docs/open-questions.md -->
+
+Two kinds of file, and the difference is the whole filing system.
+
+**Living files — rewritten in place, never appended to.** Read these to find out
+where the project is. If one of them is stale, that is a bug.
+
+- `CLAUDE.md` (this file) — orientation, current status, rules.
+- `README.md` — the human-facing overview of what is built and what it proves.
+- `NEXT_STEPS.md` — pending work only. Nothing that already shipped.
+- `docs/open-questions.md` — threads blocked on another person or on missing
+  information. Entries get deleted when they close, not marked resolved.
+
+**Evidence — dated, immutable once written, superseded rather than edited.**
+Follow a link into these when a living file cites one.
+
 - `docs/decisions/` — [ADRs](docs/decisions/README.md): why the design and claims
   are what they are.
-- `docs/investigations/` — [analyses](docs/investigations/README.md) (question,
-  script, result) that back the decisions.
-- `src/`, `scripts/`, `tests/` — the core of the project.
+- `docs/investigations/` — [measurements](docs/investigations/README.md)
+  (question, script, result) that back the decisions.
+- `docs/analysis/` — dated reasoning documents from working sessions: the
+  advisor review that originates the layered stack, the GPU port plan, the
+  external landscape, the advisor feedback, and provider setup. Private names
+  are replaced with role labels here, so these are safe to share as-is.
+
+`src/`, `scripts/`, `tests/` are the core of the project.
+
+The visual companion lives at `../memory-warehouse/`. It restates this repo's
+findings, so it inherits this repo's caveats and has to move when a claim moves.
+
+### Syncing this repo
+
+`/sync` follows these rules for memchal:
+
+- A settled choice becomes an ADR under `docs/decisions/` with `Status: proposed`
+  until agreed, plus a row in that folder's README. To amend an ADR, edit it
+  instead of adding a near-duplicate.
+- A measurement becomes a folder under `docs/investigations/` (question, script,
+  and a `results/` snapshot), plus a row in that folder's README.
+- A changed claim gets fixed in the status section above, in `README.md` if it's
+  user-facing, and in `../memory-warehouse`. There, update
+  `docs/memory-ladder-figures.md` first, with its source, then
+  `memory-warehouse.html` to match, and commit in that repo.
+- Dated analysis documents go in `docs/analysis/YYYY-MM-DD-<topic>.md`, with a
+  header that says what they supersede or amend.
