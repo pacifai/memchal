@@ -137,7 +137,7 @@ core-affinity questions (see `NEXT_STEPS.md`).
   warehouse visual, a thread waiting on someone in `docs/open-questions.md`. Write
   a dated document under `docs/analysis/` only for reasoning long enough to be
   worth keeping whole, and even then write its consequences into the living files
-  in the same pass. The workspace `/sync` command does this end to end.
+  in the same pass. `/sync`, run from the pacifai folder, does this end to end.
 - **Say a thing once.** If a fact is in an ADR, the living files cite it rather
   than restating it. Two copies of a number is how they drift.
 
@@ -154,7 +154,24 @@ core-affinity questions (see `NEXT_STEPS.md`).
 3. A **decision rule** with stated false-positive and false-negative rates.
 4. The **GPU port**, plus protocol hardening (≥128-bit responses).
 
+## Claim tags and voice
+
+Every claim carries its evidence, in the living files and the analysis documents
+alike. Don't let a number lose its tag when you restate it.
+
+- **[MEASURED]**: measured in this repo. CPU only so far; nothing about GPUs is
+  measured.
+- **[LIT]**: a published third-party figure, not verified here.
+- **[ASSESS]**: reasoning in this project, not measurement.
+- **[HYPOTHESIS]**: an assumption, untested.
+
+Write in plain language, without filler or hedging. For governance readers, lead
+with a sentence rather than a plot. For hardware, use the warehouse analogy first,
+then the technical term. Present design forks as options with the tradeoff stated.
+
 ## Where knowledge lives
+
+<!-- living-files: CLAUDE.md README.md NEXT_STEPS.md docs/open-questions.md -->
 
 Two kinds of file, and the difference is the whole filing system.
 
@@ -183,3 +200,19 @@ Follow a link into these when a living file cites one.
 
 The visual companion lives at `../memory-warehouse/`. It restates this repo's
 findings, so it inherits this repo's caveats and has to move when a claim moves.
+
+### Syncing this repo
+
+`/sync` follows these rules for memchal:
+
+- A settled choice becomes an ADR under `docs/decisions/` with `Status: proposed`
+  until agreed, plus a row in that folder's README. To amend an ADR, edit it
+  instead of adding a near-duplicate.
+- A measurement becomes a folder under `docs/investigations/` (question, script,
+  and a `results/` snapshot), plus a row in that folder's README.
+- A changed claim gets fixed in the status section above, in `README.md` if it's
+  user-facing, and in `../memory-warehouse`. There, update
+  `docs/memory-ladder-figures.md` first, with its source, then
+  `memory-warehouse.html` to match, and commit in that repo.
+- Dated analysis documents go in `docs/analysis/YYYY-MM-DD-<topic>.md`, with a
+  header that says what they supersede or amend.
