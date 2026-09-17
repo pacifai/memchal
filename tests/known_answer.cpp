@@ -149,6 +149,125 @@ static int kat_challenge_chained() {
 }
 
 // ---------------------------------------------------------------------------
+// KAT 1c: tree fold — the parallel cross-lane fold (kFlagTreeFold)
+//
+// The sequential fold above is a chain and cannot be parallelised, which cost
+// more than the GPU kernel itself once lanes got large. The tree fold replaces
+// it with a binary Merkle tree over the same per-lane hashes. A tree gives a
+// DIFFERENT answer than a chain by construction, so it is a protocol change
+// carrying its own vectors; the wire says which is in use. The vectors above
+// are untouched and must stay that way.
+//
+// Note vector 1 (lanes=1) matches the sequential answer exactly. That is
+// correct, not a copy-paste error: with a single lane there is no tree to
+// build, and the two expressions differ only by the order of an XOR.
+//
+// Same buffer, seed, and (nonce, k, lanes) triples as KAT 1.
+// ---------------------------------------------------------------------------
+static const uint64_t kExpectedTree[3] = {
+    0xDB349A095B054DC1ULL,   // tree vector 1  (lanes=1: equals the chain)
+    0x3D7231F696115A72ULL,   // tree vector 2
+    0x75D36F59F81165F0ULL,   // tree vector 3
+};
+static const uint64_t kExpectedTreeChained[3] = {
+    0x9223B322843E6ED1ULL,   // tree chained vector 1  (lanes=1: equals the chain)
+    0x6CB30B91F44FF207ULL,   // tree chained vector 2
+    0x86106229AE2DDC5BULL,   // tree chained vector 3
+};
+
+static int kat_tree_fold() {
+    static const uint64_t kBytes    = 1ULL * 1024 * 1024;
+    static const uint64_t kNumWords = kBytes / 8;
+    static const uint64_t kSeed     = 0xABCDEF0123456789ULL;
+
+    uint64_t* buf = (uint64_t*)malloc(kBytes);
+    if (!buf) { fprintf(stderr, "[kat] malloc failed\n"); return 1; }
+    mc::fill_random(buf, kNumWords, kSeed);
+
+    struct Vec { uint64_t nonce; uint32_t k; uint32_t lanes; };
+    static const Vec vecs[3] = {
+        { 0x0000000000000001ULL, 1,     1  },
+        { 0x1234567890ABCDEFULL, 4096,  32 },
+        { 0xFFFFFFFFFFFFFFFFULL, 65536, 64 },
+    };
+
+    int failed = 0;
+    for (int chained = 0; chained <= 1; ++chained) {
+        const uint64_t* expect = chained ? kExpectedTreeChained : kExpectedTree;
+        for (int i = 0; i < 3; ++i) {
+            uint64_t* scratch = (uint64_t*)malloc((size_t)vecs[i].lanes * 8);
+            if (!scratch) { free(buf); return 1; }
+            uint64_t got = mc::answer_challenge_tree(buf, kNumWords, vecs[i].nonce,
+                                                     vecs[i].k, vecs[i].lanes,
+                                                     chained != 0, scratch);
+            free(scratch);
+            bool pass = (got == expect[i]);
+            if (!pass) ++failed;
+            printf("KAT tree %svector %d: %s  (got=0x%016llX  expected=0x%016llX)\n",
+                   chained ? "chained " : "", i + 1, pass ? "PASS" : "FAIL",
+                   (unsigned long long)got, (unsigned long long)expect[i]);
+        }
+    }
+
+    // The tree must not quietly reproduce the chain for lanes > 1 — if it did,
+    // one of the two is not doing what its name says.
+    for (int i = 1; i < 3; ++i) {
+        uint64_t* scratch = (uint64_t*)malloc((size_t)vecs[i].lanes * 8);
+        uint64_t tree = mc::answer_challenge_tree(buf, kNumWords, vecs[i].nonce,
+                                                  vecs[i].k, vecs[i].lanes, false, scratch);
+        free(scratch);
+        uint64_t chain = mc::answer_challenge(buf, kNumWords, vecs[i].nonce,
+                                              vecs[i].k, vecs[i].lanes, false);
+        bool differ = (tree != chain);
+        if (!differ) ++failed;
+        printf("KAT tree differs from chain (lanes=%u): %s\n",
+               vecs[i].lanes, differ ? "PASS" : "FAIL");
+    }
+
+    // Sibling order must matter, or a prover could permute lanes after seeing
+    // the challenge and still answer correctly.
+    {
+        const uint32_t lanes = 64;
+        const uint64_t nonce = 0x1234ULL;
+        const uint32_t k = 65536;
+        uint64_t* a = (uint64_t*)malloc(lanes * 8);
+        uint64_t* b = (uint64_t*)malloc(lanes * 8);
+        mc::answer_lanes_t(mc::BufLoad{buf}, kNumWords, nonce, k, lanes, false, a);
+        memcpy(b, a, lanes * 8);
+        uint64_t t = b[0]; b[0] = b[1]; b[1] = t;
+        uint64_t ra = mc::tree_fold(a, lanes, nonce, k);
+        uint64_t rb = mc::tree_fold(b, lanes, nonce, k);
+        free(a); free(b);
+        bool ok = (ra != rb);
+        if (!ok) ++failed;
+        printf("KAT tree sibling order matters: %s\n", ok ? "PASS" : "FAIL");
+    }
+
+    // The odd-count padding path has to be deterministic, or every lane count
+    // that is not a power of two is unverifiable.
+    {
+        static const uint32_t odd[] = { 3, 5, 7, 17, 100 };
+        for (size_t i = 0; i < sizeof(odd) / sizeof(*odd); ++i) {
+            uint64_t* s1 = (uint64_t*)malloc((size_t)odd[i] * 8);
+            uint64_t* s2 = (uint64_t*)malloc((size_t)odd[i] * 8);
+            uint64_t r1 = mc::answer_challenge_tree(buf, kNumWords, 0xDEADBEEFULL,
+                                                    odd[i] * 16, odd[i], true, s1);
+            uint64_t r2 = mc::answer_challenge_tree(buf, kNumWords, 0xDEADBEEFULL,
+                                                    odd[i] * 16, odd[i], true, s2);
+            free(s1); free(s2);
+            bool ok = (r1 == r2);
+            if (!ok) ++failed;
+            printf("KAT tree odd lanes=%-4u deterministic: %s\n", odd[i], ok ? "PASS" : "FAIL");
+        }
+    }
+
+    free(buf);
+    if (failed == 0) printf("KAT tree fold: all checks PASS\n");
+    else fprintf(stderr, "KAT tree fold: %d check(s) FAILED\n", failed);
+    return failed;
+}
+
+// ---------------------------------------------------------------------------
 // KAT 2: ChaCha20 RFC 8439 §2.3.2 test vector
 //
 // key   = 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
@@ -299,6 +418,9 @@ int main() {
 
     printf("\n=== KAT: challenge math (chained / data-dependent path) ===\n");
     total_failed += kat_challenge_chained();
+
+    printf("\n=== KAT: tree fold (parallel cross-lane fold) ===\n");
+    total_failed += kat_tree_fold();
 
     printf("\n=== KAT: ChaCha20 RFC 8439 §2.3.2 ===\n");
     total_failed += kat_chacha20();
