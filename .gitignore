@@ -20,3 +20,6 @@ demo/fake_feed.py
 # python bytecode
 __pycache__/
 *.pyc
+
+# GPU demo state — which pod this checkout rented (gpu_demo_up.sh)
+/.gpu_demo_state

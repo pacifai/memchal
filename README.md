@@ -253,6 +253,25 @@ latency-bound rather than bandwidth-bound. Both are in
 
 ### Running it
 
+From a laptop with no GPU, two commands do the whole thing:
+
+```bash
+bash scripts/gpu_demo_up.sh        # rent a card, ship, build, gate, open the demo
+bash scripts/gpu_demo_down.sh      # pull results back, close it, release the card
+```
+
+`gpu_demo_up.sh` prints the hourly price and waits for a yes before renting. It
+records the pod it created in `.gpu_demo_state`, which is the only pod the
+teardown will touch, so neither script can release something you started by
+hand. It fails closed if the known-answer gate does not pass: a card that
+cannot reproduce the frozen constants must not produce measurements.
+`gpu_demo_down.sh` refuses to release a pod whose results it could not copy.
+
+Both need `RUNPOD_API_KEY` in your environment and an SSH key registered on
+that RunPod account (`~/.ssh/neta-pacifai-runpod`, or set `MEMCHAL_SSH_KEY`).
+
+Once a box is up, the individual steps are:
+
 ```bash
 bash scripts/gpu_pod_setup.sh      # machine record, refusals, build, then the gate
 bash scripts/gpu_adversaries.sh    # honest plus all three cheats, interleaved

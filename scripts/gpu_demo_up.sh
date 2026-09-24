@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# gpu_demo_up.sh — rent a GPU, put the demo on it, and open it in your browser.
+#
+# One command from nothing to a browsable demo. It rents a card, ships this
+# working tree to it, builds, runs the known-answer gate, starts the bridge,
+# and forwards the port. If any step fails it stops rather than leaving you a
+# pod you forgot about, and it records what it created in a state file so
+# gpu_demo_down.sh can undo exactly that and nothing else.
+#
+# It never reuses a pod it did not create. A pod you started by hand is yours
+# to manage.
+#
+# Requires: RUNPOD_API_KEY in the environment (get one from
+#   https://console.runpod.io/user/settings) and an SSH key registered on that
+#   account. Set the key in your shell or a .env you source; this script only
+#   ever reads it by name.
+#
+# Usage:
+#   bash scripts/gpu_demo_up.sh                      # H100 SXM, 60 GB disk
+#   bash scripts/gpu_demo_up.sh --gpu "NVIDIA A40"   # a cheaper card
+#   bash scripts/gpu_demo_up.sh --port 8888          # a different local port
+#   bash scripts/gpu_demo_up.sh --yes                # skip the price prompt
+#
+# Exit: 0 the demo is up, 1 a prerequisite is missing, 2 renting failed,
+#       3 the box is unusable or the gate failed.
+set -uo pipefail
+cd "$(dirname "$0")/.."
+ROOT="$PWD"
+STATE="$ROOT/.gpu_demo_state"
+
+GPU="NVIDIA H100 80GB HBM3"
+DISK=60
+LPORT=8777
+CLOUD=SECURE
+IMAGE="nvidia/cuda:12.8.0-devel-ubuntu22.04"
+ASSUME_YES=0
+SSH_KEY="${MEMCHAL_SSH_KEY:-$HOME/.ssh/neta-pacifai-runpod}"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --gpu)  GPU="$2"; shift 2 ;;
+    --disk) DISK="$2"; shift 2 ;;
+    --port) LPORT="$2"; shift 2 ;;
+    --cloud) CLOUD="$2"; shift 2 ;;
+    --image) IMAGE="$2"; shift 2 ;;
+    --key)  SSH_KEY="$2"; shift 2 ;;
+    --yes|-y) ASSUME_YES=1; shift ;;
+    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    *) echo "unknown argument: $1" >&2; exit 1 ;;
+  esac
+done
+
+API="https://api.runpod.io/v2"
+say()  { printf '\n== %s ==\n' "$1"; }
+die()  { printf '\nFAILED: %s\n' "$1" >&2; exit "${2:-1}"; }
+api()  { # api METHOD PATH [BODY]
+  local m="$1" p="$2" b="${3:-}"
+  if [ -n "$b" ]; then
+    curl -sS -X "$m" "$API$p" \
+      -H "Authorization: Bearer $RUNPOD_API_KEY" \
+      -H "Content-Type: application/json" -d "$b"
+  else
+    curl -sS -X "$m" "$API$p" -H "Authorization: Bearer $RUNPOD_API_KEY"
+  fi
+}
+jget() { python3 -c 'import json,sys
+d=json.load(sys.stdin)
+for k in sys.argv[1].split("."):
+    if d is None: break
+    d = d.get(k) if isinstance(d,dict) else None
+print("" if d is None else d)' "$1" 2>/dev/null; }
+
+# --- 0. prerequisites -------------------------------------------------------
+say "prerequisites"
+[ -n "${RUNPOD_API_KEY:-}" ] || die "RUNPOD_API_KEY is not set. Export it, or source the .env that holds it." 1
+command -v curl   >/dev/null || die "curl is not installed" 1
+command -v python3>/dev/null || die "python3 is not installed" 1
+command -v rsync  >/dev/null || die "rsync is not installed" 1
+[ -f "$SSH_KEY" ] || die "no SSH private key at $SSH_KEY (set MEMCHAL_SSH_KEY or pass --key)" 1
+if [ -f "$STATE" ]; then
+  # shellcheck disable=SC1090
+  . "$STATE"
+  die "a demo is already up (pod ${POD_ID:-?}). Run scripts/gpu_demo_down.sh first." 1
+fi
+if lsof -ti:"$LPORT" >/dev/null 2>&1; then
+  die "local port $LPORT is already in use. Free it, or pass --port." 1
+fi
+echo "ssh key:    $SSH_KEY"
+echo "local port: $LPORT"
+
+# --- 1. price, and consent --------------------------------------------------
+say "price"
+CAP=$(api GET "/catalog/gpus?gpuTypeIds=$(python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))' "$GPU")&gpuCount=1" 2>/dev/null)
+PRICE=$(printf '%s' "$CAP" | python3 -c 'import json,sys
+try:
+    d=json.load(sys.stdin); it=(d.get("items") or [d])[0]
+    print(f'"'"'{it.get("pricePerHr","?")}|{it.get("stockStatus","?")}'"'"')
+except Exception: print("?|?")' 2>/dev/null)
+echo "$GPU — \$${PRICE%%|*}/hr, stock: ${PRICE##*|}"
+if [ "$ASSUME_YES" -ne 1 ]; then
+  printf '\nRent it? This bills by the second until you run gpu_demo_down.sh. [y/N] '
+  read -r ans
+  case "$ans" in y|Y|yes|YES) ;; *) echo "nothing rented."; exit 0 ;; esac
+fi
+
+# --- 2. rent ----------------------------------------------------------------
+say "renting"
+BOOT='apt-get update -q >/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server rsync git python3 build-essential >/dev/null 2>&1; mkdir -p /run/sshd /root/.ssh; echo "$PUBLIC_KEY" > /root/.ssh/authorized_keys; chmod 700 /root/.ssh; chmod 600 /root/.ssh/authorized_keys; echo "export PATH=/usr/local/cuda/bin:\$PATH" >> /root/.bashrc; touch /root/.ssh_ready; /usr/sbin/sshd -D -p 22'
+BODY=$(python3 -c 'import json,sys
+print(json.dumps({"name":"memchal-demo","image":sys.argv[1],"gpu":{"id":sys.argv[2]},
+ "disk":int(sys.argv[3]),"ports":["22/tcp"],"cloud":sys.argv[4],"startSsh":True,
+ "entrypoint":["bash","-lc"],"cmd":[sys.argv[5]]}))' "$IMAGE" "$GPU" "$DISK" "$CLOUD" "$BOOT")
+RESP=$(api POST "/pods" "$BODY")
+POD_ID=$(printf '%s' "$RESP" | jget id)
+if [ -z "$POD_ID" ]; then
+  printf '%s\n' "$RESP" | head -c 600; echo
+  die "could not rent a $GPU. Try --gpu with another card, or --cloud COMMUNITY." 2
+fi
+# Record it NOW, before anything else can fail, so teardown can always find it.
+{ echo "POD_ID=$POD_ID"; echo "LPORT=$LPORT"; echo "SSH_KEY=$SSH_KEY";
+  echo "CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)"; } > "$STATE"
+echo "pod $POD_ID  (recorded in .gpu_demo_state)"
+trap 'echo; echo "Bring-up failed. The pod is still rented — run scripts/gpu_demo_down.sh"; ' ERR
+
+# --- 3. wait for ssh --------------------------------------------------------
+say "waiting for ssh"
+HOST=""; PORT=""
+for i in $(seq 1 90); do
+  P=$(api GET "/pods/$POD_ID")
+  HOST=$(printf '%s' "$P" | jget ssh.direct.host)
+  PORT=$(printf '%s' "$P" | jget ssh.direct.port)
+  [ -n "$HOST" ] && [ -n "$PORT" ] && break
+  printf '.'; sleep 10
+done
+echo
+[ -n "$HOST" ] || die "the pod never published a direct SSH endpoint" 2
+SSH="ssh -i $SSH_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -p $PORT root@$HOST"
+{ echo "SSH_HOST=$HOST"; echo "SSH_PORT=$PORT"; } >> "$STATE"
+for i in $(seq 1 60); do
+  $SSH 'test -f /root/.ssh_ready' 2>/dev/null && break
+  printf '.'; sleep 10
+done
+echo
+$SSH 'test -f /root/.ssh_ready' 2>/dev/null || die "ssh never came up on $HOST:$PORT" 2
+echo "ssh: root@$HOST -p $PORT"
+
+# --- 4. ship, build, gate ---------------------------------------------------
+say "shipping this working tree"
+rsync -az --delete \
+  --exclude .git --exclude results --exclude __pycache__ --exclude '*.o' \
+  --exclude prover --exclude verifier --exclude cheating_prover \
+  --exclude prover_cuda --exclude cheating_prover_cuda \
+  -e "ssh -i $SSH_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $PORT" \
+  ./ "root@$HOST:/root/memchal/" || die "could not copy the repo to the pod" 3
+
+say "building and gating"
+# gpu_pod_setup.sh records the machine, refuses an unusable box, builds the GPU
+# targets, and runs the known-answer gate. `make` on its own builds the CPU
+# verifier, which the demo also needs.
+$SSH 'export PATH=/usr/local/cuda/bin:$PATH; cd /root/memchal && make -j8 >/dev/null 2>&1 && bash scripts/gpu_pod_setup.sh 2>&1 | tail -4'
+$SSH 'export PATH=/usr/local/cuda/bin:$PATH; cd /root/memchal && ./tests/known_answer_gpu 2>&1 | tail -1' | grep -q "all vectors PASS" \
+  || die "the known-answer gate did not pass on this card — do not trust anything it measures" 3
+
+# --- 5. start the bridge ----------------------------------------------------
+say "starting the demo"
+$SSH 'cd /root/memchal && pkill -f bridge_gpu.py 2>/dev/null; sleep 1; setsid python3 demo/bridge_gpu.py > /root/bridge.log 2>&1 < /dev/null & disown' >/dev/null 2>&1
+sleep 5
+$SSH 'pgrep -f bridge_gpu.py >/dev/null' || { $SSH 'tail -5 /root/bridge.log'; die "the bridge did not start" 3; }
+
+ssh -i "$SSH_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null -o ExitOnForwardFailure=yes \
+    -p "$PORT" -f -N -L "$LPORT:127.0.0.1:8777" "root@$HOST" || die "could not forward port $LPORT" 3
+sleep 3
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$LPORT/" || echo 000)
+[ "$CODE" = "200" ] || die "the page did not answer on http://127.0.0.1:$LPORT (got $CODE)" 3
+
+trap - ERR
+say "up"
+$SSH 'nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv,noheader' 2>/dev/null
+cat <<EOF
+
+  http://127.0.0.1:$LPORT
+
+  pod $POD_ID is billing until you run:
+      bash scripts/gpu_demo_down.sh
+EOF
