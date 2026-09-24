@@ -70,6 +70,12 @@ const P = () => ({
   mono:   css('--face-num', 'ui-monospace, monospace'),
 });
 
+// The verifier's phase tags, as it writes them on the wire: 'w' warmup,
+// 'r' measured. Comparing against the spelled-out words matches nothing and
+// folds the cold-start challenges into every statistic.
+const WARMUP = 'w';
+const isWarm = (x) => x.ph === WARMUP;
+
 const fmtUs = (u) => u == null ? '—' : u >= 1000 ? `${(u / 1000).toFixed(2)} ms` : `${u.toFixed(0)} µs`;
 const fmtGiB = (b) => b == null ? '—' : `${(b / 1073741824).toFixed(1)} GiB`;
 const pct = (a, q) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor(q * s.length))]; };
@@ -244,7 +250,7 @@ function currentSplit() {
   const k = pct(state.gpu.map(g => g.kernel_ms), 0.5);
   const c = pct(state.gpu.map(g => g.copy_ms), 0.5);
   const f = pct(state.gpu.map(g => g.fold_ms), 0.5);
-  const meas = state.challenges.filter(x => x.ph !== 'warmup').map(x => x.us);
+  const meas = state.challenges.filter(x => !isWarm(x)).map(x => x.us);
   const rt = pct(meas, 0.5);
   if (rt == null) return null;
   return { kernel: k, copy: c, fold: f, total: rt / 1000 };
@@ -284,7 +290,7 @@ function drawDetect() {
   label(ctx, 'correctness detector', pad.l + 6, pad.t + 12, p.absent, 9, 700);
   label(ctx, 'timing detector', X(1.5) + 6, pad.t + ph - 8, p.host, 9, 700);
 
-  const meas = state.challenges.filter(x => x.ph !== 'warmup');
+  const meas = state.challenges.filter(x => !isWarm(x));
   if (!meas.length) { label(ctx, 'no measured challenges', pad.l + 8, pad.t + ph / 2, p.muted, 11, 500); return; }
 
   // Only challenges the verifier actually recomputed can be right or wrong.
@@ -326,9 +332,9 @@ function downsample(pts, target) {
     for (let j = lo; j < hi; j++) {
       if (pts[j].us > worst.us) worst = pts[j];
       if (!pts[j].ok) anyErr = true;
-      if (pts[j].ph === 'warmup') anyWarm = true;
+      if (isWarm(pts[j])) anyWarm = true;
     }
-    out.push({ us: worst.us, ok: !anyErr, ph: anyWarm ? 'warmup' : 'measured' });
+    out.push({ us: worst.us, ok: !anyErr, ph: anyWarm ? WARMUP : 'r' });
   }
   return out;
 }
@@ -366,7 +372,7 @@ function drawLatency() {
   pts.forEach((c, i) => i ? ctx.lineTo(X(i), Y(c.us)) : ctx.moveTo(X(i), Y(c.us)));
   ctx.strokeStyle = p.card; ctx.lineWidth = 1.3; ctx.stroke();
   pts.forEach((c, i) => {
-    if (c.ph === 'warmup') ctx.fillStyle = p.hair;
+    if (isWarm(c)) ctx.fillStyle = p.hair;
     else if (!c.ok) ctx.fillStyle = p.absent;
     else return;
     ctx.beginPath(); ctx.arc(X(i), Y(c.us), 2, 0, 7); ctx.fill();
@@ -380,7 +386,7 @@ function updateReadouts() {
   el.cTemp.textContent = s && s.temp_c != null ? s.temp_c.toFixed(0) : '—';
   const g = pct(state.gpu.map(x => x.probe_gbps), 0.5);
   el.cGbps.textContent = g == null ? '—' : g.toFixed(1);
-  const meas = state.challenges.filter(x => x.ph !== 'warmup');
+  const meas = state.challenges.filter(x => !isWarm(x));
   const errs = meas.filter(x => !x.ok).length;
   el.cErr.textContent = meas.length ? `${errs}/${meas.length}` : '—';
   el.cErr.style.color = errs ? P().absent : '';
