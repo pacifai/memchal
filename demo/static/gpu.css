@@ -53,7 +53,7 @@ table.hist td.muted { color: var(--muted); }
 table.hist .bad { color: var(--critical); }
 #clearBaseBtn, #clearHistBtn { margin-top: 6px; }
 
-/* The run buttons sit at the top of the instrument column. app.css gives
- * .actions a top margin for its old place under the controls; here the
- * column's own gap already spaces it. */
-.col-instrument > .actions { margin-top: 0; }
+/* The run buttons lead the controls column. app.css gives .actions a top
+ * margin for its old place under the last control; at the top it needs the
+ * space below instead, matching the 14px gap between the other panels. */
+.col-controls > .actions { margin: 0 0 14px; }
