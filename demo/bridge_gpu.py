@@ -234,8 +234,17 @@ def smi_loop():
 
 
 # ── the run itself ───────────────────────────────────────────────────────────
+RUNS_DIR = ROOT / "results" / "demo_runs"
+
+
 class Run:
-    """One prover+verifier run. Owns both processes and kills them on stop()."""
+    """One prover+verifier run. Owns both processes and kills them on stop().
+
+    Every event the run produces is also appended to
+    results/demo_runs/<timestamp>-<mode>.jsonl. The page keeps only the last
+    few thousand points in memory and loses them on reload, so without this
+    file a run that showed something interesting cannot be looked at again.
+    """
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -243,7 +252,36 @@ class Run:
         self.stopping = False
         self.prover = None
         self.verifier = None
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        self.record_path = RUNS_DIR / f"{stamp}-{cfg['mode']}.jsonl"
+        self.record = None
+        self.record_lock = threading.Lock()
+        try:
+            RUNS_DIR.mkdir(parents=True, exist_ok=True)
+            self.record = self.record_path.open("w", buffering=1)
+            self._write({"t": "meta", "started": stamp, "cfg": cfg,
+                         "host": os.uname().nodename})
+        except OSError as exc:
+            print(f"[bridge] cannot record run: {exc}", flush=True)
         self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def _write(self, event):
+        """Append one event to the run file. Never let recording break a run."""
+        if not self.record:
+            return
+        try:
+            with self.record_lock:
+                self.record.write(json.dumps(event) + "\n")
+        except (OSError, ValueError):
+            self.record = None
+
+    def _close_record(self):
+        if self.record:
+            try:
+                self.record.close()
+            except OSError:
+                pass
+            self.record = None
 
     def start(self):
         self.thread.start()
@@ -255,10 +293,14 @@ class Run:
                 p.kill()
 
     def _status(self, phase, **kw):
-        HUB.publish({"t": "status", "phase": phase, "cfg": self.cfg, **kw})
+        event = {"t": "status", "phase": phase, "cfg": self.cfg, **kw}
+        self._write(event)
+        HUB.publish(event)
 
     def _log(self, line, src="bridge"):
-        HUB.publish({"t": "log", "src": src, "line": line.rstrip()})
+        event = {"t": "log", "src": src, "line": line.rstrip()}
+        self._write(event)
+        HUB.publish(event)
 
     def _pump(self, stream, src):
         """Forward one process's stdout: '@' lines are events, the rest are log."""
@@ -275,6 +317,7 @@ class Run:
                     self.saw_end = True
                 if event.get("t") == "run":
                     event["cfg"] = self.cfg
+                self._write(event)
                 HUB.publish(event)
             elif line:
                 self._log(line, src)
@@ -352,6 +395,9 @@ class Run:
             for p in (self.verifier, self.prover):
                 if p and p.poll() is None:
                     p.kill()
+            if self.record:
+                print(f"[bridge] run recorded: {self.record_path}", flush=True)
+            self._close_record()
 
 
 def _port_open(port):

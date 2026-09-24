@@ -30,24 +30,24 @@
       <label class="field">
         <select id="mode">
           <option value="honest" selected>honest — cudaMalloc, verified</option>
-          <option value="partial">partial — holds it all, keeps a slice off-card</option>
-          <option value="uvm">uvm — managed, pages migrate</option>
-          <option value="zerocopy">zerocopy — all of it in host memory</option>
-          <option value="fake">fake — invents what it doesn't hold</option>
+          <option value="partial">partial — slice served from host memory</option>
+          <option value="uvm">uvm — cudaMallocManaged, pages migrate</option>
+          <option value="zerocopy">zerocopy — whole buffer in host memory</option>
+          <option value="fake">fake — fabricates the withheld part</option>
         </select>
       </label>
       <p class="prose" id="modeHint"></p>
 
       <div class="knob" id="offloadKnob">
-        <span class="lab">kept off the card <b class="num" id="offloadLabel">10%</b></span>
+        <span class="lab">host-resident fraction <b class="num" id="offloadLabel">10%</b></span>
         <input type="range" id="offload" min="0" max="50" step="1" value="10">
       </div>
       <div class="knob" id="hogKnob">
-        <span class="lab">hbm held hostage <b class="num" id="hogLabel">none</b></span>
+        <span class="lab">free hbm after reserve <b class="num" id="hogLabel">all</b></span>
         <input type="range" id="hog" min="0" max="16" step="1" value="0">
       </div>
       <div class="knob" id="fracKnob">
-        <span class="lab">fraction actually held <b class="num" id="fracLabel">50%</b></span>
+        <span class="lab">fraction held <b class="num" id="fracLabel">50%</b></span>
         <input type="range" id="frac" min="0" max="100" step="5" value="50">
       </div>
     </section>
@@ -60,8 +60,8 @@
         <label class="field"><span class="lab">lanes</span><input class="num" type="number" id="lanes" value="131072" min="1" max="262144"></label>
         <label class="field"><span class="lab">challenges</span><input class="num" type="number" id="n" value="300" min="1" max="20000"></label>
         <label class="field"><span class="lab">warmup</span><input class="num" type="number" id="warmup" value="20" min="0" max="20000"></label>
-        <label class="field"><span class="lab">pace µs</span><input class="num" type="number" id="gap" value="100000" min="0" max="100000"></label>
-        <label class="field"><span class="lab">check 1 in</span><input class="num" type="number" id="verify" value="10" min="1" max="1000"></label>
+        <label class="field"><span class="lab">pace µs</span><input class="num" type="number" id="gap" value="0" min="0" max="100000"></label>
+        <label class="field"><span class="lab">check 1 in</span><input class="num" type="number" id="verify" value="50" min="1" max="1000"></label>
       </div>
       <p class="prose mini" id="geomHint"></p>
     </section>
@@ -80,6 +80,13 @@
       </div>
     </section>
 
+    <section class="block">
+      <h2 class="eyebrow">baseline</h2>
+      <p class="prose mini" id="baseText">no honest run yet</p>
+      <div class="badge-row" id="baseBadges"></div>
+      <button id="clearBaseBtn" class="chip" type="button">Clear baseline</button>
+    </section>
+
     <section class="block actions">
       <button id="runBtn" class="go" type="button">Interrogate</button>
       <button id="stopBtn" class="chip" type="button">Stop</button>
@@ -89,7 +96,7 @@
   <section class="col-instrument">
     <figure class="screen-frame">
       <div class="screen-top">
-        <h2 class="eyebrow">where the buffer lives</h2>
+        <h2 class="eyebrow">buffer location</h2>
         <div class="legend" id="resLegend"></div>
       </div>
       <canvas id="residency"></canvas>
@@ -98,24 +105,24 @@
 
     <figure class="screen-frame">
       <div class="screen-top">
-        <h2 class="eyebrow">where the time goes</h2>
+        <h2 class="eyebrow">response time breakdown</h2>
         <div class="legend" id="timeLegend"></div>
       </div>
       <canvas id="timesplit"></canvas>
       <div class="badge-row">
         <span class="badge">verifier: same host, loopback</span>
-        <span class="badge warn">rest = residual, not measured</span>
+        <span class="badge warn">residual: not attributed</span>
       </div>
     </figure>
 
     <div class="split">
       <figure class="screen-frame">
-        <div class="screen-top"><h2 class="eyebrow">which detector fires</h2></div>
+        <div class="screen-top"><h2 class="eyebrow">detector state</h2></div>
         <canvas id="detect"></canvas>
       </figure>
 
       <section class="block">
-        <h2 class="eyebrow">the card</h2>
+        <h2 class="eyebrow">device</h2>
         <dl class="readouts">
           <div><dt class="lab">sm clock</dt><dd class="num" id="cSm">—</dd><dd class="foot">MHz</dd></div>
           <div><dt class="lab">temp</dt><dd class="num" id="cTemp">—</dd><dd class="foot">°C</dd></div>
@@ -132,6 +139,14 @@
         <div class="legend" id="latLegend"></div>
       </div>
       <canvas id="latency"></canvas>
+    </figure>
+
+    <figure class="screen-frame">
+      <div class="screen-top">
+        <h2 class="eyebrow">run history</h2>
+        <button id="clearHistBtn" class="chip" type="button">Clear</button>
+      </div>
+      <div class="hist-scroll"><table class="hist" id="hist"></table></div>
     </figure>
 
     <section class="block log-panel">

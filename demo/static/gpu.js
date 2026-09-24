@@ -12,22 +12,48 @@ const el = {};
  'offload','offloadLabel','offloadKnob','hog','hogLabel','hogKnob','frac','fracLabel','fracKnob',
  'mb','k','lanes','n','warmup','gap','verify','geomHint','gen','chain','nonce','fold',
  'residency','resLegend','resBadges','timesplit','timeLegend','detect','latency','latLegend',
- 'cSm','cTemp','cGbps','cErr','cardBadges','log','synthetic'].forEach(id => el[id] = $(id));
+ 'cSm','cTemp','cGbps','cErr','cardBadges','log','synthetic',
+ 'baseText','baseBadges','clearBaseBtn','hist','clearHistBtn'].forEach(id => el[id] = $(id));
 
 const MODE_HINTS = {
-  honest:   'Allocates on the card and asks the driver to confirm it. Refuses to serve if the answer is anything else.',
-  partial:  'Holds every byte and answers correctly — it just keeps a slice in host memory. The slider is the whole experiment: how small a slice can still be seen?',
-  uvm:      'Managed memory. The driver moves pages between host and card on demand and will not say how many are where. Looks honest while it fits; take the memory away and it collapses.',
-  zerocopy: 'Nothing on the card at all. Every probe crosses the PCIe bus to host memory.',
-  fake:     'Keeps part of the buffer and invents the rest. Fast, and wrong — this one is caught by the answer, not the clock.',
+  honest:   'cudaMalloc, then cudaPointerGetAttributes must report device memory. If it reports anything else the prover exits at startup, before serving any challenge.',
+  partial:  'Every byte held, every answer correct. A tail of the buffer sits in pinned host memory and the kernel reads it over PCIe, so its cost lands in kernel time, not in readback.',
+  uvm:      'cudaMallocManaged. Pages migrate between host and card on fault and the driver will not report how many are where. Indistinguishable from honest while the buffer fits in free HBM.',
+  zerocopy: 'cudaHostAlloc, mapped. No bytes on the card; every probe crosses PCIe.',
+  fake:     'Holds a fraction and derives the rest from a constant. Fast and wrong — caught by the answer, not the clock.',
 };
 
 const HOG_STEPS = 16;
+const STORE_KEY = 'memchal.gpu.v1';
 const state = {
   phase: 'idle', cfg: null, challenges: [], gpu: [], smi: null, end: null,
   backing: null, device: null, hbmTotal: null, hbmUsed: null, residentFrac: null,
-  baseline: null, synthetic: false, dirty: {}, pending: [],
+  baseline: null, history: [], synthetic: false, dirty: {}, pending: [],
 };
+
+// The geometry a measurement is only comparable within. A baseline taken at a
+// different buffer size, probe count, lane count, or fold is a different
+// experiment, so every ratio drawn against it would be meaningless.
+const GEOM_KEYS = ['mb', 'k', 'lanes', 'fold', 'chain', 'gen', 'nonce'];
+const geomOf = (cfg) => cfg ? GEOM_KEYS.map(k => `${k}=${cfg[k]}`).join(' ') : '';
+const sameGeom = (a, b) => !!a && !!b && geomOf(a) === geomOf(b);
+
+function save() {
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify({
+      baseline: state.baseline, history: state.history.slice(-40),
+    }));
+  } catch (_) { /* private window, quota, blocked storage: the page still works */ }
+}
+function load() {
+  try {
+    const raw = localStorage.getItem(STORE_KEY);
+    if (!raw) return;
+    const d = JSON.parse(raw);
+    if (d && d.baseline) state.baseline = d.baseline;
+    if (d && Array.isArray(d.history)) state.history = d.history;
+  } catch (_) { /* same */ }
+}
 const markDirty = () => { state.dirty = { res: 1, time: 1, detect: 1, lat: 1 }; };
 
 // ── palette ─────────────────────────────────────────────────────────────────
@@ -162,11 +188,17 @@ function drawResidency() {
 function drawTime() {
   const { ctx, w, h } = fit(el.timesplit);
   const p = P();
-  legend(el.timeLegend, [[p.card, 'kernel'], [p.good, 'pcie copy'],
+  // 'result readback' rather than 'pcie copy': copy_ms is only the answer
+  // coming back (8 bytes for the tree fold, lanes x 8 for the sequential one).
+  // A partial cheat's PCIe reads happen inside the kernel, so they are counted
+  // in kernel time — which is where the stall actually is.
+  legend(el.timeLegend, [[p.card, 'kernel (incl. any host-memory probes)'],
+                         [p.good, 'result readback'],
                          [p.host, 'fold'], [p.muted, 'residual']]);
 
   const rows = [];
-  if (state.baseline) rows.push({ name: 'honest', ...state.baseline });
+  const base = usableBaseline();
+  if (base) rows.push({ name: 'honest', ...base });
   const cur = currentSplit();
   if (cur) rows.push({ name: state.cfg ? state.cfg.mode : 'run', ...cur });
   if (!rows.length) {
@@ -198,6 +230,14 @@ function drawTime() {
   });
 }
 
+// The stored baseline, but only when it describes the same experiment. A
+// baseline from a different buffer size or lane count is not a baseline.
+function usableBaseline() {
+  if (!state.baseline) return null;
+  if (!state.cfg) return state.baseline;
+  return sameGeom(state.baseline.cfg, state.cfg) ? state.baseline : null;
+}
+
 // Median of the traced per-challenge costs, in ms, plus the round trip.
 function currentSplit() {
   if (!state.gpu.length) return null;
@@ -210,9 +250,10 @@ function currentSplit() {
   return { kernel: k, copy: c, fold: f, total: rt / 1000 };
 }
 
-// ── 3. which detector fires ─────────────────────────────────────────────────
-// Two independent signals, so two axes. A prover is caught if it leaves the
-// quiet corner in either direction, and the picture says which.
+// ── 3. detector state ───────────────────────────────────────────────────────
+// x: response p50 relative to the honest baseline. y: share of CHECKED answers
+// that were wrong. Two independent detectors, so two axes; a prover leaving the
+// origin in either direction is caught, and the axis says by which one.
 function drawDetect() {
   const { ctx, w, h } = fit(el.detect);
   const p = P();
@@ -235,19 +276,33 @@ function drawDetect() {
     ctx.stroke();
     label(ctx, `${r}×`, X(r) - 6, pad.t + ph + 14, p.muted, 9, 500);
   }
-  label(ctx, '100%', 8, pad.t + 8, p.muted, 9, 500);
+  label(ctx, '100', 8, pad.t + 8, p.muted, 9, 500);
   label(ctx, '0', 8, pad.t + ph, p.muted, 9, 500);
-  label(ctx, 'wrong answers', 8, pad.t - 5, p.muted, 9, 600);
-  label(ctx, 'slower than honest →', pad.l, pad.t + ph + 26, p.muted, 9, 600);
+  label(ctx, 'wrong answers (% of checked)', 8, pad.t - 5, p.muted, 9, 600);
+  label(ctx, 'response p50 / honest p50 (x, log)', pad.l, pad.t + ph + 26, p.muted, 9, 600);
 
-  label(ctx, 'caught: wrong', pad.l + 6, pad.t + 12, p.absent, 9, 700);
-  label(ctx, 'caught: slow', X(1.5) + 6, pad.t + ph - 8, p.host, 9, 700);
+  label(ctx, 'correctness detector', pad.l + 6, pad.t + 12, p.absent, 9, 700);
+  label(ctx, 'timing detector', X(1.5) + 6, pad.t + ph - 8, p.host, 9, 700);
 
   const meas = state.challenges.filter(x => x.ph !== 'warmup');
-  if (!meas.length) { label(ctx, 'run honest first', pad.l + 8, pad.t + ph / 2, p.muted, 11, 500); return; }
-  const errRate = meas.filter(x => !x.ok).length / meas.length;
+  if (!meas.length) { label(ctx, 'no measured challenges', pad.l + 8, pad.t + ph / 2, p.muted, 11, 500); return; }
+
+  // Only challenges the verifier actually recomputed can be right or wrong.
+  // Dividing by every challenge instead scaled the rate down by exactly the
+  // sampling factor, so a prover wrong on all of them plotted at 1/verify.
+  const checked = meas.filter(x => x.checked !== false);
+  const errRate = checked.length ? checked.filter(x => !x.ok).length / checked.length : 0;
   const p50 = pct(meas.map(x => x.us), 0.5);
-  const ratio = state.baseline ? p50 / (state.baseline.total * 1000) : 1;
+  const base = usableBaseline();
+  const ratio = base ? p50 / (base.total * 1000) : 1;
+  if (!base) {
+    label(ctx, 'no comparable baseline — x pinned at 1x',
+          pad.l + 6, pad.t + ph - 22, p.muted, 9, 600);
+  }
+  if (checked.length && checked.length < meas.length) {
+    label(ctx, `${checked.length} of ${meas.length} answers checked`,
+          pad.l + 6, pad.t + 26, p.muted, 9, 500);
+  }
 
   ctx.fillStyle = p.good;
   ctx.beginPath(); ctx.arc(X(1), Y(0), 4, 0, 7); ctx.fill();
@@ -297,8 +352,9 @@ function drawLatency() {
     ctx.beginPath(); ctx.moveTo(pad.l, Y(v)); ctx.lineTo(w - pad.r, Y(v)); ctx.stroke();
     label(ctx, fmtUs(v), 6, Y(v) + 3, p.muted, 9, 500);
   }
-  if (state.baseline) {
-    const b = state.baseline.total * 1000;
+  const baseLat = usableBaseline();
+  if (baseLat) {
+    const b = baseLat.total * 1000;
     if (b < hi) {
       ctx.setLineDash([4, 4]); ctx.strokeStyle = p.good;
       ctx.beginPath(); ctx.moveTo(pad.l, Y(b)); ctx.lineTo(w - pad.r, Y(b)); ctx.stroke();
@@ -341,12 +397,68 @@ function updateReadouts() {
   el.cardBadges.innerHTML = b.join('');
 }
 
+// ── baseline and history panels ─────────────────────────────────────────────
+function renderBaseline() {
+  const b = state.baseline;
+  if (!b) {
+    el.baseText.textContent = 'no honest run yet — ratios unavailable';
+    el.baseBadges.innerHTML = '';
+    return;
+  }
+  const age = Math.round((Date.now() - (b.at || 0)) / 1000);
+  const ageTxt = age < 90 ? `${age}s ago` : `${Math.round(age / 60)} min ago`;
+  el.baseText.textContent = `${fmtUs(b.total * 1000)} · ${ageTxt} · ${geomOf(b.cfg)}`;
+  const badges = [];
+  if (state.cfg && !sameGeom(b.cfg, state.cfg)) {
+    badges.push('<span class="badge warn">geometry differs from current run</span>');
+  }
+  if (age > 900) {
+    badges.push('<span class="badge warn">clocks unlocked — re-measure</span>');
+  }
+  el.baseBadges.innerHTML = badges.join('');
+}
+
+function renderHistory() {
+  const rows = state.history.slice().reverse();
+  if (!rows.length) {
+    el.hist.innerHTML = '<tr><td class="muted">no runs yet</td></tr>';
+    return;
+  }
+  const head = '<tr><th>mode</th><th>p50</th><th>vs base</th><th>wrong</th>'
+             + '<th>kernel</th><th>readback</th><th>fold</th><th>geometry</th></tr>';
+  const body = rows.map(r => {
+    const b = state.baseline;
+    const cmp = b && sameGeom(b.cfg, r.cfg)
+      ? `${(r.p50 / (b.total * 1000)).toFixed(2)}x` : '—';
+    const den = r.checked != null ? r.checked : r.samples;
+    const wrong = r.errors ? `<b class="bad">${r.errors}/${den}</b>` : `0/${den}`;
+    return `<tr><td>${r.mode}</td><td>${fmtUs(r.p50)}</td><td>${cmp}</td>`
+         + `<td>${wrong}</td><td>${fmtUs(r.kernel * 1000)}</td>`
+         + `<td>${fmtUs(r.copy * 1000)}</td><td>${fmtUs(r.fold * 1000)}</td>`
+         + `<td class="muted">${geomOf(r.cfg)}</td></tr>`;
+  }).join('');
+  el.hist.innerHTML = head + body;
+}
+
 // ── controls ────────────────────────────────────────────────────────────────
-function hogMib() {
+// The reserve slider used to take a fraction of the CARD (up to 90% of total),
+// which cannot reach the cliff for a small buffer: 90% of an 80 GiB card still
+// leaves 8 GiB free, so a 1 GiB managed buffer always fits and uvm always looks
+// honest. The experiment is about free HBM relative to the BUFFER, so the
+// slider now sets that ratio directly, geometrically from 8x down to 0.25x.
+// The crossover (1x) then sits near 60% of the travel at any buffer size.
+const FREE_HI = 8, FREE_LO = 0.25;
+function freeRatio() {
   const pos = Number(el.hog.value) || 0;
-  if (!pos) return 0;
-  const frac = (pos / HOG_STEPS) * 0.9;
-  return state.hbmTotal ? Math.floor((state.hbmTotal / 1048576) * frac) : Math.round(frac * 1000);
+  if (!pos) return null;                       // 0 = reserve nothing
+  return FREE_HI * Math.pow(FREE_LO / FREE_HI, pos / HOG_STEPS);
+}
+function hogMib() {
+  const r = freeRatio();
+  if (r == null || !state.hbmTotal) return 0;
+  const totalMib = state.hbmTotal / 1048576;
+  const mb = Number(el.mb.value) || 0;
+  return Math.max(0, Math.floor(totalMib - r * mb));
 }
 
 function syncControls() {
@@ -357,8 +469,17 @@ function syncControls() {
   el.fracKnob.style.display = mode === 'fake' ? '' : 'none';
   el.offloadLabel.textContent = `${el.offload.value}%`;
   el.fracLabel.textContent = `${el.frac.value}%`;
+  const r = freeRatio();
   const mib = hogMib();
-  el.hogLabel.textContent = mib ? `${(mib / 1024).toFixed(1)} GiB` : 'none';
+  if (r == null) {
+    el.hogLabel.textContent = 'all';
+  } else if (!state.hbmTotal) {
+    el.hogLabel.textContent = `${r.toFixed(2)}x buffer`;
+  } else {
+    const freeMib = state.hbmTotal / 1048576 - mib;
+    el.hogLabel.textContent =
+      `${(freeMib / 1024).toFixed(1)} GiB · ${r.toFixed(2)}x buffer`;
+  }
 
   const k = Number(el.k.value) || 1, lanes = Number(el.lanes.value) || 1;
   const depth = Math.floor(k / lanes);
@@ -368,12 +489,19 @@ function syncControls() {
   }
   const mb = Number(el.mb.value) || 0;
   if (mb >= 4096) bits.push(`— ~${Math.round(mb / 250)}s to upload before the first challenge`);
+  // Wall clock is dominated by two host-side terms, not by the card: the pace
+  // you asked for, and the verifier recomputing answers at ~100 ns per probe.
+  // Break them out, because otherwise a 40 s run reads as a slow GPU when the
+  // GPU's share of it is a tenth of a second.
   const ve = Number(el.verify.value) || 1;
-  const checkMs = k * 100e-6;   // ~100 ns per probe, measured
-  const perCh = (Number(el.gap.value) || 0) / 1000 + checkMs / ve;
-  const total = perCh * ((Number(el.n.value) || 0) + (Number(el.warmup.value) || 0)) / 1000;
-  bits.push(`— about ${total < 1 ? '<1' : Math.round(total)}s to run`);
-  if (ve > 1) bits.push(`(checking 1 answer in ${ve})`);
+  const N = (Number(el.n.value) || 0) + (Number(el.warmup.value) || 0);
+  const paceS = (Number(el.gap.value) || 0) / 1e6 * N;
+  const checkS = (k * 100e-9) / ve * N;
+  const gpuS = 0.0003 * N;                 // ~300 us per response, order of magnitude
+  const total = paceS + checkS + gpuS;
+  const fmtS = (v) => v < 1 ? '<1s' : `${Math.round(v)}s`;
+  bits.push(`— ${fmtS(total)} total: ${fmtS(paceS)} pacing, ${fmtS(checkS)} verify, ${fmtS(gpuS)} gpu`);
+  if (ve > 1) bits.push(`(checking 1 in ${ve})`);
   el.geomHint.textContent = bits.join(' ');
   el.geomHint.style.color = (el.chain.value === 'dependent' && depth < 16) ? P().absent : '';
   markDirty();
@@ -409,7 +537,7 @@ function handle(e) {
       log(`${e.mb} MiB, k=${e.k}, lanes=${e.lanes}, upload ${Number(e.upload_s).toFixed(1)}s`, 'verifier');
       break;
     case 'c':
-      state.challenges.push({ us: e.us, ph: e.ph, ok: e.ok });
+      state.challenges.push({ us: e.us, ph: e.ph, ok: e.ok, checked: e.checked });
       if (state.challenges.length > 5000) state.challenges.shift();
       break;
     case 'g':
@@ -418,14 +546,27 @@ function handle(e) {
       if (e.hbm_total) { state.hbmTotal = e.hbm_total; state.hbmUsed = e.hbm_used; }
       if (e.resident_frac != null) state.residentFrac = e.resident_frac;
       break;
-    case 'end':
+    case 'end': {
       state.end = e;
-      if (state.cfg && state.cfg.mode === 'honest') {
-        const s = currentSplit();
-        if (s) { state.baseline = s; log(`honest reference: ${fmtUs(e.p50)}`, 'bridge'); }
+      const split = currentSplit();
+      if (state.cfg && state.cfg.mode === 'honest' && split) {
+        state.baseline = { ...split, cfg: { ...state.cfg }, at: Date.now() };
+        log(`baseline set: ${fmtUs(e.p50)} at ${geomOf(state.cfg)}`, 'bridge');
       }
+      if (state.cfg && split) {
+        state.history.push({
+          at: Date.now(), mode: state.cfg.mode, cfg: { ...state.cfg },
+          p50: e.p50, errors: e.errors, samples: e.samples, checked: e.checked,
+          kernel: split.kernel, copy: split.copy, fold: split.fold,
+        });
+        state.history = state.history.slice(-40);
+      }
+      save();
+      renderBaseline();
+      renderHistory();
       log(`${e.samples} samples, ${e.errors} errors, p50 ${fmtUs(e.p50)}`, 'verifier');
       break;
+    }
     case 'smi': state.smi = e; break;
     case 'log': log(e.line, e.src); break;
     default: break;
@@ -475,13 +616,23 @@ el.themeBtn.addEventListener('click', () => {
   d.theme = d.theme === 'dark' ? 'light' : 'dark';
   markDirty();
 });
+el.clearBaseBtn.addEventListener('click', () => {
+  state.baseline = null; save(); renderBaseline(); markDirty();
+});
+el.clearHistBtn.addEventListener('click', () => {
+  state.history = []; save(); renderHistory();
+});
 ['input', 'change'].forEach(ev =>
   ['mode', 'offload', 'hog', 'frac', 'k', 'lanes', 'mb', 'chain']
-    .forEach(id => el[id].addEventListener(ev, syncControls)));
+    .forEach(id => el[id].addEventListener(ev, () => { syncControls(); renderBaseline(); })));
 window.addEventListener('resize', markDirty);
 
+load();
 setInterval(pump, 40);
+setInterval(renderBaseline, 30000);   // the age readout, so a stale baseline says so
 syncControls();
 updateReadouts();
+renderBaseline();
+renderHistory();
 connect();
 requestAnimationFrame(tick);

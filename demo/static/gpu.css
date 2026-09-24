@@ -32,3 +32,23 @@
 .mini { font-family: var(--face-num); font-size: 10px; color: var(--muted); }
 .knob { margin-top: 8px; }
 .knob input[type=range] { width: 100%; }
+
+/* Run history. Fixed height with its own scroll so the table can never push
+ * the page taller — the same reason every canvas above is pinned. */
+.hist-scroll { max-height: 190px; overflow: auto; }
+table.hist {
+  width: 100%; border-collapse: collapse;
+  font-family: var(--face-num); font-size: 10px;
+}
+table.hist th {
+  position: sticky; top: 0; background: var(--panel, #0f1518);
+  text-align: left; font-weight: 600; color: var(--muted);
+  padding: 3px 6px; border-bottom: 1px solid var(--hair);
+}
+table.hist td {
+  padding: 3px 6px; border-bottom: 1px solid var(--hair);
+  color: var(--ink); white-space: nowrap;
+}
+table.hist td.muted { color: var(--muted); }
+table.hist .bad { color: var(--critical); }
+#clearBaseBtn, #clearHistBtn { margin-top: 6px; }
