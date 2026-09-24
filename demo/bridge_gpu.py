@@ -64,7 +64,11 @@ LIMITS = {                    # field: (min, max, default)
     "lanes":  (1, 1 << 18, 16384),
     "n":      (1, 20000, 200),
     "warmup": (0, 20000, 20),
-    "hog":    (0, 262144, 0),         # MiB of device memory to hold hostage
+    "hog":    (0, 262144, 0),         # MiB of device memory to reserve outright
+    "free":   (0, 262144, 0),         # MiB to leave free; the prover reserves
+                                      # the rest itself. 0 = no reserve. Wins
+                                      # over hog, because only the prover can
+                                      # see how much is actually allocatable.
     "trace":  (0, 10000, 1),
     "frac":   (0, 1, 0.5),
     "offload": (0, 1, 0.1),   # partial: fraction kept off the card
@@ -250,6 +254,7 @@ class Run:
         self.cfg = cfg
         self.saw_end = False
         self.stopping = False
+        self.last_failure = None
         self.prover = None
         self.verifier = None
         stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -306,6 +311,13 @@ class Run:
         """Forward one process's stdout: '@' lines are events, the rest are log."""
         for raw in stream:
             line = raw.rstrip("\n")
+            # Keep the cause, not its echo: when the prover dies, the verifier
+            # then fails to send, and that later line would otherwise replace
+            # the one that says why.
+            if "FATAL" in line:
+                self.last_failure = line.strip()
+            elif "send fail" in line and self.last_failure is None:
+                self.last_failure = line.strip()
             if line.startswith("@"):
                 try:
                     event = json.loads(line[1:])
@@ -330,9 +342,11 @@ class Run:
             return [str(ROOT / "prover_cuda"), "--port", str(PROVER_PORT),
                     "--device", DEVICE, "--trace", str(c["trace"]),
                     "--lane-cap", str(max(1, c["lanes"]))]
+        reserve = (["--leave-free", str(c["free"])] if c["free"] > 0
+                   else ["--hog", str(c["hog"])])
         return [str(ROOT / "cheating_prover_cuda"), "--port", str(PROVER_PORT),
                 "--device", DEVICE, "--mode", c["mode"], "--frac", str(c["frac"]),
-                "--hog", str(c["hog"]), "--offload", str(c["offload"]),
+                *reserve, "--offload", str(c["offload"]),
                 "--trace", str(c["trace"]),
                 "--lane-cap", str(max(1, c["lanes"]))]
 
@@ -388,7 +402,18 @@ class Run:
             self._pump(self.verifier.stdout, "verifier")
             rc = self.verifier.wait()
             time.sleep(0.5)          # let the prover flush its closing lines
-            self._status("stopped" if self.stopping else "done", rc=rc)
+            if self.stopping:
+                self._status("stopped", rc=rc)
+            elif rc != 0 or not self.saw_end or (self.last_failure and "FATAL" in self.last_failure):
+                # A run that ends without a result is a failure, whatever the
+                # exit code. Reporting it as "done" made a prover that died
+                # before its first challenge look like a run that did nothing.
+                # So is one whose prover died mid-run: the verifier still
+                # prints a summary of the challenges it got, which set saw_end.
+                why = self.last_failure or f"the verifier exited {rc} without a result"
+                self._status("error", rc=rc, error=why)
+            else:
+                self._status("done", rc=rc)
         except Exception as exc:                  # a crashed run must not kill the server
             self._status("error", error=f"{type(exc).__name__}: {exc}")
         finally:

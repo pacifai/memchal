@@ -44,6 +44,9 @@ done
 
 say() { printf '\n== %s ==\n' "$1"; }
 API="https://api.runpod.io/v2"
+# macOS has no coreutils timeout. A wedged pod can hang any ssh session, and
+# this script is what releases a wedged pod, so nothing here may wait forever.
+deadline() { local s="$1"; shift; perl -e 'alarm shift; exec @ARGV' "$s" "$@"; }
 
 if [ ! -f "$STATE" ]; then
   echo "No demo recorded in .gpu_demo_state — nothing of mine is up."
@@ -64,16 +67,16 @@ fi
 
 # --- 1 and 2. quiet the card, then rescue the measurements ------------------
 REACHED=0
-if [ -n "$SSH" ] && $SSH true 2>/dev/null; then
+if [ -n "$SSH" ] && deadline 30 $SSH true 2>/dev/null; then
   REACHED=1
   say "teardown on the pod"
-  $SSH 'cd /root/memchal && bash scripts/gpu_teardown.sh' 2>&1 | sed 's/^/  /'
+  deadline 180 $SSH 'cd /root/memchal && bash scripts/gpu_teardown.sh' 2>&1 | sed 's/^/  /'
 
   say "pulling results back"
-  ARCHIVE=$($SSH 'ls -t /root/memchal-results-*.tar.gz 2>/dev/null | head -1' 2>/dev/null | tr -d '\r')
+  ARCHIVE=$(deadline 30 $SSH 'ls -t /root/memchal-results-*.tar.gz 2>/dev/null | head -1' 2>/dev/null | tr -d '\r')
   if [ -n "$ARCHIVE" ]; then
     mkdir -p "$ROOT/results"
-    if scp -q -i "${SSH_KEY:-$HOME/.ssh/neta-pacifai-runpod}" -o IdentitiesOnly=yes \
+    if deadline 300 scp -q -i "${SSH_KEY:-$HOME/.ssh/neta-pacifai-runpod}" -o IdentitiesOnly=yes \
            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
            -P "$SSH_PORT" "root@$SSH_HOST:$ARCHIVE" "$ROOT/results/"; then
       LOCAL="$ROOT/results/$(basename "$ARCHIVE")"

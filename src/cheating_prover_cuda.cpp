@@ -34,6 +34,13 @@
 // collapse you have to take the memory away: --hog <MiB> holds device memory so
 // the managed buffer cannot fit, which is the GPU analog of the CPU demo's
 // container RAM budget.
+//
+// --leave-free <MiB> is the same lever stated the way the experiment is: reserve
+// whatever it takes to leave that much free. The prover measures free memory
+// itself, at the moment it reserves, because nothing outside the process can
+// know it — the CUDA context and allocator already hold a few hundred MiB that
+// cudaMemGetInfo's total still counts. A caller that computes a reserve from the
+// card's total asks for memory that does not exist and the reserve fails.
 #include "common.hpp"
 #include "gpu_answer.hpp"
 #include <cstdio>
@@ -49,6 +56,7 @@ static Mode     g_mode        = UVM;
 static double   g_frac        = 0.5;    // fake: fraction actually held
 static double   g_offload     = 0.1;    // partial: fraction kept off the card
 static size_t   g_hog_mib     = 0;      // device memory to occupy
+static long long g_leave_free_mib = -1;  // if >= 0, reserve all but this much
 static int      g_device      = 0;
 static uint32_t g_lane_cap    = 1u << 17;
 static uint32_t g_trace_every = 0;
@@ -96,12 +104,21 @@ static void serve(int cfd) {
     uint64_t num_words = bytes / 8;
 
     char err[512] = {0};
+    if (g_leave_free_mib >= 0) {
+        size_t free_b = 0, total_b = 0;
+        gpu::mem_info(&free_b, &total_b);
+        size_t free_mib = free_b / 1048576ull;
+        size_t leave = (size_t)g_leave_free_mib;
+        g_hog_mib = free_mib > leave ? free_mib - leave : 0;
+        printf("[cheat] %zu MiB free on the card; reserving %zu MiB to leave %zu MiB free\n",
+               free_mib, g_hog_mib, free_mib - g_hog_mib);
+    }
     if (g_hog_mib) {
         if (!gpu::hog(g_hog_mib * 1048576ull, err, sizeof err)) {
-            fprintf(stderr, "[cheat] FATAL: could not hog %zu MiB: %s\n", g_hog_mib, err);
+            fprintf(stderr, "[cheat] FATAL: could not reserve %zu MiB: %s\n", g_hog_mib, err);
             return;
         }
-        printf("[cheat] holding %zu MiB of device memory hostage\n", g_hog_mib);
+        printf("[cheat] reserving %zu MiB of device memory\n", g_hog_mib);
     }
 
     double held = (g_mode == FAKE) ? g_frac : 1.0;
@@ -215,6 +232,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--frac")  && i + 1 < argc) g_frac = atof(argv[++i]);
         else if (!strcmp(a, "--offload") && i + 1 < argc) g_offload = atof(argv[++i]);
         else if (!strcmp(a, "--hog")   && i + 1 < argc) g_hog_mib = strtoull(argv[++i], nullptr, 10);
+        else if (!strcmp(a, "--leave-free") && i + 1 < argc) g_leave_free_mib = strtoll(argv[++i], nullptr, 10);
         else if (!strcmp(a, "--device") && i + 1 < argc) g_device = atoi(argv[++i]);
         else if (!strcmp(a, "--lane-cap") && i + 1 < argc) g_lane_cap = (uint32_t)strtoul(argv[++i], nullptr, 10);
         else if (!strcmp(a, "--trace") && i + 1 < argc) g_trace_every = (uint32_t)strtoul(argv[++i], nullptr, 10);

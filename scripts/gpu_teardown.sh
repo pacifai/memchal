@@ -57,7 +57,9 @@ fi
 
 LEFT=$(pgrep -af 'bridge_gpu.py|prover_cuda|cheating_prover_cuda' 2>/dev/null | grep -v pgrep)
 if [ -n "$LEFT" ]; then
-  echo "STILL RUNNING:"; echo "$LEFT"
+  # A process stuck inside the driver survives SIGKILL. It is reported so the
+  # verdict is honest, and releasing the pod is what actually clears it.
+  echo "STILL RUNNING (a process stuck in the GPU driver cannot be killed):"; echo "$LEFT"
   STATUS=1
 else
   echo "none of ours left running"
@@ -65,15 +67,25 @@ fi
 
 # --- 2. is the card actually idle -------------------------------------------
 say "card"
+# Every nvidia-smi call gets a deadline. A GPU fault can wedge the driver, and
+# then nvidia-smi blocks forever in uninterruptible sleep — which would hang
+# this script, and gpu_demo_down.sh behind it, exactly when the pod most needs
+# releasing. A card that does not answer in 15 s is reported, not waited on.
+SMI="timeout 15 nvidia-smi"
 if command -v nvidia-smi >/dev/null 2>&1; then
-  nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu \
-             --format=csv,noheader
-  USED=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -1)
-  # Anything above a few hundred MiB means something still has a context open.
-  if [ -n "$USED" ] && [ "$USED" -gt 512 ] 2>/dev/null; then
-    echo "WARNING: ${USED} MiB still allocated — another process holds a context"
-    nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv 2>/dev/null
+  if ! $SMI --query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu \
+            --format=csv,noheader; then
+    echo "WARNING: nvidia-smi did not answer — the driver is likely wedged."
+    echo "         Nothing in the container can reset it; release the pod."
     STATUS=1
+  else
+    USED=$($SMI --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -1)
+    # Anything above a few hundred MiB means something still has a context open.
+    if [ -n "$USED" ] && [ "$USED" -gt 512 ] 2>/dev/null; then
+      echo "WARNING: ${USED} MiB still allocated — another process holds a context"
+      $SMI --query-compute-apps=pid,process_name,used_memory --format=csv 2>/dev/null
+      STATUS=1
+    fi
   fi
 else
   echo "nvidia-smi not found"

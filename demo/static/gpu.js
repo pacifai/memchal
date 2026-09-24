@@ -454,17 +454,28 @@ function renderHistory() {
 // slider now sets that ratio directly, geometrically from 8x down to 0.25x.
 // The crossover (1x) then sits near 60% of the travel at any buffer size.
 const FREE_HI = 8, FREE_LO = 0.25;
+// The smallest free space the page will ask for. 256 MiB free under a 1 GiB
+// managed buffer with 131072 lanes took ~90 s per challenge, then the kernel
+// died with an illegal memory access and wedged the driver until the pod was
+// released. 4096 MiB with ~2.5 GiB free and 16384 lanes ran cleanly at ~3.5 s
+// per challenge. The floor sits near that known-good point; where between the
+// two the failure starts is unmeasured.
+const FREE_FLOOR_MIB = 1024;
+// Lanes above this, on a starved buffer, is the configuration that crashed.
+const STARVED_LANES_MAX = 16384;
 function freeRatio() {
   const pos = Number(el.hog.value) || 0;
   if (!pos) return null;                       // 0 = reserve nothing
   return FREE_HI * Math.pow(FREE_LO / FREE_HI, pos / HOG_STEPS);
 }
-function hogMib() {
+// MiB the prover should leave free. The prover measures what is free and
+// reserves the rest itself; computing a reserve here from the card's total
+// asked for memory the CUDA context already holds, and the reserve failed.
+function freeMib() {
   const r = freeRatio();
-  if (r == null || !state.hbmTotal) return 0;
-  const totalMib = state.hbmTotal / 1048576;
+  if (r == null) return 0;
   const mb = Number(el.mb.value) || 0;
-  return Math.max(0, Math.floor(totalMib - r * mb));
+  return Math.max(FREE_FLOOR_MIB, Math.round(r * mb));
 }
 
 function syncControls() {
@@ -476,15 +487,12 @@ function syncControls() {
   el.offloadLabel.textContent = `${el.offload.value}%`;
   el.fracLabel.textContent = `${el.frac.value}%`;
   const r = freeRatio();
-  const mib = hogMib();
   if (r == null) {
     el.hogLabel.textContent = 'all';
-  } else if (!state.hbmTotal) {
-    el.hogLabel.textContent = `${r.toFixed(2)}x buffer`;
   } else {
-    const freeMib = state.hbmTotal / 1048576 - mib;
-    el.hogLabel.textContent =
-      `${(freeMib / 1024).toFixed(1)} GiB · ${r.toFixed(2)}x buffer`;
+    const f = freeMib();
+    const mb = Number(el.mb.value) || 1;
+    el.hogLabel.textContent = `${(f / 1024).toFixed(2)} GiB · ${(f / mb).toFixed(2)}x buffer`;
   }
 
   const k = Number(el.k.value) || 1, lanes = Number(el.lanes.value) || 1;
@@ -508,8 +516,25 @@ function syncControls() {
   const fmtS = (v) => v < 1 ? '<1s' : `${Math.round(v)}s`;
   bits.push(`— ${fmtS(total)} total: ${fmtS(paceS)} pacing, ${fmtS(checkS)} verify, ${fmtS(gpuS)} gpu`);
   if (ve > 1) bits.push(`(checking 1 in ${ve})`);
+  // A managed buffer larger than the free HBM left for it faults on every
+  // probe, which costs seconds per challenge rather than microseconds. Say so,
+  // because the first result then takes long enough to look like no run at all.
+  let starvedRisk = false;
+  if (mode === 'uvm' && freeRatio() != null) {
+    const f = freeMib();
+    if (f >= mb) {
+      bits.push(`— ${(f / 1024).toFixed(1)} GiB free holds the buffer: expect honest speed` +
+                (mb <= FREE_FLOOR_MIB ? `; raise buffer above ${FREE_FLOOR_MIB} MiB to starve it` : ''));
+    } else {
+      bits.push('— starved: seconds per challenge, keep challenges ≤ 20');
+      if (lanes > STARVED_LANES_MAX) {
+        bits.push(`— lanes > ${STARVED_LANES_MAX} crashed the card when starved`);
+        starvedRisk = true;
+      }
+    }
+  }
   el.geomHint.textContent = bits.join(' ');
-  el.geomHint.style.color = (el.chain.value === 'dependent' && depth < 16) ? P().absent : '';
+  el.geomHint.style.color = ((el.chain.value === 'dependent' && depth < 16) || starvedRisk) ? P().absent : '';
   markDirty();
 }
 
@@ -608,7 +633,7 @@ el.runBtn.addEventListener('click', async () => {
     mb: +el.mb.value, k: +el.k.value, lanes: +el.lanes.value,
     n: +el.n.value, warmup: +el.warmup.value, gap: +el.gap.value,
     verify: +el.verify.value,
-    hog: hogMib(), trace: 1,
+    hog: 0, free: freeMib(), trace: 1,
     frac: (+el.frac.value) / 100, offload: (+el.offload.value) / 100,
   };
   try {
