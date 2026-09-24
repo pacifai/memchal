@@ -90,13 +90,41 @@ echo "local port: $LPORT"
 
 # --- 1. price, and consent --------------------------------------------------
 say "price"
-CAP=$(api GET "/catalog/gpus?gpuTypeIds=$(python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))' "$GPU")&gpuCount=1" 2>/dev/null)
-PRICE=$(printf '%s' "$CAP" | python3 -c 'import json,sys
+# The catalog ignores a gpuTypeIds filter and returns every card, so find ours
+# by id. include=AVAILABILITY&product=POD is what adds the stock field. An id
+# that is not in the list is a typo in --gpu, and renting would fail anyway.
+CAT=$(curl -sS "$API/catalog/gpus?include=AVAILABILITY&product=POD" \
+        -H "Authorization: Bearer $RUNPOD_API_KEY")
+INFO=$(printf '%s' "$CAT" | python3 -c '
+import json, sys
+gpu, cloud = sys.argv[1], sys.argv[2].lower()
 try:
-    d=json.load(sys.stdin); it=(d.get("items") or [d])[0]
-    print(f'"'"'{it.get("pricePerHr","?")}|{it.get("stockStatus","?")}'"'"')
-except Exception: print("?|?")' 2>/dev/null)
-echo "$GPU — \$${PRICE%%|*}/hr, stock: ${PRICE##*|}"
+    gpus = json.load(sys.stdin).get("gpus", [])
+except Exception:
+    print("ERR|the catalog did not answer with JSON")
+    raise SystemExit
+g = next((x for x in gpus if x.get("id") == gpu), None)
+if g is None:
+    word = gpu.split()[-1].lower()
+    near = [x["id"] for x in gpus if word in x.get("id", "").lower()][:5]
+    hint = (" - did you mean: " + ", ".join(near)) if near else ""
+    print("ERR|no card with id " + repr(gpu) + hint)
+else:
+    price = (g.get("price") or {}).get(cloud)
+    print("|".join([g.get("name", gpu),
+                    "?" if price is None else str(price),
+                    g.get("availability", "?")]))
+' "$GPU" "$CLOUD" 2>&1)
+case "$INFO" in ERR\|*) die "${INFO#ERR|}" 1 ;; esac
+IFS='|' read -r GPU_NAME PRICE STOCK <<< "$INFO"
+if [ -z "${PRICE:-}" ] || [ "$PRICE" = "?" ]; then
+  printf '%s\n' "$INFO" | tail -3
+  die "could not read a price for $GPU on $CLOUD cloud — not renting blind" 2
+fi
+echo "$GPU_NAME ($GPU), $CLOUD cloud — \$$PRICE/hr, stock: $STOCK"
+case "$STOCK" in
+  NONE|UNAVAILABLE|none|unavailable) die "no stock right now. Try --gpu with another card." 2 ;;
+esac
 if [ "$ASSUME_YES" -ne 1 ]; then
   printf '\nRent it? This bills by the second until you run gpu_demo_down.sh. [y/N] '
   read -r ans

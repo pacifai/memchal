@@ -130,19 +130,31 @@ if [ -z "${RUNPOD_API_KEY:-}" ]; then
   exit 2
 fi
 if [ "$ACTION" = terminate ]; then
-  curl -sS -X DELETE "$API/pods/$POD_ID" -H "Authorization: Bearer $RUNPOD_API_KEY" >/dev/null
+  curl -sS -o /dev/null -X DELETE "$API/pods/$POD_ID" -H "Authorization: Bearer $RUNPOD_API_KEY"
 else
-  curl -sS -X POST "$API/pods/$POD_ID/stop" -H "Authorization: Bearer $RUNPOD_API_KEY" >/dev/null
+  curl -sS -o /dev/null -X POST "$API/pods/$POD_ID/action" \
+       -H "Authorization: Bearer $RUNPOD_API_KEY" -H "Content-Type: application/json" \
+       -d '{"action":"stop"}'
 fi
-sleep 2
-STATUS=$(curl -sS "$API/pods/$POD_ID" -H "Authorization: Bearer $RUNPOD_API_KEY" 2>/dev/null \
-         | python3 -c 'import json,sys
-try: print(json.load(sys.stdin).get("status","GONE"))
-except Exception: print("GONE")' 2>/dev/null)
+sleep 3
+# A deleted pod answers 404 rather than a status field, so read the HTTP code
+# first and only look at the body when the pod still exists.
+CODE=$(curl -sS -o /tmp/gpu_demo_pod.json -w '%{http_code}' "$API/pods/$POD_ID" \
+            -H "Authorization: Bearer $RUNPOD_API_KEY" 2>/dev/null)
+if [ "$CODE" = "404" ]; then
+  STATUS=GONE
+else
+  STATUS=$(python3 -c 'import json,sys
+try: print(json.load(open(sys.argv[1])).get("status") or "UNKNOWN")
+except Exception: print("UNKNOWN")' /tmp/gpu_demo_pod.json 2>/dev/null)
+fi
+rm -f /tmp/gpu_demo_pod.json
 case "$ACTION:$STATUS" in
-  terminate:GONE|terminate:) echo "  terminated — $POD_ID no longer exists"; rm -f "$STATE" ;;
-  stop:EXITED|stop:STOPPED)  echo "  stopped — disk kept, GPU released (may not restart)"; rm -f "$STATE" ;;
-  *) echo "  pod reports status '$STATUS' after $ACTION — check the console"
+  terminate:GONE|terminate:TERMINATED)
+    echo "  terminated — $POD_ID no longer exists"; rm -f "$STATE" ;;
+  stop:EXITED|stop:STOPPED)
+    echo "  stopped — disk kept, GPU released (may not restart)"; rm -f "$STATE" ;;
+  *) echo "  pod reports '$STATUS' (HTTP $CODE) after $ACTION — check the console"
      echo "  keeping .gpu_demo_state so you can rerun"; exit 2 ;;
 esac
 
