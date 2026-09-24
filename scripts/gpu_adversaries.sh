@@ -12,21 +12,33 @@
 # Modes are interleaved rather than run in blocks for the same reason: thermal
 # drift over a long session would otherwise look like a treatment effect.
 #
+# The verifier's --fold defaults to sequential, because the tree fold changes
+# the answers and so has to be opted into. This script therefore has to name it:
+# without --fold the sweep measures a fold the project no longer ships, and its
+# p50s are roughly twice what the shipped one produces at the same geometry.
+#
 # Usage: bash scripts/gpu_adversaries.sh [--mb 4096] [--k 262144] [--lanes 16384]
 #                                        [--n 50] [--hog 41000] [--cycles 2]
+#                                        [--fold tree|sequential]
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
 MB=4096; K=262144; LANES=16384; N=50; WARMUP=10; HOG=41000; CYCLES=2; PORT=9099
+FOLD=tree
 while [ $# -gt 0 ]; do
   case "$1" in
     --mb) MB="$2"; shift 2 ;; --k) K="$2"; shift 2 ;;
     --lanes) LANES="$2"; shift 2 ;; --n) N="$2"; shift 2 ;;
     --warmup) WARMUP="$2"; shift 2 ;; --hog) HOG="$2"; shift 2 ;;
     --cycles) CYCLES="$2"; shift 2 ;; --port) PORT="$2"; shift 2 ;;
+    --fold) FOLD="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 1 ;;
   esac
 done
+case "$FOLD" in
+  tree|sequential) ;;
+  *) echo "--fold must be tree or sequential, got: $FOLD" >&2; exit 1 ;;
+esac
 
 mkdir -p results/adversaries
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
@@ -76,6 +88,7 @@ run_one() {
 
   timeout 900 ./verifier --host 127.0.0.1 --port "$PORT" \
       --mb "$MB" --k "$K" --lanes "$LANES" --n "$N" --warmup "$WARMUP" \
+      --fold "$FOLD" \
       --label "$tag" --csv /dev/null --json "$OUT/$tag.json" \
       > "$OUT/verifier-$tag.log" 2>&1
   local rc=$?
@@ -87,7 +100,7 @@ run_one() {
   return 0
 }
 
-echo "geometry: ${MB} MiB buffer, k=$K, lanes=$LANES, depth=$((K / LANES)), n=$N"
+echo "geometry: ${MB} MiB buffer, k=$K, lanes=$LANES, depth=$((K / LANES)), n=$N, fold=$FOLD"
 echo "output:   $OUT"
 echo
 

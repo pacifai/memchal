@@ -243,7 +243,18 @@ latency-bound rather than bandwidth-bound. Both are in
 bash scripts/gpu_pod_setup.sh      # machine record, refusals, build, then the gate
 bash scripts/gpu_adversaries.sh    # honest plus all three cheats, interleaved
 python3 demo/bridge_gpu.py         # the live demo, on the GPU box
+bash scripts/gpu_teardown.sh       # stop everything, check the card is idle, pack results
 ```
+
+Run the teardown before you release the pod. It stops the bridge and any
+prover still holding HBM, reports what is left on the card so "the box is idle"
+is something you read rather than assume, and packs `results/` into one archive
+with the command to pull it back. It does not terminate the pod: releasing
+rented hardware is a decision, not a side effect of running a script.
+
+`gpu_adversaries.sh` defaults to `--fold tree`. The verifier's own default is
+`sequential`, because the tree fold changes the answers and has to be opted
+into, so any command that measures the shipped design has to name it.
 
 The GPU demo spawns processes directly rather than containers, because RunPod
 runs the container for you and forbids nesting another. It shows HBM occupancy
