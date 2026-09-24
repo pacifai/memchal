@@ -292,12 +292,47 @@ bool push(Prover& p, size_t bytes, char* err, size_t errlen) {
         }
         size_t n = left;
         if (p.alloc == Alloc::Split && at + n > seam) n = seam - at;
+        if (p.alloc == Alloc::Managed) {
+            // Write managed memory from the host; the part that fits on the
+            // card is prefetched there once the upload completes, below.
+            // cudaMemcpy H2D here instead forces every page onto the card as it
+            // arrives, and with HBM reserved below the buffer size each chunk
+            // evicts an earlier one: a 4 GiB upload with 2.4 GiB free took 53 s
+            // against 3.5 s honest.
+            memcpy((unsigned char*)p.d_buf + at, p.h_stage + done, n);
+            done += n;
+            continue;
+        }
         e = cudaMemcpy((unsigned char*)p.d_buf + at, p.h_stage + done, n,
                        cudaMemcpyHostToDevice);
         if (e != cudaSuccess) { fail(err, errlen, "cudaMemcpy(H2D upload)", e); return false; }
         done += n;
     }
+    size_t before = (size_t)p.cursor;
     p.cursor += bytes;
+
+    // Once a managed buffer is fully written, place as much of it on the card
+    // as free HBM allows. Left alone, host-written pages did not settle on the
+    // card even when they all fit: a 4 GiB buffer with 8 GiB free answered at
+    // 7x honest, which would make a genuinely resident buffer look like a
+    // caught cheat. Prefetching restores that case to honest speed and leaves a
+    // starved buffer with exactly what fits resident and the rest in host
+    // memory, to migrate on demand — the state the challenges measure. The
+    // margin keeps room for the lane buffers and kernel launches.
+    if (p.alloc == Alloc::Managed && before < held_bytes && (size_t)p.cursor >= held_bytes) {
+        size_t free_b = 0, total_b = 0;
+        cudaMemGetInfo(&free_b, &total_b);
+        const size_t margin = (size_t)512 << 20;
+        size_t fit = free_b > margin ? free_b - margin : 0;
+        size_t n = held_bytes < fit ? held_bytes : fit;
+        if (n) {
+            int dev = 0;
+            cudaGetDevice(&dev);
+            cudaError_t e = cudaMemPrefetchAsync(p.d_buf, n, dev, 0);
+            if (e == cudaSuccess) e = cudaDeviceSynchronize();
+            if (e != cudaSuccess) { fail(err, errlen, "cudaMemPrefetchAsync(managed)", e); return false; }
+        }
+    }
     return true;
 }
 
