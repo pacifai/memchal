@@ -70,7 +70,12 @@ REACHED=0
 if [ -n "$SSH" ] && deadline 30 $SSH true 2>/dev/null; then
   REACHED=1
   say "teardown on the pod"
-  deadline 180 $SSH 'cd /root/memchal && bash scripts/gpu_teardown.sh' 2>&1 | sed 's/^/  /'
+  # The subshell's 2>/dev/null only swallows the shell's own "Alarm clock" notice
+  # when the deadline fires; the teardown's output still comes through the pipe.
+  ( deadline 180 $SSH 'cd /root/memchal && bash scripts/gpu_teardown.sh' 2>&1 ) 2>/dev/null | sed 's/^/  /'
+  TD_RC=${PIPESTATUS[0]}
+  [ "$TD_RC" -eq 142 ] && echo "  teardown did not finish in 180 s — the card is probably wedged"
+
 
   say "pulling results back"
   ARCHIVE=$(deadline 30 $SSH 'ls -t /root/memchal-results-*.tar.gz 2>/dev/null | head -1' 2>/dev/null | tr -d '\r')
@@ -91,7 +96,20 @@ if [ -n "$SSH" ] && deadline 30 $SSH true 2>/dev/null; then
       exit 2
     fi
   else
-    echo "  the pod had no results archive — nothing to rescue"
+    # No archive does not mean nothing to rescue: a teardown cut short by a
+    # wedged driver never gets to pack. Copy results/ itself — that needs no
+    # GPU — and refuse to release the pod if even that fails.
+    echo "  no results archive on the pod — copying results/ directly"
+    DEST="$ROOT/results/pod-$POD_ID"
+    mkdir -p "$DEST"
+    if deadline 300 rsync -az -e "ssh -i ${SSH_KEY:-$HOME/.ssh/neta-pacifai-runpod} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p $SSH_PORT" \
+         "root@$SSH_HOST:/root/memchal/results/" "$DEST/" 2>/dev/null; then
+      echo "  saved: results/pod-$POD_ID/  ($(find "$DEST" -type f | wc -l | tr -d ' ') files)"
+    else
+      echo "  COULD NOT COPY results/ — not releasing the pod."
+      echo "  Rerun with --force to release it and lose what is on it."
+      [ "$FORCE" -eq 1 ] || exit 2
+    fi
   fi
 else
   say "pod unreachable"
