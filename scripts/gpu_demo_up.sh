@@ -191,15 +191,15 @@ $SSH 'export PATH=/usr/local/cuda/bin:$PATH; cd /root/memchal && ./tests/known_a
 
 # --- 5. start the bridge ----------------------------------------------------
 say "starting the demo"
-$SSH 'cd /root/memchal && pkill -f bridge_gpu.py 2>/dev/null; sleep 1; setsid python3 demo/bridge_gpu.py > /root/bridge.log 2>&1 < /dev/null & disown' >/dev/null 2>&1
-sleep 5
-$SSH 'pgrep -f bridge_gpu.py >/dev/null' || { $SSH 'tail -5 /root/bridge.log'; die "the bridge did not start" 3; }
+# A script file, not a one-liner: see the header of gpu_bridge_start.sh for why
+# stopping and starting the bridge in one ssh command kills itself.
+$SSH 'bash /root/memchal/scripts/gpu_bridge_start.sh' || die "the bridge did not start" 3
 
 ssh -i "$SSH_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null -o ExitOnForwardFailure=yes \
     -p "$PORT" -f -N -L "$LPORT:127.0.0.1:8777" "root@$HOST" || die "could not forward port $LPORT" 3
 sleep 3
-CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$LPORT/" || echo 000)
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$LPORT/")
 [ "$CODE" = "200" ] || die "the page did not answer on http://127.0.0.1:$LPORT (got $CODE)" 3
 
 trap - ERR
