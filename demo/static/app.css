@@ -26,22 +26,30 @@
   --face-prose: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
 }
 
+/* Dark theme. The neutrals share the surfaces' cool hue (195) so the three
+ * text levels read as one family, and each is set by contrast on --panel
+ * rather than by eye: --ink 14:1, --ink-2 8:1, --muted 5.5:1. --muted carries
+ * every label, tick, and legend at 9-11px, so it sits well above the 4.5:1
+ * floor. The accents keep their hues and meanings but share a lightness
+ * (~5.6:1), so none of them shouts. --critical is the exception on purpose:
+ * rose and lighter (6.8:1), because it sits next to --slow in the residency
+ * bar and at equal lightness red and orange blur together. */
 :root[data-theme="dark"] {
   color-scheme: dark;
   --plane:   #0e1214;
   --panel:   #141a1c;
   --inset:   #0a0e0f;
-  --ink:     #ece7dc;
-  --ink-2:   #a8a79f;
-  --muted:   #6f7a7d;
+  --ink:     #e1e7e8;
+  --ink-2:   #a5b1b5;
+  --muted:   #839398;
   --hair:    #232b2e;
   --axis:    #2f393c;
-  --fast:    #3987e5;   /* holds it in fast memory */
-  --slow:    #d95926;   /* reads it from storage */
-  --none:    #199e70;   /* does not hold it at all */
-  --critical:#d03b3b;
-  --good:    #0ca30c;
-  --glow:    0 0 0 1px #232b2e, inset 0 1px 0 rgba(236,231,220,.04);
+  --fast:    #5394e3;   /* holds it in fast memory */
+  --slow:    #dc6c2a;   /* reads it from storage */
+  --none:    #29a47b;   /* does not hold it at all */
+  --critical:#eb8293;
+  --good:    #30a73a;
+  --glow:    0 0 0 1px #232b2e, inset 0 1px 0 rgba(225,231,232,.04);
 }
 :root[data-theme="light"] {
   color-scheme: light;
@@ -142,6 +150,8 @@ button {
   background: var(--inset); color: var(--ink);
 }
 button.go { background: var(--fast); border-color: var(--fast); color: #fff; flex: 1; }
+/* White on the dark theme's lighter blue is 3.1:1; the page's own ink on it is 6.2:1. */
+:root[data-theme="dark"] button.go { color: var(--inset); }
 button.small { padding: 5px 9px; margin-top: 10px; }
 button:disabled { opacity: .4; cursor: default; }
 button:hover:not(:disabled) { filter: brightness(1.12); }
