@@ -87,6 +87,40 @@ struct LoadSplit {
     }
 };
 
+// The prefetch cheat's dry run: return zero for every probe and note where the
+// probe went. Each thread builds its own, so the cursor is per lane. With
+// independent chains the addresses do not depend on the data, so the list is
+// exact; with dependent chains only the first address per lane is.
+struct LoadRecord {
+    uint64_t* rec;
+    uint32_t  j;
+    __device__ __forceinline__ uint64_t operator()(uint64_t idx) {
+        rec[j++] = idx;
+        return 0;
+    }
+};
+
+// The prefetch cheat's real pass: take the fetched word when the dry run
+// listed this address, read the buffer directly when it did not.
+struct LoadStaged {
+    const uint64_t* __restrict__ idx;
+    const uint64_t* __restrict__ val;
+    const uint64_t* __restrict__ buf;
+    uint32_t j;
+    __device__ __forceinline__ uint64_t operator()(uint64_t i) {
+        uint64_t w = (idx[j] == i) ? val[j] : buf[i];
+        ++j;
+        return w;
+    }
+};
+
+// Where lane l's probes start in a flat array of all k, matching
+// lane_samples(): the first k % lanes lanes take one extra.
+__device__ __forceinline__ uint32_t lane_offset(uint32_t k, uint32_t lanes, uint32_t l) {
+    uint32_t q = k / lanes, r = k % lanes;
+    return l * q + (l < r ? l : r);
+}
+
 // ---------------------------------------------------------------------------
 // kernels
 // ---------------------------------------------------------------------------
@@ -97,6 +131,32 @@ __global__ void k_lane(Load load, uint64_t num_words, uint64_t nonce,
     if (l >= lanes) return;
     out[l] = mc::answer_lane_t(load, num_words, nonce, l,
                                mc::lane_samples(k, lanes, l), chained);
+}
+
+__global__ void k_pf_record(uint64_t num_words, uint64_t nonce, uint32_t k,
+                            uint32_t lanes, bool chained, uint64_t* rec, uint64_t* out) {
+    uint32_t l = blockIdx.x * blockDim.x + threadIdx.x;
+    if (l >= lanes) return;
+    LoadRecord ld{rec + lane_offset(k, lanes, l), 0};
+    out[l] = mc::answer_lane_t(ld, num_words, nonce, l, mc::lane_samples(k, lanes, l), chained);
+}
+
+// One thread per listed address, all independent, so the reads overlap
+// instead of waiting on each other the way a lane's probes do.
+__global__ void k_pf_gather(const uint64_t* __restrict__ buf, const uint64_t* __restrict__ idx,
+                            uint64_t* __restrict__ val, uint32_t k) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < k) val[i] = buf[idx[i]];
+}
+
+__global__ void k_pf_answer(const uint64_t* buf, const uint64_t* idx, const uint64_t* val,
+                            uint64_t num_words, uint64_t nonce, uint32_t k, uint32_t lanes,
+                            bool chained, uint64_t* out) {
+    uint32_t l = blockIdx.x * blockDim.x + threadIdx.x;
+    if (l >= lanes) return;
+    uint32_t o = lane_offset(k, lanes, l);
+    LoadStaged ld{idx + o, val + o, buf, 0};
+    out[l] = mc::answer_lane_t(ld, num_words, nonce, l, mc::lane_samples(k, lanes, l), chained);
 }
 
 // Level 0 of the tree: turn each raw lane hash into its leaf contribution.
@@ -157,6 +217,9 @@ bool select_device(int ordinal, char* name, size_t name_len, char* err, size_t e
 }
 
 void destroy(Prover& p) {
+    if (p.d_pf_idx) cudaFree(p.d_pf_idx);
+    if (p.d_pf_val) cudaFree(p.d_pf_val);
+    if (p.h_swap)   cudaFreeHost(p.h_swap);
     if (p.d_lane)   cudaFree(p.d_lane);
     if (p.d_lane2)  cudaFree(p.d_lane2);
     if (p.h_lane)   cudaFreeHost(p.h_lane);
@@ -275,6 +338,7 @@ bool push(Prover& p, size_t bytes, char* err, size_t errlen) {
     if (p.cursor >= held_bytes) { p.cursor += bytes; return true; } // fake: discard the tail
     size_t room = held_bytes - (size_t)p.cursor;
     size_t take = bytes < room ? bytes : room;
+    if (p.h_swap) memcpy((unsigned char*)p.h_swap + p.cursor, p.h_stage, take);
 
     // A Split buffer has a seam: bytes before split_words land on the card,
     // bytes after it land in host memory, and one chunk can cross the seam.
@@ -378,13 +442,35 @@ bool answer(Prover& p, uint64_t nonce, uint32_t k, uint32_t lanes, bool chained,
             bool tree, uint64_t* out_hash, double* kernel_ms, double* copy_ms,
             double* fold_ms, char* err, size_t errlen) {
     if (lanes == 0) lanes = 1;
+    if (p.swapped_out) { failmsg(err, errlen, "answer() while the buffer is swapped out"); return false; }
     if (!grow_lanes(p, lanes, err, errlen)) return false;
+    if (p.prefetch && k > p.pf_cap) {
+        if (p.d_pf_idx) cudaFree(p.d_pf_idx);
+        if (p.d_pf_val) cudaFree(p.d_pf_val);
+        p.d_pf_idx = p.d_pf_val = nullptr; p.pf_cap = 0;
+        cudaError_t e;
+        if ((e = cudaMalloc((void**)&p.d_pf_idx, (size_t)k * 8)) != cudaSuccess) {
+            fail(err, errlen, "cudaMalloc(prefetch addresses)", e); return false;
+        }
+        if ((e = cudaMalloc((void**)&p.d_pf_val, (size_t)k * 8)) != cudaSuccess) {
+            fail(err, errlen, "cudaMalloc(prefetch words)", e); return false;
+        }
+        p.pf_cap = k;
+    }
 
     const int tpb = 256;
     unsigned int blocks = (unsigned int)(((uint64_t)lanes + tpb - 1) / tpb);
 
     cudaEventRecord((cudaEvent_t)p.ev_start);
-    if (p.fabricate) {
+    if (p.prefetch) {
+        // All three passes count as kernel time: together they are what the
+        // cheat does instead of the one honest pass.
+        unsigned int kb = (unsigned int)(((uint64_t)k + tpb - 1) / tpb);
+        k_pf_record<<<blocks, tpb>>>(p.num_words, nonce, k, lanes, chained, p.d_pf_idx, p.d_lane);
+        k_pf_gather<<<kb, tpb>>>(p.d_buf, p.d_pf_idx, p.d_pf_val, k);
+        k_pf_answer<<<blocks, tpb>>>(p.d_buf, p.d_pf_idx, p.d_pf_val, p.num_words, nonce, k,
+                                     lanes, chained, p.d_lane);
+    } else if (p.fabricate) {
         k_lane<<<blocks, tpb>>>(LoadFake{p.d_buf, p.held_words},
                                 p.num_words, nonce, k, lanes, chained, p.d_lane);
     } else if (p.alloc == Alloc::Split) {
@@ -454,6 +540,45 @@ bool answer(Prover& p, uint64_t nonce, uint32_t k, uint32_t lanes, bool chained,
     if (fold_ms) *fold_ms = std::chrono::duration<double, std::milli>(t3 - t2).count();
 
     if (out_hash) *out_hash = combined;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// prefetch and swap
+// ---------------------------------------------------------------------------
+void enable_prefetch(Prover& p) { p.prefetch = true; }
+
+bool enable_swap(Prover& p, char* err, size_t errlen) {
+    if (p.alloc != Alloc::Device || p.fabricate) {
+        failmsg(err, errlen, "swap needs a full cudaMalloc buffer"); return false;
+    }
+    cudaError_t e = cudaHostAlloc(&p.h_swap, (size_t)p.held_words * 8, cudaHostAllocDefault);
+    if (e != cudaSuccess) { p.h_swap = nullptr; fail(err, errlen, "cudaHostAlloc(swap copy)", e); return false; }
+    return true;
+}
+
+// Free the card copy outright, so cudaMemGetInfo and nvidia-smi both show the
+// HBM coming back. Zeroing it would leave the memory allocated and prove less.
+bool swap_out(Prover& p, char* err, size_t errlen) {
+    if (!p.h_swap || p.swapped_out) return true;
+    cudaError_t e = cudaFree(p.d_buf);
+    if (e != cudaSuccess) { fail(err, errlen, "cudaFree(swap out)", e); return false; }
+    p.d_buf = nullptr;
+    p.swapped_out = true;
+    return true;
+}
+
+bool swap_in(Prover& p, double* ms, char* err, size_t errlen) {
+    if (ms) *ms = 0.0;
+    if (!p.h_swap || !p.swapped_out) return true;
+    auto t0 = std::chrono::steady_clock::now();
+    size_t bytes = (size_t)p.held_words * 8;
+    cudaError_t e = cudaMalloc((void**)&p.d_buf, bytes);
+    if (e != cudaSuccess) { p.d_buf = nullptr; fail(err, errlen, "cudaMalloc(swap in)", e); return false; }
+    e = cudaMemcpy(p.d_buf, p.h_swap, bytes, cudaMemcpyHostToDevice);
+    if (e != cudaSuccess) { fail(err, errlen, "cudaMemcpy(swap in)", e); return false; }
+    p.swapped_out = false;
+    if (ms) *ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     return true;
 }
 

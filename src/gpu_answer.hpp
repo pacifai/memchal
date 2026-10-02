@@ -61,7 +61,35 @@ struct Prover {
 
     void*     ev_start   = nullptr;   // cudaEvent_t, opaque here
     void*     ev_stop    = nullptr;
+
+    // prefetch cheat: answer in three passes instead of one. See answer().
+    bool      prefetch   = false;
+    uint64_t* d_pf_idx   = nullptr;   // the probe addresses the dry run listed
+    uint64_t* d_pf_val   = nullptr;   // the words fetched for them in one batch
+    uint32_t  pf_cap     = 0;
+
+    // swap cheat: a pinned host copy of the buffer, so the card copy can be
+    // freed between challenges and restored when one arrives.
+    void*     h_swap     = nullptr;
+    bool      swapped_out = false;
 };
+
+// The prefetch cheat. Turns on a three-pass answer: a dry run that lists the
+// probe addresses, one parallel batch that fetches those words, then the real
+// answer reading from the batch. Meant for a HostMapped buffer, where each
+// serial probe is a PCIe round trip and batching them is the whole gain. The
+// batch matches only when the addresses can be listed without reading the
+// data, which is what the dependent chain takes away; on a mismatch the answer
+// falls back to a direct read, so it stays correct either way.
+void enable_prefetch(Prover& p);
+
+// The swap cheat. Keeps a pinned host copy of the buffer, filled during the
+// upload, so swap_out() can free the card copy and swap_in() can restore it.
+// Call before the upload. Between the two calls the HBM is free for anything
+// else, which is the point of the cheat; answer() refuses while swapped out.
+bool enable_swap(Prover& p, char* err, size_t errlen);
+bool swap_out(Prover& p, char* err, size_t errlen);
+bool swap_in(Prover& p, double* ms, char* err, size_t errlen);
 
 // Pick a device and report what it is. Returns false if there is no usable GPU.
 bool select_device(int ordinal, char* name, size_t name_len, char* err, size_t errlen);
