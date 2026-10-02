@@ -83,6 +83,17 @@ honest prover plus all three adversaries ran end to end
 
 ## Later — the decision rule
 
+- [ ] **Understand offload to a neighbor GPU.** Every measurement so far ran on
+  one GPU, where the only place to hide data was host memory over PCIe. On a
+  multi-GPU server the GPUs are linked to each other directly (NVLink, through
+  NVSwitches), so a prover could keep part of the buffer in another GPU's
+  memory instead, which is much closer to local speed than host memory. Nothing in the
+  adversary taxonomy covers this yet. This is a direction to understand, not a
+  design: what the threat model should say about the other GPUs in the box,
+  and whether timing can separate it at all. *Done when:* the question is
+  written up well enough to decide whether it needs a decision record, an
+  experiment, or both.
+
 - [ ] **A decision rule with error rates.** Turn the harness's separations into an
   accept/reject classifier. *Done when:* it outputs a verdict given a response and a
   claimed configuration, with measured false-positive and false-negative rates.

@@ -197,6 +197,7 @@ $SSH 'bash /root/memchal/scripts/gpu_bridge_start.sh' || die "the bridge did not
 
 ssh -i "$SSH_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null -o ExitOnForwardFailure=yes \
+    -o ServerAliveInterval=30 -o ServerAliveCountMax=4 \
     -p "$PORT" -f -N -L "$LPORT:127.0.0.1:8777" "root@$HOST" || die "could not forward port $LPORT" 3
 sleep 3
 CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$LPORT/")
