@@ -75,7 +75,27 @@ struct Args {
     uint32_t verify_every = 1;      // check 1 in N answers; 1 = check all
     NonceMode nonce_mode = NonceMode::RANDOM; // --nonce sequential|random (random default)
     uint32_t gap_us = 0;            // --gap-us N: sleep N microseconds between challenges
+    bool gap_random = false;        // --gap-dist exp: draw each gap from an exponential
+                                    // with mean gap_us instead of sleeping exactly gap_us
 };
+
+// The swap defense. A fixed gap tells the prover when the next challenge will
+// arrive, so it can lend its memory out in between and load the buffer back
+// just in time. Exponential gaps are memoryless: however long the prover has
+// waited, the next challenge is as likely to come now as later, so no moment
+// is safe to be off the card. Draws come from a random_device-seeded generator
+// the prover never sees.
+static bool g_gap_random = false;
+
+static void gap_sleep(uint32_t gap_us) {
+    if (gap_us == 0) return;
+    if (!g_gap_random) { usleep(gap_us); return; }
+    static std::mt19937_64 rng{std::random_device{}()};
+    std::exponential_distribution<double> d(1.0 / (double)gap_us);
+    double us = d(rng);
+    if (us > 20.0 * gap_us) us = 20.0 * gap_us;   // bound the rare very long draw
+    usleep((useconds_t)us);
+}
 
 // ---------------------------------------------------------------------------
 // Live event stream (browser demo only)
@@ -154,6 +174,9 @@ static Args parse(int argc, char** argv) {
         else if (!strcmp(k, "--gap-us")) {
             a.gap_us = (uint32_t)strtoul(v, nullptr, 10);
         }
+        else if (!strcmp(k, "--gap-dist")) {
+            a.gap_random = !strcmp(v, "exp");
+        }
     }
     return a;
 }
@@ -164,7 +187,8 @@ static Args parse(int argc, char** argv) {
 // `chained` selects the data-dependent index path (see common.hpp; default on).
 // `nonce_mode` selects sequential or random/CSPRNG nonces (random is the default).
 // `gap_us` sleeps that many microseconds after recording each challenge latency
-// (simulates a periodic verifier; outside the timed window).
+// (simulates a periodic verifier; outside the timed window). With --gap-dist exp
+// it is the mean of an exponential draw instead; see gap_sleep().
 static void run_batch(int fd, const uint64_t* buf, uint64_t num_words,
                       uint32_t k, uint32_t lanes, uint32_t count,
                       uint64_t nonce_base, std::vector<double>* out_ns, uint64_t* errors,
@@ -278,7 +302,7 @@ static void run_batch(int fd, const uint64_t* buf, uint64_t num_words,
         // Gap: sleep AFTER recording latency, BEFORE the next challenge.
         // Simulates a periodic verifier that gives an attacker offline time.
         // This is strictly outside the timed window (measured above).
-        if (gap_us > 0) usleep(gap_us);
+        gap_sleep(gap_us);
     }
 }
 
@@ -308,9 +332,11 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    printf("[verifier] buffer=%.1f MiB k=%u lanes=%u n=%u warmup=%u host=%s:%u gen=%s chain=%s fold=%s nonce=%s gap_us=%u verify_every=%u\n",
+    g_gap_random = a.gap_random;
+    const char* gap_dist = a.gap_random ? "exp" : "fixed";
+    printf("[verifier] buffer=%.1f MiB k=%u lanes=%u n=%u warmup=%u host=%s:%u gen=%s chain=%s fold=%s nonce=%s gap_us=%u gap_dist=%s verify_every=%u\n",
            bytes / 1048576.0, a.k, a.lanes, a.n, a.warmup, a.host, a.port, gen_name, chain_name, a.tree ? "tree" : "sequential",
-           nonce_name, a.gap_us, a.verify_every);
+           nonce_name, a.gap_us, gap_dist, a.verify_every);
 
     // For random nonce mode: derive a 32-byte CSPRNG key from std::random_device.
     // The key is seeded fresh per run so the prover cannot predict future nonces
@@ -463,9 +489,10 @@ int main(int argc, char** argv) {
                     page, ncpu);
             fprintf(f, "  \"params\": {\"mb\": %.6g, \"k\": %u, \"lanes\": %u, \"n\": %u, "
                        "\"warmup\": %u, \"seed\": \"0x%llx\", \"host\": \"%s\", \"port\": %u, "
-                       "\"gen\": \"%s\", \"chain\": \"%s\", \"nonce\": \"%s\", \"gap_us\": %u",
+                       "\"gen\": \"%s\", \"chain\": \"%s\", \"nonce\": \"%s\", \"gap_us\": %u, "
+                       "\"gap_dist\": \"%s\"",
                     a.mb, a.k, a.lanes, a.n, a.warmup, (unsigned long long)a.seed, a.host, a.port,
-                    gen_name, chain_name, nonce_name, a.gap_us);
+                    gen_name, chain_name, nonce_name, a.gap_us, gap_dist);
             if (a.chained) {
                 // Stamp effective chain depth so readers know the latency-hardness factor.
                 fprintf(f, ", \"chain_depth\": %u", chain_depth);
