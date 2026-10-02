@@ -30,7 +30,16 @@
       <button id="stopBtn" class="chip" type="button">Stop</button>
     </section>
     <section class="block">
-      <h2 class="eyebrow">prover under test</h2>
+      <h2 class="eyebrow">presets</h2>
+      <div class="presets" id="presets"></div>
+      <p class="prose" id="presetHint"></p>
+      <dl class="expect" id="presetExpect"></dl>
+    </section>
+
+    <details class="adv" id="adv">
+      <summary class="block">settings <span class="badge" id="customBadge" hidden>modified</span></summary>
+    <section class="block">
+      <h2 class="eyebrow">prover</h2>
       <label class="field">
         <select id="mode">
           <option value="honest" selected>honest — cudaMalloc, verified</option>
@@ -83,6 +92,8 @@
           <select id="fold"><option value="tree" selected>tree (on card)</option><option value="sequential">sequential (on host)</option></select></label>
       </div>
     </section>
+
+    </details>
 
     <section class="block">
       <h2 class="eyebrow">baseline</h2>

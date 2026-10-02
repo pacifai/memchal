@@ -13,7 +13,8 @@ const el = {};
  'mb','k','lanes','n','warmup','gap','verify','geomHint','gen','chain','nonce','fold',
  'residency','resLegend','resBadges','timesplit','timeLegend','detect','latency','latLegend',
  'cSm','cTemp','cGbps','cErr','cardBadges','log','synthetic',
- 'baseText','baseBadges','clearBaseBtn','hist','clearHistBtn'].forEach(id => el[id] = $(id));
+ 'baseText','baseBadges','clearBaseBtn','hist','clearHistBtn',
+ 'presets','presetHint','presetExpect','adv','customBadge'].forEach(id => el[id] = $(id));
 
 const MODE_HINTS = {
   honest:   'cudaMalloc, then cudaPointerGetAttributes must report device memory. If it reports anything else the prover exits at startup, before serving any challenge.',
@@ -538,6 +539,82 @@ function syncControls() {
   markDirty();
 }
 
+// ── presets ─────────────────────────────────────────────────────────────────
+// One per configuration the project has actually measured, all at the H100
+// sweep's geometry, so a single honest run is the baseline for every one of
+// them. Each sets every control; the settings panel stays available for
+// anything else. `expect` quotes the H100 tree-fold sweep (one card, one
+// session), so it says what to look for, not what this run must produce.
+const SWEEP = { mb: 4096, k: 262144, lanes: 16384, warmup: 10, gap: 0, verify: 10,
+                gen: 'chacha', chain: 'dependent', nonce: 'random', fold: 'tree',
+                offload: 10, hog: 0, frac: 50, n: 200 };
+const PRESETS = [
+  { id: 'honest', name: 'honest', by: 'baseline', set: { mode: 'honest' },
+    hint: 'The whole buffer in HBM, allocated with cudaMalloc and verified. Run it first: it is the baseline every other preset is compared against.',
+    expect: [['answers', 'all correct'], ['speed', 'baseline']] },
+  { id: 'fake', name: 'fake', by: 'correctness', set: { mode: 'fake', frac: 50 },
+    hint: 'Holds half the buffer in HBM and makes up the other half. Fast, but its answers are wrong.',
+    expect: [['answers', '100% wrong'], ['speed', '~0.8× honest']] },
+  { id: 'uvm-fits', name: 'uvm, fits', by: 'not caught', set: { mode: 'uvm', hog: 0 },
+    hint: 'Managed memory with all of HBM free. The driver moves the whole buffer onto the card, so the data really is resident and passing is the correct result.',
+    expect: [['answers', 'all correct'], ['speed', '~0.85× honest']] },
+  { id: 'uvm-starved', name: 'uvm, starved', by: 'timing', set: { mode: 'uvm', hog: 12, n: 20, warmup: 2 },
+    hint: 'Managed memory with about 2.4 GiB of HBM left free under a 4 GiB buffer. Pages move back and forth on every challenge. About 3.5 s per challenge, so it runs 20.',
+    expect: [['answers', 'all correct'], ['speed', '~16,800× honest']] },
+  { id: 'zerocopy', name: 'zerocopy', by: 'timing', set: { mode: 'zerocopy', hog: 0 },
+    hint: 'The whole buffer in host RAM. Every read crosses PCIe.',
+    expect: [['answers', 'all correct'], ['speed', '~29× honest']] },
+  { id: 'partial-10', name: 'partial, 10%', by: 'timing', set: { mode: 'partial', offload: 10 },
+    hint: 'Every byte held, but the last 10% of the buffer sits in host RAM. Above the ~5% resolution, so it separates.',
+    expect: [['answers', 'all correct'], ['speed', '~1.7× honest']] },
+  { id: 'partial-2', name: 'partial, 2%', by: 'not caught', set: { mode: 'partial', offload: 2 },
+    hint: 'The last 2% of the buffer in host RAM. Below the ~5% resolution: the slowdown is inside the honest noise.',
+    expect: [['answers', 'all correct'], ['speed', '~1.1× honest, within noise']] },
+];
+const PRESET_IDS = ['mode', 'mb', 'k', 'lanes', 'n', 'warmup', 'gap', 'verify',
+                    'gen', 'chain', 'nonce', 'fold', 'offload', 'hog', 'frac'];
+let activePreset = null;
+const presetValues = (pr) => ({ ...SWEEP, ...pr.set });
+
+function applyPreset(pr) {
+  const v = presetValues(pr);
+  for (const id of PRESET_IDS) el[id].value = String(v[id]);
+  activePreset = pr;
+  syncControls();
+  renderBaseline();
+  renderPresets();
+}
+// A preset stays selected while every control still matches it. Touch one and
+// the run is no longer that preset, so the panel says so instead of implying it.
+function presetModified() {
+  if (!activePreset) return false;
+  const v = presetValues(activePreset);
+  return PRESET_IDS.some(id => String(el[id].value) !== String(v[id]));
+}
+function renderPresets() {
+  const mod = presetModified();
+  el.presets.innerHTML = '';
+  for (const pr of PRESETS) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'preset';
+    b.setAttribute('aria-pressed', String(activePreset === pr));
+    b.innerHTML = `<span>${pr.name}</span><span class="by">${pr.by}</span>`;
+    b.addEventListener('click', () => applyPreset(pr));
+    el.presets.appendChild(b);
+  }
+  el.customBadge.hidden = !mod;
+  if (!activePreset) {
+    el.presetHint.textContent = 'Pick a preset, or open settings to set every control yourself.';
+    el.presetExpect.innerHTML = '';
+    return;
+  }
+  el.presetHint.textContent = mod
+    ? `Started from “${activePreset.name}”; settings changed since, so the expectations below no longer apply.`
+    : activePreset.hint;
+  el.presetExpect.innerHTML = mod ? '' : [['caught by', activePreset.by], ...activePreset.expect]
+    .map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+}
+
 // ── events ──────────────────────────────────────────────────────────────────
 function handle(e) {
   if (e.synthetic) { state.synthetic = true; el.synthetic.classList.add('on'); }
@@ -653,12 +730,23 @@ el.clearBaseBtn.addEventListener('click', () => {
 el.clearHistBtn.addEventListener('click', () => {
   state.history = []; save(); renderHistory();
 });
-['input', 'change'].forEach(ev =>
+['input', 'change'].forEach(ev => {
   ['mode', 'offload', 'hog', 'frac', 'k', 'lanes', 'mb', 'chain']
-    .forEach(id => el[id].addEventListener(ev, () => { syncControls(); renderBaseline(); })));
+    .forEach(id => el[id].addEventListener(ev, () => { syncControls(); renderBaseline(); }));
+  PRESET_IDS.forEach(id => el[id].addEventListener(ev, renderPresets));
+});
 window.addEventListener('resize', markDirty);
 
+// Whether settings is open is a per-viewer convenience, so browser storage is
+// enough; the page opens closed when it is unavailable.
+const ADV_KEY = 'memchal.gpu.adv';
+try { el.adv.open = localStorage.getItem(ADV_KEY) === '1'; } catch (_) {}
+el.adv.addEventListener('toggle', () => {
+  try { localStorage.setItem(ADV_KEY, el.adv.open ? '1' : '0'); } catch (_) {}
+});
+
 load();
+applyPreset(PRESETS[0]);
 setInterval(pump, 40);
 setInterval(renderBaseline, 30000);   // the age readout, so a stale baseline says so
 syncControls();
