@@ -23,3 +23,7 @@ __pycache__/
 
 # GPU demo state — which pod this checkout rented (gpu_demo_up.sh)
 /.gpu_demo_state
+# macOS Finder metadata
+.DS_Store
+# personal reading material, kept beside the repo but not part of it
+/Claude outputs/
