@@ -60,6 +60,23 @@ echo "pod:        $POD_ID"
 echo "created:    ${CREATED:-unknown}"
 echo "local port: ${LPORT:-8777}"
 
+# The pod may already have terminated itself (gpu_watchdog.sh or the boot-time
+# hard cap). Then there is nothing to pull or release: close the tunnel and
+# forget it, rather than reporting an unreachable pod that no longer bills.
+if [ -n "${RUNPOD_API_KEY:-}" ]; then
+  GONE=$(curl -sS -o /dev/null -w '%{http_code}' "$API/pods/$POD_ID" \
+           -H "Authorization: Bearer $RUNPOD_API_KEY" 2>/dev/null)
+  if [ "$GONE" = "404" ]; then
+    say "pod"
+    echo "  $POD_ID no longer exists — it terminated itself or was released elsewhere"
+    PIDS=$(lsof -ti:"${LPORT:-8777}" 2>/dev/null)
+    [ -n "$PIDS" ] && echo "$PIDS" | xargs kill 2>/dev/null
+    rm -f "$STATE"
+    echo "  tunnel closed, state cleared. Results not pulled earlier are gone."
+    exit 0
+  fi
+fi
+
 SSH=""
 if [ -n "${SSH_HOST:-}" ] && [ -n "${SSH_PORT:-}" ]; then
   SSH="ssh -i ${SSH_KEY:-$HOME/.ssh/neta-pacifai-runpod} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -p $SSH_PORT root@$SSH_HOST"

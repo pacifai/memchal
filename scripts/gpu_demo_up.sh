@@ -20,6 +20,15 @@
 #   bash scripts/gpu_demo_up.sh --gpu "NVIDIA A40"   # a cheaper card
 #   bash scripts/gpu_demo_up.sh --port 8888          # a different local port
 #   bash scripts/gpu_demo_up.sh --yes                # skip the price prompt
+#   bash scripts/gpu_demo_up.sh --idle-min 30 --max-hours 3
+#
+# The pod guards its own bill, so a closed laptop cannot leave it running:
+#   --max-hours H  the pod terminates itself H hours after boot, whatever it is
+#                  doing (default 6). Armed in the boot command, before any
+#                  other step, so it holds even if this script dies halfway.
+#   --idle-min M   the pod terminates itself after M minutes with no demo run
+#                  and no verifier running (default 90). An open tunnel does
+#                  not count as use. See scripts/gpu_watchdog.sh.
 #
 # Exit: 0 the demo is up, 1 a prerequisite is missing, 2 renting failed,
 #       3 the box is unusable or the gate failed.
@@ -34,6 +43,8 @@ LPORT=8777
 CLOUD=SECURE
 IMAGE="nvidia/cuda:12.8.0-devel-ubuntu22.04"
 ASSUME_YES=0
+MAX_HOURS=6
+IDLE_MIN=90
 SSH_KEY="${MEMCHAL_SSH_KEY:-$HOME/.ssh/neta-pacifai-runpod}"
 
 while [ $# -gt 0 ]; do
@@ -45,6 +56,8 @@ while [ $# -gt 0 ]; do
     --image) IMAGE="$2"; shift 2 ;;
     --key)  SSH_KEY="$2"; shift 2 ;;
     --yes|-y) ASSUME_YES=1; shift ;;
+    --max-hours) MAX_HOURS="$2"; shift 2 ;;
+    --idle-min)  IDLE_MIN="$2"; shift 2 ;;
     -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 1 ;;
   esac
@@ -133,7 +146,16 @@ fi
 
 # --- 2. rent ----------------------------------------------------------------
 say "renting"
-BOOT='apt-get update -q >/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server rsync git python3 build-essential >/dev/null 2>&1; mkdir -p /run/sshd /root/.ssh; echo "$PUBLIC_KEY" > /root/.ssh/authorized_keys; chmod 700 /root/.ssh; chmod 600 /root/.ssh/authorized_keys; echo "export PATH=/usr/local/cuda/bin:\$PATH" >> /root/.bashrc; touch /root/.ssh_ready; /usr/sbin/sshd -D -p 22'
+case "$MAX_HOURS" in ''|*[!0-9.]*) die "--max-hours takes a number of hours, such as 6 or 0.5" 1 ;; esac
+CAP_S=$(awk -v h="$MAX_HOURS" 'BEGIN { printf "%d", h * 3600 }')
+case "$IDLE_MIN"  in ''|*[!0-9]*) die "--idle-min takes a whole number of minutes" 1 ;; esac
+# The hard cap runs first in the boot command, so it is armed before anything
+# else can fail. It uses the pod-scoped key and pod id RunPod puts in every
+# pod's environment; the single quotes keep them unexpanded until the pod.
+# runpodctl is RunPod's documented way for a pod to act on itself; the curl
+# calls are a fallback for an image where it is missing.
+CAP='(sleep '"$CAP_S"'; echo "hard cap reached" > /root/watchdog.cap; runpodctl pod delete $RUNPOD_POD_ID; for u in https://rest.runpod.io/v1/pods/$RUNPOD_POD_ID https://api.runpod.io/v2/pods/$RUNPOD_POD_ID; do curl -sS -o /dev/null -X DELETE "$u" -H "Authorization: Bearer $RUNPOD_API_KEY"; done) > /dev/null 2>&1 &'
+BOOT=$CAP' apt-get update -q >/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server rsync git python3 build-essential curl >/dev/null 2>&1; mkdir -p /run/sshd /root/.ssh; echo "$PUBLIC_KEY" > /root/.ssh/authorized_keys; chmod 700 /root/.ssh; chmod 600 /root/.ssh/authorized_keys; echo "export PATH=/usr/local/cuda/bin:\$PATH" >> /root/.bashrc; touch /root/.ssh_ready; /usr/sbin/sshd -D -p 22'
 BODY=$(python3 -c 'import json,sys
 print(json.dumps({"name":"memchal-demo","image":sys.argv[1],"gpu":{"id":sys.argv[2]},
  "disk":int(sys.argv[3]),"ports":["22/tcp"],"cloud":sys.argv[4],"startSsh":True,
@@ -195,6 +217,18 @@ say "starting the demo"
 # stopping and starting the bridge in one ssh command kills itself.
 $SSH 'bash /root/memchal/scripts/gpu_bridge_start.sh' || die "the bridge did not start" 3
 
+say "arming the idle watchdog"
+# One ssh call, and setsid -f so the watchdog leaves this session at once.
+# Backgrounding it with `&` instead left a subshell holding the ssh channel,
+# and bring-up hung on this step.
+WD=$($SSH "cd /root/memchal && bash scripts/gpu_watchdog.sh --check && setsid -f bash scripts/gpu_watchdog.sh $IDLE_MIN > /root/watchdog.log 2>&1 < /dev/null" 2>/dev/null)
+if [ $? -eq 0 ]; then
+  echo "$WD; terminates after $IDLE_MIN idle minutes, or $MAX_HOURS h after boot"
+else
+  echo "WARNING: ${WD:-the watchdog check did not answer}"
+  echo "The pod cannot terminate itself. Run gpu_demo_down.sh when you are done."
+fi
+
 ssh -i "$SSH_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null -o ExitOnForwardFailure=yes \
     -o ServerAliveInterval=30 -o ServerAliveCountMax=4 \
@@ -212,4 +246,5 @@ cat <<EOF
 
   pod $POD_ID is billing until you run:
       bash scripts/gpu_demo_down.sh
+  or until it terminates itself: $IDLE_MIN idle minutes, or $MAX_HOURS h after boot.
 EOF
