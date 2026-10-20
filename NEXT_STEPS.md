@@ -36,11 +36,34 @@ multiply the per-challenge cost — that cost is inescapable and accepted either
   `partial-recompute` mode) loses against it, pinned by a known-answer test and an
   invariant, and its TMTO curve backs the cost parameters chosen in ADR 0007.
 
-> Not in scope, noted for the future: **challenging the weights directly** (probe a
-> function of the weights the prover already holds for inference) would avoid a
-> separate buffer entirely, but it needs the provider to expose or cooperate on the
-> weights — the kind of friction we're trying to avoid. Revisit only if that
-> constraint changes.
+The weights themselves are the other half: memory the workload already uses, which
+filler then doesn't have to cover.
+[ADR 0009](docs/decisions/0009-challenge-the-weights-in-place.md) (proposed) decides
+to challenge them where the engine holds them. The CPU path ships (manifest, segment
+table, no-upload handshake); the rest needs a GPU.
+
+- [ ] **The GPU prover inside vLLM.** A plugin package of its own, with its own
+  `vllm.general_plugins` entry point. It wraps `Worker.load_model` to collect the weight
+  tensors, refuses any that aren't device memory, builds a `Segments` table on the
+  device, and serves challenges from a thread on its own stream, starting only after
+  warm-up. The kernel is `k_lane` with a `SegLoad` loader. *Done when:* the GPU
+  known-answer test passes over a segmented buffer, and on one H100 a vLLM serving the
+  int8 Llama 3.1 8B answers a `--weights ... --upload no` verifier with zero errors.
+- [ ] **Check that vLLM holds the checkpoint's bytes.** The manifest assumes each int8
+  tensor sits in memory exactly as stored, stacked as vLLM stacks it. *Done when:* a
+  start-up check compares every collected tensor with its manifest pieces and reports
+  each mismatch by name, and the int8 tensors all match. Widen `--dtype` only for the
+  dtypes that pass.
+- [ ] **Honest timing while vLLM serves.** The challenge kernel shares the card with
+  inference, so the honest distribution under load is what a threshold must clear.
+  *Done when:* the resolution sweep's offload points are measured against an honest
+  baseline taken under a serving load, and vLLM's own `--cpu-offload-gb` is measured as
+  a cheat.
+- [ ] **How compressible the weights are.** A prover that stores the weights compressed
+  or sparse and rebuilds a probed word fast enough passes the challenge with less memory
+  than the dense size. Filler is incompressible; weights aren't. *Done when:* the saving
+  a prover can get this way, and the cost of rebuilding a probed word, are measured for
+  the int8 Llama, and ADR 0009 states the bound.
 
 ## Now — what the first GPU session surfaced
 

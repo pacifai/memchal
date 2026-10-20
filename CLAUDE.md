@@ -104,6 +104,16 @@ curve.
 - `src/cheating_prover_cuda.cpp` — the GPU adversaries: `honest`, `fake`, `uvm`,
   `zerocopy`. It always claims `locked=true`, because nothing stops a real one
   doing the same. `--hog` occupies HBM so a managed buffer cannot fit.
+- `src/segments.hpp` — a buffer made of separate pieces: a `Segments` table and
+  its `SegLoad` loader, so the frozen math reads tensors where an engine keeps them.
+  Pure, like `challenge.hpp`, so it compiles for the device too.
+- `src/weights.hpp` — the weights manifest (which byte ranges of a checkpoint make
+  up the buffer), the read-only checkpoint maps the verifier uses as its reference,
+  and the host-side owner of a `Segments` table. `prover --weights` and
+  `verifier --weights ... --upload no` use it
+  ([ADR 0009](docs/decisions/0009-challenge-the-weights-in-place.md)).
+- `scripts/weights_manifest.py` — writes a manifest from a safetensors checkpoint,
+  stacking projections the way vLLM does. Reads headers only; copies nothing.
 - `scripts/gpu_pod_setup.sh` — the first command on a rented box: records the
   machine, refuses boxes whose numbers would be meaningless, settles whether
   clocks can be locked and whether RDMA exists, then builds and runs the gate.
@@ -121,7 +131,10 @@ curve.
 - `tests/` — `known_answer.cpp` (pins the math), `known_answer_gpu.cpp` (checks
   the CUDA kernel against those **same pinned constants**, not against a fresh
   CPU answer — two implementations agreeing only proves they drifted together),
-  and `run_tests.sh` (the CPU known-answer test plus invariants).
+  `segments_test.cpp` (a segment table reads exactly the flat buffer, so every
+  answer matches), `test_weights_manifest.py` and `make_checkpoint.py` (the
+  manifest, on a small synthetic checkpoint), and `run_tests.sh` (the CPU
+  known-answer test plus invariants, including the weights cases end to end).
 
 ## Build, run, test
 

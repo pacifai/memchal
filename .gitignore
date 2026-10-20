@@ -25,3 +25,4 @@ __pycache__/
 /.gpu_demo_state
 # macOS Finder metadata
 .DS_Store
+/tests/segments_test

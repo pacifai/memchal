@@ -2,10 +2,16 @@
 // then issues nonce challenges and times each round trip. Because it holds its
 // own copy, it recomputes every answer locally and checks correctness.
 //
+// With --weights the buffer is instead a model's weights, described by a
+// manifest (weights.hpp): the reference copy is the checkpoint itself, mapped
+// read-only, and with --upload no nothing is sent because the prover already
+// holds the weights for its own work.
+//
 // The latency distribution is the actual result: an honest prover with the data
 // resident in fast memory shows a low, tight profile; a prover that dropped the
 // data, recomputes it, or let it swap to disk shows misses / a fat tail / errors.
 #include "common.hpp"
+#include "weights.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -77,6 +83,9 @@ struct Args {
     uint32_t gap_us = 0;            // --gap-us N: sleep N microseconds between challenges
     bool gap_random = false;        // --gap-dist exp: draw each gap from an exponential
                                     // with mean gap_us instead of sleeping exactly gap_us
+    const char* weights = nullptr;  // --weights MANIFEST: challenge these bytes, not a
+                                    // generated buffer; --mb and --gen are ignored
+    bool upload = true;             // --upload no: the prover already holds the buffer
 };
 
 // The swap defense. A fixed gap tells the prover when the next challenge will
@@ -177,6 +186,8 @@ static Args parse(int argc, char** argv) {
         else if (!strcmp(k, "--gap-dist")) {
             a.gap_random = !strcmp(v, "exp");
         }
+        else if (!strcmp(k, "--weights")) a.weights = v;
+        else if (!strcmp(k, "--upload")) a.upload = strcmp(v, "no") != 0;
     }
     return a;
 }
@@ -189,7 +200,8 @@ static Args parse(int argc, char** argv) {
 // `gap_us` sleeps that many microseconds after recording each challenge latency
 // (simulates a periodic verifier; outside the timed window). With --gap-dist exp
 // it is the mean of an exponential draw instead; see gap_sleep().
-static void run_batch(int fd, const uint64_t* buf, uint64_t num_words,
+template <typename Load>
+static void run_batch(int fd, const Load& load, uint64_t num_words,
                       uint32_t k, uint32_t lanes, uint32_t count,
                       uint64_t nonce_base, std::vector<double>* out_ns, uint64_t* errors,
                       Stream* st = nullptr, const char* phase = "r", uint64_t* seq = nullptr,
@@ -248,9 +260,9 @@ static void run_batch(int fd, const uint64_t* buf, uint64_t num_words,
             std::fill(st->pages.begin(), st->pages.end(), (uint8_t)0);
             uint8_t* pg = st->pages.data();
             uint64_t pw = st->page_words;
-            auto probe = [buf, pg, pw](uint64_t j) {
+            auto probe = [&load, pg, pw](uint64_t j) {
                 pg[j / pw] = 1;
-                return buf[j];
+                return load(j);
             };
             if (tree) {
                 uint32_t nl = ch.lanes ? ch.lanes : 1u;
@@ -261,12 +273,14 @@ static void run_batch(int fd, const uint64_t* buf, uint64_t num_words,
                 expect = answer_challenge_t(probe, num_words, ch.nonce, ch.k, ch.lanes, chained);
             }
         } else if (tree) {
+            // answer_challenge_tree() with the loader passed through: the same
+            // lanes and the same fold.
             uint32_t nl = ch.lanes ? ch.lanes : 1u;
             std::vector<uint64_t> scratch(nl);
-            expect = answer_challenge_tree(buf, num_words, ch.nonce, ch.k, nl, chained,
-                                           scratch.data());
+            answer_lanes_t(load, num_words, ch.nonce, ch.k, nl, chained, scratch.data());
+            expect = tree_fold(scratch.data(), nl, ch.nonce, ch.k);
         } else {
-            expect = answer_challenge(buf, num_words, ch.nonce, ch.k, ch.lanes, chained);
+            expect = answer_challenge_t(load, num_words, ch.nonce, ch.k, ch.lanes, chained);
         }
 
         auto t0 = Clock::now();
@@ -311,9 +325,30 @@ int main(int argc, char** argv) {
 
     size_t bytes = (size_t)llround(a.mb * 1048576.0);
     bytes = (bytes + 7) & ~size_t(7);
+
+    // With --weights the manifest fixes the size, and the reference copy is the
+    // checkpoint where it sits on disk.
+    Manifest manifest;
+    MappedFiles files;
+    SegmentTable table;
+    if (a.weights) {
+        char err[512] = {0};
+        if (!read_manifest(a.weights, &manifest, err, sizeof err) ||
+            !map_files(manifest, &files, err, sizeof err)) {
+            fprintf(stderr, "[verifier] ERROR: %s\n", err);
+            return 1;
+        }
+        if (!table_over_files(manifest, files, &table)) {
+            fprintf(stderr, "[verifier] ERROR: cannot build a table over %s\n", a.weights);
+            return 1;
+        }
+        bytes = (size_t)manifest.total_bytes;
+        a.mb = (double)bytes / 1048576.0;
+    }
     uint64_t num_words = bytes / 8;
 
-    const char* gen_name   = (a.gen == Gen::CHACHA20) ? "chacha20" : "splitmix64";
+    const char* gen_name   = a.weights ? "none" : (a.gen == Gen::CHACHA20) ? "chacha20" : "splitmix64";
+    const char* source     = a.weights ? "weights" : "generated";
     const char* chain_name = a.chained ? "dependent" : "independent";
     const char* nonce_name = (a.nonce_mode == NonceMode::RANDOM) ? "random" : "sequential";
 
@@ -337,6 +372,9 @@ int main(int argc, char** argv) {
     printf("[verifier] buffer=%.1f MiB k=%u lanes=%u n=%u warmup=%u host=%s:%u gen=%s chain=%s fold=%s nonce=%s gap_us=%u gap_dist=%s verify_every=%u\n",
            bytes / 1048576.0, a.k, a.lanes, a.n, a.warmup, a.host, a.port, gen_name, chain_name, a.tree ? "tree" : "sequential",
            nonce_name, a.gap_us, gap_dist, a.verify_every);
+    if (a.weights)
+        printf("[verifier] buffer is the weights in %s: %zu pieces, %zu segments, upload=%s\n",
+               a.weights, manifest.pieces.size(), segment_runs(manifest).size(), a.upload ? "yes" : "no");
 
     // For random nonce mode: derive a 32-byte CSPRNG key from std::random_device.
     // The key is seeded fresh per run so the prover cannot predict future nonces
@@ -370,29 +408,46 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Generate our reference copy.
-    uint64_t* buf = (uint64_t*)malloc(bytes);
-    if (!buf) { fprintf(stderr, "malloc failed\n"); return 1; }
-    if (a.gen == Gen::CHACHA20) {
-        fill_buffer_chacha(buf, num_words, chacha_buf_key);
-    } else {
-        fill_buffer(buf, num_words, a.seed, a.gen);
+    // Generate our reference copy, unless the checkpoint is the reference.
+    uint64_t* buf = nullptr;
+    if (!a.weights) {
+        buf = (uint64_t*)malloc(bytes);
+        if (!buf) { fprintf(stderr, "malloc failed\n"); return 1; }
+        if (a.gen == Gen::CHACHA20) {
+            fill_buffer_chacha(buf, num_words, chacha_buf_key);
+        } else {
+            fill_buffer(buf, num_words, a.seed, a.gen);
+        }
     }
 
     int fd = connect_to(a.host, a.port);
 
-    // Upload.
-    Hello hello{ kMagic, (uint64_t)bytes, 1, 0 };
+    // Upload, unless the prover already holds the buffer.
+    Hello hello{ kMagic, (uint64_t)bytes, 1, a.upload ? 0u : kHelloResident };
     if (!send_all(fd, &hello, sizeof(hello))) { fprintf(stderr, "hello send fail\n"); return 1; }
-    auto up0 = Clock::now();
-    if (!send_all(fd, buf, bytes)) { fprintf(stderr, "data send fail\n"); return 1; }
-    auto up1 = Clock::now();
-    double up_s = std::chrono::duration<double>(up1 - up0).count();
-    printf("[verifier] uploaded in %.3f s (%.2f GiB/s)\n", up_s, bytes / 1073741824.0 / up_s);
+    double up_s = 0.0;
+    if (a.upload) {
+        auto up0 = Clock::now();
+        bool sent = true;
+        if (a.weights) {
+            for (size_t s = 0; sent && s < table.base.size(); ++s)
+                sent = send_all(fd, table.base[s], (size_t)(table.start[s + 1] - table.start[s]) * 8);
+        } else {
+            sent = send_all(fd, buf, bytes);
+        }
+        if (!sent) { fprintf(stderr, "data send fail\n"); return 1; }
+        auto up1 = Clock::now();
+        up_s = std::chrono::duration<double>(up1 - up0).count();
+        printf("[verifier] uploaded in %.3f s (%.2f GiB/s)\n", up_s, bytes / 1073741824.0 / up_s);
+    } else {
+        printf("[verifier] no upload: the prover holds the buffer\n");
+    }
 
     Ready ready{};
     if (!recv_all(fd, &ready, sizeof(ready)) || ready.magic != kMagic) {
-        fprintf(stderr, "no/invalid ready\n"); return 1;
+        if (a.upload) fprintf(stderr, "no/invalid ready\n");
+        else fprintf(stderr, "[verifier] ERROR: the prover refused: it holds no buffer of %zu bytes\n", bytes);
+        return 1;
     }
     printf("[verifier] prover memory %s\n", ready.locked ? "LOCKED" : "not locked");
 
@@ -424,21 +479,25 @@ int main(int argc, char** argv) {
     uint64_t seq = 0;
     uint64_t checked = 0;
 
-    // Warmup (fault in pages, warm caches/branch predictors) — not measured.
-    uint64_t werr = 0;
-    run_batch(fd, buf, num_words, a.k, a.lanes, a.warmup, base, nullptr, &werr,
-              stream.f ? &stream : nullptr, "w", &seq, a.chained, a.tree, a.verify_every, &checked,
-              a.nonce_mode, a.gap_us,
-              (a.nonce_mode == NonceMode::RANDOM) ? cc20_key : nullptr, &cc20_ctr);
-    base += a.warmup;
-
-    // Measured run.
     std::vector<double> lat; lat.reserve(a.n);
     uint64_t errors = 0;
-    run_batch(fd, buf, num_words, a.k, a.lanes, a.n, base, &lat, &errors,
-              stream.f ? &stream : nullptr, "r", &seq, a.chained, a.tree, a.verify_every, &checked,
-              a.nonce_mode, a.gap_us,
-              (a.nonce_mode == NonceMode::RANDOM) ? cc20_key : nullptr, &cc20_ctr);
+    auto batches = [&](const auto& load) {
+        // Warmup (fault in pages, warm caches/branch predictors) — not measured.
+        uint64_t werr = 0;
+        run_batch(fd, load, num_words, a.k, a.lanes, a.warmup, base, nullptr, &werr,
+                  stream.f ? &stream : nullptr, "w", &seq, a.chained, a.tree, a.verify_every, &checked,
+                  a.nonce_mode, a.gap_us,
+                  (a.nonce_mode == NonceMode::RANDOM) ? cc20_key : nullptr, &cc20_ctr);
+        base += a.warmup;
+
+        // Measured run.
+        run_batch(fd, load, num_words, a.k, a.lanes, a.n, base, &lat, &errors,
+                  stream.f ? &stream : nullptr, "r", &seq, a.chained, a.tree, a.verify_every, &checked,
+                  a.nonce_mode, a.gap_us,
+                  (a.nonce_mode == NonceMode::RANDOM) ? cc20_key : nullptr, &cc20_ctr);
+    };
+    if (a.weights) batches(SegLoad{table.view()});
+    else           batches(BufLoad{buf});
 
     // Stats.
     std::vector<double> s = lat; std::sort(s.begin(), s.end());
@@ -490,9 +549,10 @@ int main(int argc, char** argv) {
             fprintf(f, "  \"params\": {\"mb\": %.6g, \"k\": %u, \"lanes\": %u, \"n\": %u, "
                        "\"warmup\": %u, \"seed\": \"0x%llx\", \"host\": \"%s\", \"port\": %u, "
                        "\"gen\": \"%s\", \"chain\": \"%s\", \"nonce\": \"%s\", \"gap_us\": %u, "
-                       "\"gap_dist\": \"%s\"",
+                       "\"gap_dist\": \"%s\", \"source\": \"%s\", \"upload\": %s",
                     a.mb, a.k, a.lanes, a.n, a.warmup, (unsigned long long)a.seed, a.host, a.port,
-                    gen_name, chain_name, nonce_name, a.gap_us, gap_dist);
+                    gen_name, chain_name, nonce_name, a.gap_us, gap_dist, source,
+                    a.upload ? "true" : "false");
             if (a.chained) {
                 // Stamp effective chain depth so readers know the latency-hardness factor.
                 fprintf(f, ", \"chain_depth\": %u", chain_depth);

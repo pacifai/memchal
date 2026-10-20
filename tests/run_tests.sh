@@ -424,6 +424,87 @@ else
     echo "  SKIP: node not available in this environment"
 fi
 
+# ---------------------------------------------------------------------------
+# Step 6: a buffer the prover already holds — model weights.
+#
+# The buffer is a checkpoint's tensors laid end to end (weights.hpp), read
+# through a Segments table over separate pieces (segments.hpp). The table must
+# read exactly the flat buffer; the manifest must say what vLLM holds; and end
+# to end, a prover holding the weights answers with no upload, one missing a
+# tensor answers wrong, and one holding nothing is refused.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== WEIGHTS: a buffer the prover already holds ==="
+
+g++ -O3 -std=c++17 -I/work/src -o tests/segments_test tests/segments_test.cpp
+if tests/segments_test; then
+    pass "segments: the table reads exactly the flat buffer"
+else
+    fail "segments: the table reads exactly the flat buffer"
+fi
+
+if python3 tests/test_weights_manifest.py 2>/tmp/manifest_test.log; then
+    pass "manifest: pieces, stacking, and refusals"
+else
+    cat /tmp/manifest_test.log
+    fail "manifest: pieces, stacking, and refusals"
+fi
+
+WT=/tmp/wt
+rm -rf "$WT"
+python3 tests/make_checkpoint.py "$WT/good"
+python3 tests/make_checkpoint.py "$WT/bad" --zero model.layers.1.mlp.up_proj.weight
+python3 scripts/weights_manifest.py "$WT/good.weights" "$WT"/good/*.safetensors >/dev/null
+python3 scripts/weights_manifest.py "$WT/bad.weights" "$WT"/bad/*.safetensors >/dev/null
+
+# weights_case <name> <port> <errors_ok_expr> <prover args> -- <extra verifier args>
+# The verifier always challenges the good checkpoint.
+weights_case() {
+    local name="$1" port="$2" expr="$3"
+    shift 3
+    local prover_args=()
+    while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do prover_args+=("$1"); shift; done
+    [ "$#" -gt 0 ] && shift
+    echo ""
+    echo "--- WEIGHTS: $name ---"
+    ./prover "${prover_args[@]}" "$port" >/tmp/w_server_${name}.log 2>&1 &
+    local pid=$!
+    wait_for_port "$port"
+    local ok=1
+    rm -f "$JSON"
+    ./verifier --port "$port" --weights "$WT/good.weights" --k 2048 --lanes 16 --n 100 --warmup 20 \
+        --csv /dev/null --json "$JSON" "$@" >/tmp/w_verifier_${name}.log 2>&1 || ok=0
+    kill -9 "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    if [ "$expr" = "refused" ]; then
+        if [ "$ok" -eq 0 ] && grep -q "refused" /tmp/w_verifier_${name}.log; then
+            pass "WEIGHTS $name"
+        else
+            cat /tmp/w_verifier_${name}.log
+            fail "WEIGHTS $name"
+        fi
+        return
+    fi
+    if [ "$ok" -ne 1 ]; then
+        cat /tmp/w_server_${name}.log /tmp/w_verifier_${name}.log || true
+        fail "WEIGHTS $name"
+        return
+    fi
+    local errors samples
+    read -r errors samples <<< "$(read_json)"
+    if python3 -c "e, s = $errors, $samples; raise SystemExit(0 if ($expr) else 1)"; then
+        pass "WEIGHTS $name (errors=$errors/samples=$samples)"
+    else
+        fail "WEIGHTS $name (errors=$errors/samples=$samples; expected $expr)"
+    fi
+}
+
+weights_case resident      9161 "e == 0 and s == 100" --weights "$WT/good.weights" -- --upload no
+weights_case resident-tree 9162 "e == 0 and s == 100" --weights "$WT/good.weights" -- --upload no --fold tree
+weights_case missing-tensor 9163 "e == s and s == 100" --weights "$WT/bad.weights" -- --upload no
+weights_case uploaded      9164 "e == 0 and s == 100" -- --upload yes
+weights_case holds-nothing 9165 refused -- --upload no
+
 # Final summary
 # ---------------------------------------------------------------------------
 echo ""

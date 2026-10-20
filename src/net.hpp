@@ -30,6 +30,15 @@ constexpr uint32_t kFlagChained   = 2u;
 // carries its own known-answer vectors. See tree_fold() in challenge.hpp.
 constexpr uint32_t kFlagTreeFold  = 4u;
 
+// Hello.flags: the prover already holds the buffer — a model's weights, say,
+// which it keeps for its own work — so no upload follows the Hello. The
+// prover answers Ready only if what it holds is buffer_bytes long, and closes
+// the connection otherwise. What the buffer *is* both sides take from the same
+// manifest (weights.hpp); a prover holding other bytes of the right length
+// gives wrong answers, which correctness catches. Older provers ignore the
+// flag and wait for an upload that never comes.
+constexpr uint32_t kHelloResident = 1u;
+
 // Minimum effective chain depth (k / lanes) required when --chain dependent.
 // At depth D, an attacker can pipeline across lanes and achieve ~1/D of the
 // latency-hardness compared to a fully serial chain.  Below this floor the

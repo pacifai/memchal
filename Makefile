@@ -21,10 +21,10 @@ CUDA_LIBS ?= -L$(CUDA_HOME)/lib64 -lcudart
 
 all: prover verifier cheating_prover
 
-prover: src/prover.cpp src/common.hpp src/challenge.hpp src/net.hpp
+prover: src/prover.cpp src/common.hpp src/challenge.hpp src/net.hpp src/segments.hpp src/weights.hpp
 	$(CXX) $(CXXFLAGS) -o $@ src/prover.cpp
 
-verifier: src/verifier.cpp src/common.hpp src/challenge.hpp src/net.hpp
+verifier: src/verifier.cpp src/common.hpp src/challenge.hpp src/net.hpp src/segments.hpp src/weights.hpp
 	$(CXX) $(CXXFLAGS) -o $@ src/verifier.cpp
 
 cheating_prover: src/cheating_prover.cpp src/common.hpp src/challenge.hpp src/net.hpp
@@ -59,7 +59,7 @@ gpu-check:
 	  || echo "nvidia-smi: not found (no driver visible)"
 
 clean:
-	rm -f prover verifier cheating_prover tests/known_answer \
+	rm -f prover verifier cheating_prover tests/known_answer tests/segments_test \
 	      prover_cuda cheating_prover_cuda tests/known_answer_gpu gpu_answer.o
 
 .PHONY: all gpu gpu-check clean

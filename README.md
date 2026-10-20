@@ -295,6 +295,37 @@ where the CPU page shows a page map — there is no GPU `mincore()`, so per-page
 residency simply is not available — and puts SM clock, temperature, and any
 active throttle reason next to every measurement.
 
+## Challenging a model's weights
+
+Filler proves the memory it occupies isn't free for anything else. A model's weights
+are memory the workload already uses, so proving *they* are resident accounts for that
+part of the card at no extra cost. [ADR 0009](docs/decisions/0009-challenge-the-weights-in-place.md)
+(proposed) has the design; the CPU path runs today.
+
+The buffer is the engine's weight tensors laid end to end, in name order, each the way
+the engine holds it. `scripts/weights_manifest.py` lists those bytes as ranges of a
+safetensors checkpoint, stacking `q/k/v` and `gate/up` the way vLLM does, without
+copying anything. Both sides read the manifest: the verifier maps the checkpoint as its
+reference copy, and the prover reads each tensor into its own allocation, the way an
+engine keeps them. A `Segments` table (`src/segments.hpp`) lets the frozen challenge
+math read the separate pieces as one buffer. With `--upload no`, nothing is sent: the
+Hello says the prover already holds the buffer.
+
+```bash
+python3 scripts/weights_manifest.py data/llama.weights model-*.safetensors
+./prover --weights data/llama.weights 9099 &
+./verifier --weights data/llama.weights --upload no --k 262144 --lanes 16384 --fold tree
+```
+
+The tests run this end to end on a small synthetic checkpoint: a prover holding the
+weights answers correctly with no upload, one with a tensor zeroed answers wrong on
+every challenge, and one holding nothing is refused.
+
+What it doesn't show: that the weights are stored as dense checkpoint bytes. A prover
+that keeps them compressed or sparse, and rebuilds a probed word fast enough, passes
+with less memory. Measuring that is on the roadmap. The GPU prover, a vLLM plugin that
+reads the tensors where vLLM holds them, is not built yet.
+
 ## Learn more
 
 - [`CLAUDE.md`](CLAUDE.md) — orientation for anyone (human or agent) working in the
