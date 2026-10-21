@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "memchal-vllm"
+version = "0.1.0"
+description = "Answer memchal's memory challenges over a model's weights where vLLM holds them"
+requires-python = ">=3.10"
+# vLLM and torch are deliberately not listed: the plugin runs inside whatever
+# vLLM is installed, and pinning one here would let pip replace it.
+dependencies = []
+
+[project.entry-points."vllm.general_plugins"]
+memchal_weights = "memchal_vllm:register"
+
+[tool.setuptools]
+packages = ["memchal_vllm"]

@@ -15,13 +15,22 @@
 // prover cannot fool itself into publishing an unpinned baseline. Proving
 // residency to someone else is the timing detector's job, not this check's.
 //
+// --weights MANIFEST holds a model's weights instead: every segment the
+// manifest lists in its own cudaMalloc, the way an inference engine holds each
+// tensor, attached through a Segments table (gpu::attach) and served with no
+// upload (gpu_resident.hpp). It is the baseline for the engine's own prover,
+// and the attached path with no engine in the way.
+//
 // Sockets live here; the kernel lives in gpu_answer.cu. Nothing in this file
 // includes CUDA headers, and nothing in that file includes POSIX ones.
 #include "common.hpp"
 #include "gpu_answer.hpp"
+#include "gpu_resident.hpp"
+#include "weights.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 using namespace mc;
 
@@ -29,6 +38,55 @@ static bool     g_allow_unlocked = false;
 static int      g_device         = 0;
 static uint32_t g_lane_cap       = 1u << 17;   // 131072: the GPU design point
 static uint32_t g_trace_every    = 0;      // emit an event every N challenges (0 = off)
+
+// Read every segment into its own device allocation, then attach to them.
+static bool load_weights(const char* manifest_path, gpu::Prover& p, std::vector<void*>* allocs) {
+    char err[512] = {0};
+    Manifest m;
+    if (!read_manifest(manifest_path, &m, err, sizeof err)) { fprintf(stderr, "[gpu] %s\n", err); return false; }
+    std::vector<int> fds;
+    for (const std::string& f : m.files) {
+        int fd = open(f.c_str(), O_RDONLY);
+        if (fd < 0) { fprintf(stderr, "[gpu] cannot open %s: %s\n", f.c_str(), strerror(errno)); return false; }
+        fds.push_back(fd);
+    }
+    std::vector<const uint64_t*> bases;
+    std::vector<uint64_t> words;
+    std::vector<unsigned char> host;
+    bool ok = true;
+    for (const SegmentRun& r : segment_runs(m)) {
+        void* d = nullptr;
+        if (!gpu::device_alloc(&d, r.bytes, err, sizeof err)) { fprintf(stderr, "[gpu] %s\n", err); ok = false; break; }
+        allocs->push_back(d);
+        host.resize(r.bytes);
+        size_t at = 0;
+        for (size_t i = r.first; ok && i < r.end; ++i) {
+            const Piece& pc = m.pieces[i];
+            if (pread(fds[pc.file], host.data() + at, pc.bytes, (off_t)pc.offset) != (ssize_t)pc.bytes) {
+                fprintf(stderr, "[gpu] short read of %s\n", pc.segment.c_str());
+                ok = false;
+            }
+            at += pc.bytes;
+        }
+        if (ok && !gpu::device_copy_in(d, host.data(), r.bytes, err, sizeof err)) {
+            fprintf(stderr, "[gpu] %s\n", err); ok = false;
+        }
+        if (!ok) break;
+        bases.push_back((const uint64_t*)d);
+        words.push_back(r.bytes / 8);
+    }
+    for (int fd : fds) close(fd);
+    if (!ok) return false;
+    if (!gpu::attach(p, bases.data(), words.data(), (uint32_t)bases.size(), g_lane_cap, false, err, sizeof err)) {
+        fprintf(stderr, "[gpu] FATAL: %s\n", err);
+        return false;
+    }
+    const char* backing = "?"; bool is_device = false;
+    gpu::residency(p, &backing, &is_device);
+    printf("[gpu] holding %zu segments, %.2f GiB, from %s; backing = %s\n", bases.size(),
+           (double)m.total_bytes / 1073741824.0, manifest_path, backing);
+    return true;
+}
 
 static int make_listener(uint16_t port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -169,8 +227,11 @@ static void serve(int cfd) {
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IOLBF, 0); // line-buffered logs
     uint16_t port = kDefaultPort;
+    const char* weights = nullptr;
     for (int i = 1; i < argc; ++i) {
-        if (!strcmp(argv[i], "--allow-unlocked")) {
+        if (!strcmp(argv[i], "--weights") && i + 1 < argc) {
+            weights = argv[++i];
+        } else if (!strcmp(argv[i], "--allow-unlocked")) {
             g_allow_unlocked = true;
         } else if (!strcmp(argv[i], "--trace") && i + 1 < argc) {
             g_trace_every = (uint32_t)strtoul(argv[++i], nullptr, 10);
@@ -200,6 +261,16 @@ int main(int argc, char** argv) {
                (unsigned long long)hf, (unsigned long long)ht);
     }
 
+    gpu::Prover held;
+    std::vector<void*> allocs;
+    if (weights) {
+        if (!load_weights(weights, held, &allocs)) return 1;
+        report_hbm("after loading the weights");
+    }
+    ResidentOpts ropts;
+    ropts.allow_unlocked = g_allow_unlocked;
+    ropts.trace_every = g_trace_every;
+
     int lfd = make_listener(port);
     printf("[gpu] listening on 0.0.0.0:%u (lane cap %u)\n", port, g_lane_cap);
     for (;;) {
@@ -207,9 +278,16 @@ int main(int argc, char** argv) {
         int cfd = accept(lfd, (sockaddr*)&ca, &cl);
         if (cfd < 0) { if (errno == EINTR) continue; perror("accept"); break; }
         printf("[gpu] client %s connected\n", inet_ntoa(ca.sin_addr));
-        serve(cfd);
+        if (weights) {
+            long long served = serve_resident(cfd, held, ropts);
+            if (served >= 0) printf("[gpu] served %lld challenges from the weights it holds\n", served);
+        } else {
+            serve(cfd);
+        }
         close(cfd);
     }
+    gpu::destroy(held);
+    for (void* d : allocs) gpu::device_free(d);
     close(lfd);
     return 0;
 }

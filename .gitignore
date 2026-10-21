@@ -26,3 +26,7 @@ __pycache__/
 # macOS Finder metadata
 .DS_Store
 /tests/segments_test
+/libmemchal_weights.so
+# local secrets, such as RUNPOD_API_KEY — never committed
+.env
+/.gpu_weights_state

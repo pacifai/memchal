@@ -450,6 +450,14 @@ else
     fail "manifest: pieces, stacking, and refusals"
 fi
 
+if python3 vllm_plugin/tests/test_weights.py 2>/tmp/plugin_test.log \
+   && python3 vllm_plugin/tests/test_register.py 2>>/tmp/plugin_test.log; then
+    pass "vLLM plugin: which tensors, in what order, and what it refuses (no GPU)"
+else
+    cat /tmp/plugin_test.log
+    fail "vLLM plugin: which tensors, in what order, and what it refuses (no GPU)"
+fi
+
 WT=/tmp/wt
 rm -rf "$WT"
 python3 tests/make_checkpoint.py "$WT/good"

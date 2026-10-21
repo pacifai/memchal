@@ -39,7 +39,9 @@ say "processes"
 if [ "$KEEP" -eq 1 ]; then
   echo "--keep-running: leaving the bridge and any provers alone"
 else
-  for pat in bridge_gpu.py prover_cuda cheating_prover_cuda; do
+  # gpu_weights_session.sh first, so it cannot restart vLLM behind us; then
+  # vLLM itself, which holds the weights the plugin serves from.
+  for pat in gpu_weights_session.sh "vllm bench" "vllm serve" bridge_gpu.py prover_cuda cheating_prover_cuda; do
     if pgrep -f "$pat" >/dev/null 2>&1; then
       pkill -f "$pat" >/dev/null 2>&1
       echo "stopped: $pat"
@@ -47,7 +49,7 @@ else
   done
   sleep 2
   # A prover that ignored SIGTERM still holds its allocation, so escalate.
-  for pat in bridge_gpu.py prover_cuda cheating_prover_cuda; do
+  for pat in gpu_weights_session.sh "vllm bench" "vllm serve" bridge_gpu.py prover_cuda cheating_prover_cuda; do
     if pgrep -f "$pat" >/dev/null 2>&1; then
       pkill -9 -f "$pat" >/dev/null 2>&1
       echo "killed:  $pat"
@@ -56,7 +58,7 @@ else
   sleep 1
 fi
 
-LEFT=$(pgrep -af 'bridge_gpu.py|prover_cuda|cheating_prover_cuda' 2>/dev/null | grep -v pgrep)
+LEFT=$(pgrep -af 'vllm serve|bridge_gpu.py|prover_cuda|cheating_prover_cuda' 2>/dev/null | grep -v pgrep)
 if [ -n "$LEFT" ]; then
   # A process stuck inside the driver survives SIGKILL. It is reported so the
   # verdict is honest, and releasing the pod is what actually clears it.

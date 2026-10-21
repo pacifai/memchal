@@ -114,6 +114,19 @@ curve.
   ([ADR 0009](docs/decisions/0009-challenge-the-weights-in-place.md)).
 - `scripts/weights_manifest.py` — writes a manifest from a safetensors checkpoint,
   stacking projections the way vLLM does. Reads headers only; copies nothing.
+- `src/gpu_resident.hpp` — the connection loop for a GPU prover that already holds
+  its buffer (`gpu::attach`ed pieces). It never exits the process, because inside
+  an engine a refusal must cost a connection, not the engine.
+- `src/weights_server.cpp` — `libmemchal_weights.so`: plain C entry points the vLLM
+  plugin calls with ctypes to serve challenges over the engine's own tensors, from
+  a thread and a non-blocking stream of its own.
+- `vllm_plugin/` — the vLLM plugin (`memchal-vllm`), a package of its own with its
+  own `vllm.general_plugins` entry point. It wraps `Worker.load_model` to collect
+  the weights and starts serving after warm-up. The tensor logic is plain Python,
+  tested against fakes.
+- `scripts/gpu_weights_up.sh`, `scripts/gpu_weights_session.sh` — rent one H100
+  with a CUDA 13 driver (asks first, terminates itself) and run the weights session
+  on it. `gpu_demo_down.sh --state .gpu_weights_state` brings it down.
 - `scripts/gpu_pod_setup.sh` — the first command on a rented box: records the
   machine, refuses boxes whose numbers would be meaningless, settles whether
   clocks can be locked and whether RDMA exists, then builds and runs the gate.

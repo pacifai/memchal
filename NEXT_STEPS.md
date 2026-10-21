@@ -42,13 +42,16 @@ filler then doesn't have to cover.
 to challenge them where the engine holds them. The CPU path ships (manifest, segment
 table, no-upload handshake); the rest needs a GPU.
 
-- [ ] **The GPU prover inside vLLM.** A plugin package of its own, with its own
-  `vllm.general_plugins` entry point. It wraps `Worker.load_model` to collect the weight
-  tensors, refuses any that aren't device memory, builds a `Segments` table on the
-  device, and serves challenges from a thread on its own stream, starting only after
-  warm-up. The kernel is `k_lane` with a `SegLoad` loader. *Done when:* the GPU
-  known-answer test passes over a segmented buffer, and on one H100 a vLLM serving the
-  int8 Llama 3.1 8B answers a `--weights ... --upload no` verifier with zero errors.
+- [ ] **Run the GPU prover inside vLLM.** It's written, but it hasn't run on a GPU, and
+  its CUDA file hasn't been compiled. The pieces are the attached kernel path
+  (`gpu::attach`, `k_lane` with `SegLoad`), `prover_cuda --weights`,
+  `libmemchal_weights.so`, and the plugin in `vllm_plugin/`. The plugin wraps
+  `Worker.load_model` and serves after warm-up. One session covers the items below:
+  `bash scripts/gpu_weights_up.sh --run` on one H100, then
+  `bash scripts/gpu_demo_down.sh --state .gpu_weights_state`. *Done when:* the GPU
+  known-answer test passes over attached pieces, and vLLM serving the int8 Llama 3.1 8B
+  (`RedHatAI/Meta-Llama-3.1-8B-Instruct-quantized.w8a8`, 6.5 GiB of int8) answers a
+  `--weights ... --upload no` verifier with zero errors.
 - [ ] **Check that vLLM holds the checkpoint's bytes.** The manifest assumes each int8
   tensor sits in memory exactly as stored, stacked as vLLM stacks it. *Done when:* a
   start-up check compares every collected tensor with its manifest pieces and reports

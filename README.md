@@ -323,8 +323,25 @@ every challenge, and one holding nothing is refused.
 
 What it doesn't show: that the weights are stored as dense checkpoint bytes. A prover
 that keeps them compressed or sparse, and rebuilds a probed word fast enough, passes
-with less memory. Measuring that is on the roadmap. The GPU prover, a vLLM plugin that
-reads the tensors where vLLM holds them, is not built yet.
+with less memory. Measuring that is on the roadmap.
+
+On a GPU, the prover runs inside vLLM. `vllm_plugin/` is a vLLM plugin of its own.
+After vLLM loads the model, it collects the int8 weight tensors and checks that each
+one is device memory. If asked, it also checks that each holds the checkpoint's bytes.
+Then it hands their addresses to `libmemchal_weights.so`, which answers challenges from
+its own thread and CUDA stream by reading the tensors in place. `prover_cuda --weights`
+does the same over memchal's own copy, as a baseline. All of this is written but has
+not run on a GPU yet. One H100 session runs it all:
+
+```bash
+bash scripts/gpu_weights_up.sh --run      # asks before renting; self-terminates
+bash scripts/gpu_demo_down.sh --state .gpu_weights_state
+```
+
+`scripts/gpu_weights_session.sh` passes the known-answer gate, installs vLLM 0.20.2 and
+the int8 Llama 3.1 8B, and measures the challenge in four settings: over memchal's own
+copy, inside idle vLLM, under a serving load, and against vLLM's own `--cpu-offload-gb`
+as the cheat.
 
 ## Learn more
 

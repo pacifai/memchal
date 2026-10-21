@@ -21,8 +21,10 @@
 // quietly flattered.
 #include "gpu_answer.hpp"
 #include "challenge.hpp"
+#include "segments.hpp"
 #include <cuda_runtime.h>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <chrono>
 
@@ -45,6 +47,7 @@ const char* alloc_name(Alloc a) {
         case Alloc::Managed:    return "managed";
         case Alloc::HostMapped: return "hostmapped";
         case Alloc::Split:      return "split";
+        case Alloc::External:   return "external";
     }
     return "?";
 }
@@ -217,6 +220,12 @@ bool select_device(int ordinal, char* name, size_t name_len, char* err, size_t e
 }
 
 void destroy(Prover& p) {
+    if (p.d_seg_base)  cudaFree((void*)p.d_seg_base);
+    if (p.d_seg_start) cudaFree(p.d_seg_start);
+    if (p.d_seg_dir)   cudaFree(p.d_seg_dir);
+    free((void*)p.h_seg_base);
+    free(p.h_seg_words);
+    if (p.own_stream && p.stream) cudaStreamDestroy((cudaStream_t)p.stream);
     if (p.d_pf_idx) cudaFree(p.d_pf_idx);
     if (p.d_pf_val) cudaFree(p.d_pf_val);
     if (p.h_swap)   cudaFreeHost(p.h_swap);
@@ -225,7 +234,9 @@ void destroy(Prover& p) {
     if (p.h_lane)   cudaFreeHost(p.h_lane);
     if (p.h_stage)  cudaFreeHost(p.h_stage);
     if (p.h_off)    cudaFreeHost(p.h_off);
-    if (p.alloc == Alloc::Split) {
+    if (p.alloc == Alloc::External) {
+        // the pieces belong to someone else
+    } else if (p.alloc == Alloc::Split) {
         if (p.d_buf) cudaFree(p.d_buf);    // the resident half is a real cudaMalloc
     } else if (p.h_mapped) {
         cudaFreeHost(p.h_mapped);          // frees the mapped host allocation
@@ -235,6 +246,28 @@ void destroy(Prover& p) {
     if (p.ev_start) cudaEventDestroy((cudaEvent_t)p.ev_start);
     if (p.ev_stop)  cudaEventDestroy((cudaEvent_t)p.ev_stop);
     p = Prover{};
+}
+
+// Lane hashes, the tree's second buffer, their pinned host copy, and the two
+// timing events: what every way of holding the buffer needs to answer.
+static bool alloc_scratch(Prover& p, uint32_t lane_cap, char* err, size_t errlen) {
+    cudaError_t e;
+    if ((e = cudaMalloc((void**)&p.d_lane, (size_t)lane_cap * 8)) != cudaSuccess) {
+        fail(err, errlen, "cudaMalloc(lane scratch)", e); return false;
+    }
+    if ((e = cudaMalloc((void**)&p.d_lane2, (size_t)lane_cap * 8)) != cudaSuccess) {
+        fail(err, errlen, "cudaMalloc(tree scratch)", e); return false;
+    }
+    if ((e = cudaHostAlloc((void**)&p.h_lane, (size_t)lane_cap * 8, cudaHostAllocDefault)) != cudaSuccess) {
+        fail(err, errlen, "cudaHostAlloc(lane staging)", e); return false;
+    }
+    p.lane_cap = lane_cap;
+
+    cudaEvent_t a = nullptr, b = nullptr;
+    if ((e = cudaEventCreate(&a)) != cudaSuccess) { fail(err, errlen, "cudaEventCreate", e); return false; }
+    if ((e = cudaEventCreate(&b)) != cudaSuccess) { fail(err, errlen, "cudaEventCreate", e); return false; }
+    p.ev_start = a; p.ev_stop = b;
+    return true;
 }
 
 bool create(Prover& p, uint64_t num_words, Alloc alloc, uint32_t lane_cap,
@@ -282,6 +315,9 @@ bool create(Prover& p, uint64_t num_words, Alloc alloc, uint32_t lane_cap,
             e = cudaHostGetDevicePointer((void**)&p.d_buf, p.h_mapped, 0);
             if (e != cudaSuccess) { fail(err, errlen, "cudaHostGetDevicePointer", e); return false; }
             break;
+        case Alloc::External:
+            failmsg(err, errlen, "create: an External buffer is attached, not created");
+            return false;
         case Alloc::Split: {
             size_t dev_bytes = (size_t)p.split_words * 8;
             size_t off_bytes = bytes - dev_bytes;
@@ -299,27 +335,82 @@ bool create(Prover& p, uint64_t num_words, Alloc alloc, uint32_t lane_cap,
         }
     }
 
-    if ((e = cudaMalloc((void**)&p.d_lane, (size_t)lane_cap * 8)) != cudaSuccess) {
-        fail(err, errlen, "cudaMalloc(lane scratch)", e); return false;
-    }
-    if ((e = cudaMalloc((void**)&p.d_lane2, (size_t)lane_cap * 8)) != cudaSuccess) {
-        fail(err, errlen, "cudaMalloc(tree scratch)", e); return false;
-    }
-    if ((e = cudaHostAlloc((void**)&p.h_lane, (size_t)lane_cap * 8, cudaHostAllocDefault)) != cudaSuccess) {
-        fail(err, errlen, "cudaHostAlloc(lane staging)", e); return false;
-    }
-    p.lane_cap = lane_cap;
+    if (!alloc_scratch(p, lane_cap, err, errlen)) return false;
 
     p.stage_cap = 8u << 20; // 8 MiB of pinned staging for the upload
     if ((e = cudaHostAlloc((void**)&p.h_stage, p.stage_cap, cudaHostAllocDefault)) != cudaSuccess) {
         fail(err, errlen, "cudaHostAlloc(upload staging)", e); return false;
     }
-
-    cudaEvent_t a = nullptr, b = nullptr;
-    if ((e = cudaEventCreate(&a)) != cudaSuccess) { fail(err, errlen, "cudaEventCreate", e); return false; }
-    if ((e = cudaEventCreate(&b)) != cudaSuccess) { fail(err, errlen, "cudaEventCreate", e); return false; }
-    p.ev_start = a; p.ev_stop = b;
     p.cursor = 0;
+    return true;
+}
+
+bool attach(Prover& p, const uint64_t* const* bases, const uint64_t* words, uint32_t count,
+            uint32_t lane_cap, bool own_stream, char* err, size_t errlen) {
+    destroy(p);
+    if (count == 0) { failmsg(err, errlen, "attach: no pieces"); return false; }
+    if (lane_cap == 0) lane_cap = 1;
+    p.alloc = Alloc::External;
+
+    cudaError_t e;
+    if (own_stream) {
+        cudaStream_t st = nullptr;
+        if ((e = cudaStreamCreateWithFlags(&st, cudaStreamNonBlocking)) != cudaSuccess) {
+            fail(err, errlen, "cudaStreamCreateWithFlags", e); return false;
+        }
+        p.stream = st;
+        p.own_stream = true;
+    }
+
+    // The table is built on the host with the same functions the CPU side
+    // uses, then copied over, so the two cannot disagree on a boundary.
+    p.h_seg_base  = (const uint64_t**)malloc(sizeof(uint64_t*) * count);
+    p.h_seg_words = (uint64_t*)malloc(sizeof(uint64_t) * count);
+    if (!p.h_seg_base || !p.h_seg_words) { failmsg(err, errlen, "attach: out of host memory"); destroy(p); return false; }
+    uint64_t total = 0;
+    for (uint32_t s = 0; s < count; ++s) {
+        if ((uintptr_t)bases[s] % 8) { failmsg(err, errlen, "attach: a piece is not 8-byte aligned"); destroy(p); return false; }
+        p.h_seg_base[s] = bases[s];
+        p.h_seg_words[s] = words[s];
+        total += words[s];
+    }
+    if (total == 0) { failmsg(err, errlen, "attach: the pieces hold no words"); destroy(p); return false; }
+
+    uint32_t shift = mc::segments_shift(words, count, 1u << 20);
+    uint64_t dir_len = mc::segments_dir_len(total, shift);
+    uint64_t* start = (uint64_t*)malloc(sizeof(uint64_t) * (count + 1));
+    uint32_t* dir   = (uint32_t*)malloc(sizeof(uint32_t) * dir_len);
+    if (!start || !dir) { free(start); free(dir); failmsg(err, errlen, "attach: out of host memory"); destroy(p); return false; }
+    mc::segments_fill(words, count, shift, start, dir);
+
+    bool ok = false;
+    do {
+        if ((e = cudaMalloc((void**)&p.d_seg_base, sizeof(uint64_t*) * count)) != cudaSuccess) { fail(err, errlen, "cudaMalloc(segment bases)", e); break; }
+        if ((e = cudaMalloc((void**)&p.d_seg_start, sizeof(uint64_t) * (count + 1))) != cudaSuccess) { fail(err, errlen, "cudaMalloc(segment starts)", e); break; }
+        if ((e = cudaMalloc((void**)&p.d_seg_dir, sizeof(uint32_t) * dir_len)) != cudaSuccess) { fail(err, errlen, "cudaMalloc(segment directory)", e); break; }
+        if ((e = cudaMemcpy((void*)p.d_seg_base, p.h_seg_base, sizeof(uint64_t*) * count, cudaMemcpyHostToDevice)) != cudaSuccess) { fail(err, errlen, "cudaMemcpy(segment bases)", e); break; }
+        if ((e = cudaMemcpy(p.d_seg_start, start, sizeof(uint64_t) * (count + 1), cudaMemcpyHostToDevice)) != cudaSuccess) { fail(err, errlen, "cudaMemcpy(segment starts)", e); break; }
+        if ((e = cudaMemcpy(p.d_seg_dir, dir, sizeof(uint32_t) * dir_len, cudaMemcpyHostToDevice)) != cudaSuccess) { fail(err, errlen, "cudaMemcpy(segment directory)", e); break; }
+        ok = true;
+    } while (0);
+    free(start);
+    free(dir);
+    if (!ok) { destroy(p); return false; }
+    p.seg_count = count;
+    p.seg_shift = shift;
+    p.num_words = total;
+    p.held_words = total;
+    p.split_words = total;
+
+    p.ext_device_words = 0;
+    for (uint32_t s = 0; s < count; ++s) {
+        cudaPointerAttributes a{};
+        if (cudaPointerGetAttributes(&a, bases[s]) == cudaSuccess && a.type == cudaMemoryTypeDevice)
+            p.ext_device_words += words[s];
+    }
+    cudaGetLastError();   // a refused query is an answer, not a sticky error
+
+    if (!alloc_scratch(p, lane_cap, err, errlen)) { destroy(p); return false; }
     return true;
 }
 
@@ -460,27 +551,35 @@ bool answer(Prover& p, uint64_t nonce, uint32_t k, uint32_t lanes, bool chained,
 
     const int tpb = 256;
     unsigned int blocks = (unsigned int)(((uint64_t)lanes + tpb - 1) / tpb);
+    // Everything below goes on p.stream: the legacy default stream for the
+    // standalone provers, exactly as before, or a stream of our own inside an
+    // engine's process.
+    cudaStream_t st = (cudaStream_t)p.stream;
 
-    cudaEventRecord((cudaEvent_t)p.ev_start);
+    cudaEventRecord((cudaEvent_t)p.ev_start, st);
     if (p.prefetch) {
         // All three passes count as kernel time: together they are what the
         // cheat does instead of the one honest pass.
         unsigned int kb = (unsigned int)(((uint64_t)k + tpb - 1) / tpb);
-        k_pf_record<<<blocks, tpb>>>(p.num_words, nonce, k, lanes, chained, p.d_pf_idx, p.d_lane);
-        k_pf_gather<<<kb, tpb>>>(p.d_buf, p.d_pf_idx, p.d_pf_val, k);
-        k_pf_answer<<<blocks, tpb>>>(p.d_buf, p.d_pf_idx, p.d_pf_val, p.num_words, nonce, k,
-                                     lanes, chained, p.d_lane);
+        k_pf_record<<<blocks, tpb, 0, st>>>(p.num_words, nonce, k, lanes, chained, p.d_pf_idx, p.d_lane);
+        k_pf_gather<<<kb, tpb, 0, st>>>(p.d_buf, p.d_pf_idx, p.d_pf_val, k);
+        k_pf_answer<<<blocks, tpb, 0, st>>>(p.d_buf, p.d_pf_idx, p.d_pf_val, p.num_words, nonce, k,
+                                            lanes, chained, p.d_lane);
+    } else if (p.alloc == Alloc::External) {
+        mc::Segments t{ p.d_seg_base, p.d_seg_start, p.d_seg_dir, p.seg_count, p.seg_shift };
+        k_lane<<<blocks, tpb, 0, st>>>(mc::SegLoad{t},
+                                       p.num_words, nonce, k, lanes, chained, p.d_lane);
     } else if (p.fabricate) {
-        k_lane<<<blocks, tpb>>>(LoadFake{p.d_buf, p.held_words},
-                                p.num_words, nonce, k, lanes, chained, p.d_lane);
+        k_lane<<<blocks, tpb, 0, st>>>(LoadFake{p.d_buf, p.held_words},
+                                       p.num_words, nonce, k, lanes, chained, p.d_lane);
     } else if (p.alloc == Alloc::Split) {
-        k_lane<<<blocks, tpb>>>(LoadSplit{p.d_buf, p.d_off, p.split_words},
-                                p.num_words, nonce, k, lanes, chained, p.d_lane);
+        k_lane<<<blocks, tpb, 0, st>>>(LoadSplit{p.d_buf, p.d_off, p.split_words},
+                                       p.num_words, nonce, k, lanes, chained, p.d_lane);
     } else {
-        k_lane<<<blocks, tpb>>>(LoadDirect{p.d_buf},
-                                p.num_words, nonce, k, lanes, chained, p.d_lane);
+        k_lane<<<blocks, tpb, 0, st>>>(LoadDirect{p.d_buf},
+                                       p.num_words, nonce, k, lanes, chained, p.d_lane);
     }
-    cudaEventRecord((cudaEvent_t)p.ev_stop);
+    cudaEventRecord((cudaEvent_t)p.ev_stop, st);
 
     cudaError_t e = cudaEventSynchronize((cudaEvent_t)p.ev_stop);
     if (e != cudaSuccess) { fail(err, errlen, "k_lane", e); return false; }
@@ -498,16 +597,18 @@ bool answer(Prover& p, uint64_t nonce, uint32_t k, uint32_t lanes, bool chained,
         uint64_t* src = p.d_lane;
         uint64_t* dst = p.d_lane2;
 
-        k_tree_leaves<<<blocks, tpb>>>(src, lanes);
+        k_tree_leaves<<<blocks, tpb, 0, st>>>(src, lanes);
         uint32_t n = lanes, level = 0;
         while (n > 1) {
             uint32_t m = (n + 1) / 2;
             unsigned int lb = (unsigned int)(((uint64_t)m + tpb - 1) / tpb);
-            k_tree_level<<<lb, tpb>>>(src, dst, n, level);
+            k_tree_level<<<lb, tpb, 0, st>>>(src, dst, n, level);
             uint64_t* t = src; src = dst; dst = t;
             n = m; ++level;
         }
-        if ((e = cudaDeviceSynchronize()) != cudaSuccess) {
+        // The stream, not the device: inside an engine's process a device
+        // sync would also wait for the engine's work.
+        if ((e = cudaStreamSynchronize(st)) != cudaSuccess) {
             fail(err, errlen, "tree fold", e); return false;
         }
         auto t3 = std::chrono::steady_clock::now();
@@ -515,7 +616,8 @@ bool answer(Prover& p, uint64_t nonce, uint32_t k, uint32_t lanes, bool chained,
 
         auto t0 = std::chrono::steady_clock::now();
         uint64_t root = 0;
-        e = cudaMemcpy(&root, src, sizeof(root), cudaMemcpyDeviceToHost);
+        e = cudaMemcpyAsync(&root, src, sizeof(root), cudaMemcpyDeviceToHost, st);
+        if (e == cudaSuccess) e = cudaStreamSynchronize(st);
         auto t1 = std::chrono::steady_clock::now();
         if (e != cudaSuccess) { fail(err, errlen, "cudaMemcpy(root D2H)", e); return false; }
         if (copy_ms) *copy_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -525,7 +627,8 @@ bool answer(Prover& p, uint64_t nonce, uint32_t k, uint32_t lanes, bool chained,
     }
 
     auto t0 = std::chrono::steady_clock::now();
-    e = cudaMemcpy(p.h_lane, p.d_lane, (size_t)lanes * 8, cudaMemcpyDeviceToHost);
+    e = cudaMemcpyAsync(p.h_lane, p.d_lane, (size_t)lanes * 8, cudaMemcpyDeviceToHost, st);
+    if (e == cudaSuccess) e = cudaStreamSynchronize(st);
     auto t1 = std::chrono::steady_clock::now();
     if (e != cudaSuccess) { fail(err, errlen, "cudaMemcpy(lane hashes D2H)", e); return false; }
     if (copy_ms) *copy_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -588,6 +691,27 @@ bool swap_in(Prover& p, double* ms, char* err, size_t errlen) {
 bool residency(const Prover& p, const char** backing, bool* is_device) {
     if (backing)   *backing = "unallocated";
     if (is_device) *is_device = false;
+    if (p.alloc == Alloc::External) {
+        // Every piece must be device memory. A piece an engine offloaded to
+        // pinned host memory still reads correctly — over PCIe — so it is the
+        // one that matters to report.
+        for (uint32_t s = 0; s < p.seg_count; ++s) {
+            cudaPointerAttributes a{};
+            cudaError_t e = cudaPointerGetAttributes(&a, p.h_seg_base[s]);
+            if (e != cudaSuccess || a.type != cudaMemoryTypeDevice) {
+                cudaGetLastError();
+                if (backing) *backing = (e == cudaSuccess && a.type == cudaMemoryTypeHost)
+                    ? "external — a piece is pinned host memory, read over PCIe"
+                    : (e == cudaSuccess && a.type == cudaMemoryTypeManaged)
+                    ? "external — a piece is managed memory, pages migrate on fault"
+                    : "external — a piece the driver does not call device memory";
+                return true;                // is_device stays false
+            }
+        }
+        if (backing)   *backing = "external — every piece is device memory someone else owns";
+        if (is_device) *is_device = true;
+        return true;
+    }
     if (!p.d_buf) return false;
 
     if (p.alloc == Alloc::Split) {
@@ -640,6 +764,20 @@ void unhog() {
     if (g_hog) { cudaFree(g_hog); g_hog = nullptr; }
 }
 
+bool device_alloc(void** ptr, size_t bytes, char* err, size_t errlen) {
+    cudaError_t e = cudaMalloc(ptr, bytes);
+    if (e != cudaSuccess) { *ptr = nullptr; fail(err, errlen, "cudaMalloc", e); return false; }
+    return true;
+}
+
+bool device_copy_in(void* dst, const void* src, size_t bytes, char* err, size_t errlen) {
+    cudaError_t e = cudaMemcpy(dst, src, bytes, cudaMemcpyHostToDevice);
+    if (e != cudaSuccess) { fail(err, errlen, "cudaMemcpy(H2D)", e); return false; }
+    return true;
+}
+
+void device_free(void* ptr) { if (ptr) cudaFree(ptr); }
+
 void mem_info(size_t* free_bytes, size_t* total_bytes) {
     size_t f = 0, t = 0;
     cudaMemGetInfo(&f, &t);
@@ -658,6 +796,7 @@ double resident_fraction(const Prover& p) {
         case Alloc::HostMapped: return 0.0;
         case Alloc::Split:      return (double)p.split_words / (double)p.num_words;
         case Alloc::Managed:    return 1.0;   // unknowable from here, by design
+        case Alloc::External:   return (double)p.ext_device_words / (double)p.num_words;
         case Alloc::Device:     break;
     }
     return (double)p.held_words / (double)p.num_words;   // < 1 only for `fake`

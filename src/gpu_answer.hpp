@@ -31,7 +31,12 @@ namespace gpu {
 //                RESOLUTION: uvm and zerocopy answer "can you catch a prover
 //                holding none of it", this one answers "how little can a prover
 //                offload before you stop seeing it".
-enum class Alloc { Device, Managed, HostMapped, Split };
+//   External   — memory someone else owns, such as an inference engine's
+//                weight tensors, read in place through a Segments table
+//                (segments.hpp). The prover allocates only the table and its
+//                scratch, and never frees or moves the pieces. Honest when
+//                every piece is device memory; residency() checks each one.
+enum class Alloc { Device, Managed, HostMapped, Split, External };
 
 const char* alloc_name(Alloc a);
 
@@ -72,6 +77,22 @@ struct Prover {
     // freed between challenges and restored when one arrives.
     void*     h_swap     = nullptr;
     bool      swapped_out = false;
+    // External: the Segments table, on the device, and the piece pointers on
+    // the host so residency() can ask the driver about each one.
+    const uint64_t** d_seg_base = nullptr;
+    uint64_t* d_seg_start = nullptr;
+    uint32_t* d_seg_dir   = nullptr;
+    uint32_t  seg_count   = 0;
+    uint32_t  seg_shift   = 0;
+    const uint64_t** h_seg_base = nullptr;
+    uint64_t* h_seg_words = nullptr;
+    uint64_t  ext_device_words = 0;   // words in pieces the driver calls device memory
+    // The stream every launch and copy goes on. Null is the legacy default
+    // stream, which the standalone provers have always used. Inside an
+    // engine's process it is a non-blocking stream of our own, so a challenge
+    // neither queues behind the engine's work nor makes the engine wait on it.
+    void*     stream     = nullptr;
+    bool      own_stream = false;
 };
 
 // The prefetch cheat. Turns on a three-pass answer: a dry run that lists the
@@ -110,6 +131,14 @@ bool create(Prover& p, uint64_t num_words, Alloc alloc, uint32_t lane_cap,
 
 void destroy(Prover& p);
 
+// Serve from memory someone else owns (Alloc::External): `count` pieces, piece
+// s at device pointer bases[s] and words[s] 64-bit words long, read in that
+// order as one buffer. Allocates the table and the lane scratch only. With
+// own_stream, every launch goes on a fresh non-blocking stream instead of the
+// default one; pass it whenever another library shares the device.
+bool attach(Prover& p, const uint64_t* const* bases, const uint64_t* words, uint32_t count,
+            uint32_t lane_cap, bool own_stream, char* err, size_t errlen);
+
 // Pinned staging for the upload. The server recv()s straight into this, then
 // calls push() to move it onto the device, so a multi-GB buffer never needs a
 // second host copy.
@@ -144,6 +173,12 @@ bool answer(Prover& p, uint64_t nonce, uint32_t k, uint32_t lanes, bool chained,
 // Like VmLck this is self-reported — it stops the prover fooling itself, not a
 // remote verifier. Proving it to a verifier is what the timing detector is for.
 bool residency(const Prover& p, const char** backing, bool* is_device);
+
+// Plain device memory, for callers that keep CUDA types out of their own
+// files: prover_cuda --weights holds each tensor in one of these.
+bool device_alloc(void** ptr, size_t bytes, char* err, size_t errlen);
+bool device_copy_in(void* dst, const void* src, size_t bytes, char* err, size_t errlen);
+void device_free(void* ptr);
 
 // cudaMemGetInfo, for the demo's HBM occupancy readout.
 void mem_info(size_t* free_bytes, size_t* total_bytes);

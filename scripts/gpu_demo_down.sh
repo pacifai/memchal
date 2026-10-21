@@ -23,6 +23,7 @@
 #   bash scripts/gpu_demo_down.sh --stop       # pull results, stop instead
 #   bash scripts/gpu_demo_down.sh --keep-pod   # pull results, leave it running
 #   bash scripts/gpu_demo_down.sh --force      # release even if the pod is unreachable
+#   bash scripts/gpu_demo_down.sh --state .gpu_weights_state   # the weights session's pod
 #
 # Exit: 0 everything is down, 1 no demo recorded, 2 the pod is still up.
 set -uo pipefail
@@ -37,6 +38,7 @@ while [ $# -gt 0 ]; do
     --stop) ACTION=stop; shift ;;
     --keep-pod) ACTION=keep; shift ;;
     --force) FORCE=1; shift ;;
+    --state) STATE="$ROOT/$2"; shift 2 ;;
     -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 1 ;;
   esac

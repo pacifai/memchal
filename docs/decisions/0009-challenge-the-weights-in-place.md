@@ -1,9 +1,13 @@
 # ADR 0009 — Challenge the model's weights where the inference engine holds them
 
-**Status:** proposed. The CPU path is implemented: the manifest, the segment
-table, the no-upload handshake, and the CPU prover holding the weights as
-separate allocations, with tests. The GPU prover inside vLLM is designed below
-and not built.
+**Status:** proposed. The CPU path is implemented and tested: the manifest,
+the segment table, the no-upload handshake, and the CPU prover holding the
+weights as separate allocations. The GPU path is written but has not run on a
+GPU: the attached kernel path (`gpu::attach`), `prover_cuda --weights`,
+`libmemchal_weights.so`, the vLLM plugin (`vllm_plugin/`), and
+`scripts/gpu_weights_session.sh`. Off a GPU, the host code compiles and the
+plugin's logic passes its tests against fakes. The CUDA file itself has not
+been compiled.
 
 **Amends:** the roadmap note that set "challenging the weights directly" aside
 as out of scope ([NEXT_STEPS](../../NEXT_STEPS.md)).
@@ -56,7 +60,10 @@ vLLM, that means a plugin of its own:
   checks each one's memory type (the [ADR 0008](0008-gpu-residency-check-substitutes-for-mlock.md)
   self-check), and builds a `Segments` table on the device.
 - **Serving.** It answers challenges from a thread in the process that owns the
-  GPU, on its own CUDA stream.
+  GPU, on its own non-blocking CUDA stream. A device-wide sync would make the
+  challenge wait for inference, and inference wait for the challenge.
+  `libmemchal_weights.so` holds the thread and the kernel. The plugin hands it
+  the device pointers through ctypes.
 
 **5. Start with the 2-D int8 tensors.** For these, vLLM's int8 path keeps the
 checkpoint's bytes: its CUTLASS kernel stores a transposed view of the loaded

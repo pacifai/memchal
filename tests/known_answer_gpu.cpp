@@ -11,14 +11,19 @@
 // same, and the cross-lane fold ran in lane order rather than in whatever order
 // the blocks happened to finish.
 //
-// Three things are checked, in order of how much they would hurt to get wrong:
+// Four things are checked, in order of how much they would hurt to get wrong:
 //
-//   1. The pinned vectors, with the buffer UPLOADED — the real protocol path.
+//   1. The pinned vectors, with the buffer UPLOADED — the real protocol path —
+//      under both folds: the sequential chain and the tree.
 //   2. The pinned vectors, with the buffer generated ON-DEVICE by k_fill —
 //      which also proves k_fill is bit-identical to fill_random().
 //   3. A wide case (many blocks, lanes past the initial scratch capacity)
 //      cross-checked against the CPU reference, to catch a reduction that only
 //      breaks once there is more than one block in flight.
+//   4. The pinned vectors over the same buffer split into separate device
+//      allocations and ATTACHED through a Segments table — the weights path,
+//      where the pieces belong to an inference engine — on a stream of the
+//      prover's own and on the default stream.
 //
 // COMPILE: needs a GPU at run time; see the `prover_cuda` target in the Makefile.
 // EXIT CODE: 0 all pass, 1 otherwise.
@@ -51,28 +56,40 @@ static const uint64_t kExpectedChained[3] = {
     0xB48B8C33BFD2C50EULL,
     0x6889B0F93AE541F3ULL,
 };
+// The tree fold's pinned vectors (KAT 1c in tests/known_answer.cpp).
+static const uint64_t kExpectedTree[3] = {
+    0xDB349A095B054DC1ULL,
+    0x3D7231F696115A72ULL,
+    0x75D36F59F81165F0ULL,
+};
+static const uint64_t kExpectedTreeChained[3] = {
+    0x9223B322843E6ED1ULL,
+    0x6CB30B91F44FF207ULL,
+    0x86106229AE2DDC5BULL,
+};
 
-static int run_vectors(mc::gpu::Prover& p, const char* how) {
+static int run_vectors(mc::gpu::Prover& p, const char* how, bool tree = false) {
     int failed = 0;
     char err[512] = {0};
 
     for (int chained = 0; chained <= 1; ++chained) {
-        const uint64_t* expect = chained ? kExpectedChained : kExpected;
+        const uint64_t* expect = tree ? (chained ? kExpectedTreeChained : kExpectedTree)
+                                      : (chained ? kExpectedChained : kExpected);
         for (int i = 0; i < 3; ++i) {
             uint64_t got = 0;
             double kms = 0, cms = 0, fms = 0;
             if (!mc::gpu::answer(p, kVecs[i].nonce, kVecs[i].k, kVecs[i].lanes,
-                                 chained != 0, false, &got, &kms, &cms, &fms,
+                                 chained != 0, tree, &got, &kms, &cms, &fms,
                                  err, sizeof err)) {
-                fprintf(stderr, "GPU KAT (%s) vector %d%s: ERROR %s\n",
-                        how, i + 1, chained ? " chained" : "", err);
+                fprintf(stderr, "GPU KAT (%s) %svector %d%s: ERROR %s\n",
+                        how, tree ? "tree " : "", i + 1, chained ? " chained" : "", err);
                 ++failed;
                 continue;
             }
             bool pass = (got == expect[i]);
             if (!pass) ++failed;
-            printf("GPU KAT (%s) %svector %d: %s  (got=0x%016llX  expected=0x%016llX)\n",
-                   how, chained ? "chained " : "", i + 1,
+            printf("GPU KAT (%s) %s%svector %d: %s  (got=0x%016llX  expected=0x%016llX)\n",
+                   how, tree ? "tree " : "", chained ? "chained " : "", i + 1,
                    pass ? "PASS" : "FAIL",
                    (unsigned long long)got, (unsigned long long)expect[i]);
         }
@@ -162,6 +179,7 @@ int main(int argc, char** argv) {
         }
         printf("\n=== GPU KAT: pinned vectors, uploaded buffer ===\n");
         failed += run_vectors(p, "uploaded");
+        failed += run_vectors(p, "uploaded", /*tree=*/true);
 
         printf("\n=== GPU KAT: wide cases vs CPU reference ===\n");
         failed += run_wide(p, host.data(), kNumWords);
@@ -183,6 +201,53 @@ int main(int argc, char** argv) {
         printf("\n=== GPU KAT: pinned vectors, buffer generated on-device ===\n");
         failed += run_vectors(p, "on-device fill");
         mc::gpu::destroy(p);
+    }
+
+    // --- 4. pinned vectors over the buffer in separate, attached pieces -----
+    // The weights path. The pieces are allocated here the way an engine would
+    // allocate its tensors, and the prover only attaches to them. Lengths are
+    // awkward on purpose: a one-word piece, odd ones, and pieces that start
+    // mid-chunk, so a boundary mistake moves an answer.
+    {
+        const uint64_t lens[] = { 1, 4095, 65536, 3 };
+        std::vector<void*> allocs;
+        std::vector<const uint64_t*> bases;
+        std::vector<uint64_t> words;
+        uint64_t at = 0;
+        for (int i = 0; i <= 4; ++i) {
+            uint64_t n = (i < 4) ? lens[i] : kNumWords - at;   // the last takes the rest
+            void* d = nullptr;
+            if (!mc::gpu::device_alloc(&d, n * 8, err, sizeof err) ||
+                !mc::gpu::device_copy_in(d, host.data() + at, n * 8, err, sizeof err)) {
+                fprintf(stderr, "GPU KAT: piece %d — %s\n", i, err);
+                return 1;
+            }
+            allocs.push_back(d);
+            bases.push_back((const uint64_t*)d);
+            words.push_back(n);
+            at += n;
+        }
+        for (int own = 1; own >= 0; --own) {
+            const char* how = own ? "attached, own stream" : "attached, default stream";
+            mc::gpu::Prover p;
+            if (!mc::gpu::attach(p, bases.data(), words.data(), (uint32_t)bases.size(), 64,
+                                 own != 0, err, sizeof err)) {
+                fprintf(stderr, "GPU KAT: attach failed — %s\n", err);
+                return 1;
+            }
+            const char* backing = "?"; bool is_dev = false;
+            mc::gpu::residency(p, &backing, &is_dev);
+            printf("\n=== GPU KAT: pinned vectors, %s ===\nGPU KAT: backing = %s\n", how, backing);
+            if (!is_dev) { fprintf(stderr, "GPU KAT: attached pieces are not device-resident\n"); ++failed; }
+            failed += run_vectors(p, how);
+            failed += run_vectors(p, how, /*tree=*/true);
+            if (own) {
+                printf("\n=== GPU KAT: wide cases vs CPU reference, %s ===\n", how);
+                failed += run_wide(p, host.data(), kNumWords);
+            }
+            mc::gpu::destroy(p);
+        }
+        for (void* d : allocs) mc::gpu::device_free(d);
     }
 
     printf("\n");
