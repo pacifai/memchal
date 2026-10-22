@@ -54,7 +54,7 @@ SMI_INTERVAL = float(os.environ.get("SMI_INTERVAL", "1.0"))
 
 # ── what the browser may ask for ─────────────────────────────────────────────
 MODES = ("honest", "fake", "uvm", "zerocopy", "partial")
-GENS = ("splitmix64", "chacha")
+GENS = ("argon2d", "chacha", "splitmix64")
 CHAINS = ("independent", "dependent")
 NONCES = ("sequential", "random")
 FOLDS = ("tree", "sequential")   # tree is the parallel Merkle fold
@@ -78,8 +78,14 @@ LIMITS = {                    # field: (min, max, default)
     "gap":    (0, 100000, 0),  # us of idle after each challenge, outside the
                                # timed window — for watching or recording a run
                                # that would otherwise finish in a flicker
+    "build_p": (1, 64, 16),    # argon2d only: Argon2 build lanes, which is the
+                               # number of host threads per build. Not the
+                               # challenge's lanes.
 }
-DEFAULTS = {"mode": "honest", "gen": "chacha", "chain": "dependent",
+# Argon2 passes over the matrix. Fixed at 2, the least that makes every block
+# depend on the whole matrix (ADR 0007).
+BUILD_T = 2
+DEFAULTS = {"mode": "honest", "gen": "argon2d", "chain": "dependent",
             "nonce": "random", "fold": "tree",
             **{k: v[2] for k, v in LIMITS.items()}}
 
@@ -359,11 +365,15 @@ class Run:
 
     def _verifier_cmd(self):
         c = self.cfg
+        # argon2d is build mode: the verifier sends a recipe, and the prover
+        # builds the buffer on its host CPU and copies it to the card.
+        build = (["--build-t", str(BUILD_T), "--build-p", str(c["build_p"])]
+                 if c["gen"] == "argon2d" else [])
         return [str(ROOT / "verifier"), "--host", "127.0.0.1",
                 "--port", str(PROVER_PORT),
                 "--mb", str(c["mb"]), "--k", str(c["k"]), "--lanes", str(c["lanes"]),
                 "--n", str(c["n"]), "--warmup", str(c["warmup"]),
-                "--gen", c["gen"], "--chain", c["chain"], "--nonce", c["nonce"],
+                "--gen", c["gen"], *build, "--chain", c["chain"], "--nonce", c["nonce"],
                 "--fold", c["fold"],
                 "--label", f"gpu-{c['mode']}",
                 "--csv", "/dev/null", "--stream", "-", "--probe-map", "0",
@@ -400,9 +410,11 @@ class Run:
             if self.stopping:
                 return self._status("stopped")
 
-            # Generating a multi-GB buffer with ChaCha20 and pushing it over the
-            # wire takes seconds to tens of seconds, and until it finishes there
-            # is nothing to draw. Saying so beats looking hung.
+            # Generating a multi-GB buffer and pushing it over the wire, or
+            # building it with Argon2d on both sides, takes seconds to tens of
+            # seconds, and until it finishes there is nothing to draw. Saying so
+            # beats looking hung. The phase is "uploading" for every generator;
+            # the page words it from cfg.gen.
             self._status("uploading", mb=c["mb"])
             self.verifier = subprocess.Popen(self._verifier_cmd(), stdout=subprocess.PIPE,
                                              stderr=subprocess.STDOUT, text=True, bufsize=1)

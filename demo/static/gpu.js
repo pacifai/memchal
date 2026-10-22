@@ -517,7 +517,14 @@ function syncControls() {
     bits.push(`— too shallow, needs k ≥ ${(16 * lanes).toLocaleString()}`);
   }
   const mb = Number(el.mb.value) || 0;
-  if (mb >= 4096) bits.push(`— ~${Math.round(mb / 250)}s to upload before the first challenge`);
+  // argon2d sends a recipe instead of the bytes: the verifier builds its
+  // reference copy, then the prover builds its own on the host CPU and copies
+  // it to the card. Two builds back to back, so setup is roughly twice one.
+  if (mb >= 4096) {
+    bits.push(el.gen.value === 'argon2d'
+      ? '— both sides build the buffer before the first challenge, which takes a while'
+      : `— ~${Math.round(mb / 250)}s to upload before the first challenge`);
+  }
   // Wall clock is dominated by two host-side terms, not by the card: the pace
   // you asked for, and the verifier recomputing answers at ~100 ns per probe.
   // Break them out, because otherwise a 40 s run reads as a slow GPU when the
@@ -560,7 +567,7 @@ function syncControls() {
 // anything else. `expect` quotes the H100 tree-fold sweep (one card, one
 // session), so it says what to look for, not what this run must produce.
 const SWEEP = { mb: 4096, k: 262144, lanes: 16384, warmup: 10, gap: 0, verify: 10,
-                gen: 'chacha', chain: 'dependent', nonce: 'random', fold: 'tree',
+                gen: 'argon2d', chain: 'dependent', nonce: 'random', fold: 'tree',
                 offload: 10, hog: 0, frac: 50, n: 200 };
 const PRESETS = [
   { id: 'honest', name: 'honest', by: 'baseline', set: { mode: 'honest' },
@@ -642,7 +649,11 @@ function handle(e) {
       // is drawn under the new run's name before it has answered anything.
       if (e.phase === 'starting prover') { state.gpu = []; state.challenges = []; state.end = null; }
       el.statusText.textContent = e.error ? `error: ${e.error}`
-        : e.phase === 'uploading' ? `generating and uploading ${(e.mb || (e.cfg && e.cfg.mb) || 0)} MiB…` : e.phase;
+        : e.phase === 'uploading'
+          ? (e.cfg && e.cfg.gen === 'argon2d'
+            ? `building ${(e.mb || e.cfg.mb || 0)} MiB with argon2d on both sides…`
+            : `generating and uploading ${(e.mb || (e.cfg && e.cfg.mb) || 0)} MiB…`)
+          : e.phase;
       el.led.style.background = ['running', 'uploading'].includes(e.phase) ? P().good
         : e.phase === 'error' ? P().absent : P().muted;
       el.runBtn.disabled = ['running', 'starting prover', 'uploading'].includes(e.phase);
@@ -657,12 +668,22 @@ function handle(e) {
       state.backing = e.backing;
       if (e.hbm_total) { state.hbmTotal = e.hbm_total; state.hbmUsed = e.hbm_used; }
       log(`${e.mode}: driver says "${e.backing}"`, 'prover');
+      if (e.build) log(`prover built the buffer on the host in ${Number(e.build_s).toFixed(1)}s`, 'prover');
+      break;
+    case 'proverinfo':
+      if (e.hbm_total) { state.hbmTotal = e.hbm_total; state.hbmUsed = e.hbm_used; }
+      if (e.build) log(`prover built the buffer on the host in ${Number(e.build_s).toFixed(1)}s`, 'prover');
       break;
     case 'run':
       state.cfg = e.cfg || state.cfg;
       state.challenges = []; state.gpu = []; state.end = null;
       if (state.cfg && state.cfg.mode === 'honest') state.backing = 'device — cudaMalloc, verified';
-      log(`${e.mb} MiB, k=${e.k}, lanes=${e.lanes}, upload ${Number(e.upload_s).toFixed(1)}s`, 'verifier');
+      // In build mode upload_s times only the 92-byte recipe, so report the
+      // verifier's own build instead.
+      log(e.gen === 'argon2d'
+        ? `${e.mb} MiB, k=${e.k}, lanes=${e.lanes}, argon2d reference built in ${Number(e.gen_s).toFixed(1)}s`
+        : `${e.mb} MiB, k=${e.k}, lanes=${e.lanes}, ${e.gen || 'gen'} ${Number(e.gen_s).toFixed(1)}s, upload ${Number(e.upload_s).toFixed(1)}s`,
+        'verifier');
       break;
     case 'c':
       state.challenges.push({ us: e.us, ph: e.ph, ok: e.ok, checked: e.checked });
@@ -755,7 +776,7 @@ el.clearHistBtn.addEventListener('click', () => {
   state.history = []; save(); renderHistory();
 });
 ['input', 'change'].forEach(ev => {
-  ['mode', 'offload', 'hog', 'frac', 'k', 'lanes', 'mb', 'chain']
+  ['mode', 'offload', 'hog', 'frac', 'k', 'lanes', 'mb', 'chain', 'gen']
     .forEach(id => el[id].addEventListener(ev, () => { syncControls(); renderBaseline(); }));
   PRESET_IDS.forEach(id => el[id].addEventListener(ev, renderPresets));
 });
