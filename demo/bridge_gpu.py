@@ -331,6 +331,13 @@ class Run:
                     event["cfg"] = self.cfg
                 self._write(event)
                 HUB.publish(event)
+                # The verifier emits "run" once the buffer is generated,
+                # uploaded, and acknowledged, just before the first challenge.
+                # Without this the page said "uploading" for the whole run,
+                # which a slow mode like starved uvm made obvious, and a page
+                # reloaded mid-run was not sent the run it had missed.
+                if event.get("t") == "run":
+                    self._status("running")
             elif line:
                 self._log(line, src)
 

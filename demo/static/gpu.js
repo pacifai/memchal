@@ -203,10 +203,14 @@ function drawTime() {
                          [p.good, 'result readback'],
                          [p.host, 'fold'], [p.muted, 'residual']]);
 
+  // The run under test gets a bar only once it has results of its own; until
+  // then only the honest baseline shows. An honest run IS the baseline, so it
+  // gets one bar, not the stored baseline plus itself.
   const rows = [];
   const base = usableBaseline();
-  if (base) rows.push({ name: 'honest', ...base });
   const cur = currentSplit();
+  const curIsHonest = state.cfg && state.cfg.mode === 'honest';
+  if (base && !(cur && curIsHonest)) rows.push({ name: 'honest', ...base });
   if (cur) rows.push({ name: state.cfg ? state.cfg.mode : 'run', ...cur });
   if (!rows.length) {
     label(ctx, 'run something', 14, h / 2, p.muted, 12, 500);
@@ -214,8 +218,18 @@ function drawTime() {
   }
 
   const max = Math.max(...rows.map(r => r.total));
-  const pad = { l: 66, r: 14, t: 18 };
-  const bw = w - pad.l - pad.r;
+  // Each bar ends in its total, and the run under test also says how it
+  // compares with honest. Room for the longest of those labels is reserved on
+  // the right, so the longest bar cannot push its own number off the canvas.
+  const honestTotal = base ? base.total : null;
+  rows.forEach(r => {
+    r.text = fmtUs(r.total * 1000);
+    if (r.name !== 'honest' && honestTotal) r.text += ` · ${(r.total / honestTotal).toFixed(2)}× honest`;
+  });
+  ctx.font = `600 10px ${p.mono}`;
+  const textW = Math.max(...rows.map(r => ctx.measureText(r.text).width));
+  const pad = { l: 66, r: Math.ceil(textW) + 14, t: 18 };
+  const bw = Math.max(40, w - pad.l - pad.r);
   const barH = 26, gap = 16;
 
   rows.forEach((r, i) => {
@@ -232,8 +246,8 @@ function drawTime() {
     const rest = bw * (Math.max(0, r.total - r.kernel - r.copy - r.fold) / max);
     hatch(ctx, x, y, rest, barH, p.muted);
     ctx.strokeStyle = p.hair; ctx.strokeRect(pad.l, y, bw * (r.total / max), barH);
-    label(ctx, fmtUs(r.total * 1000), pad.l + bw * (r.total / max) + 6, y + barH / 2 + 4,
-          p.muted, 10, 600);
+    label(ctx, r.text, pad.l + bw * (r.total / max) + 6, y + barH / 2 + 4,
+          r.name === 'honest' ? p.muted : p.ink, 10, 600);
   });
 }
 
@@ -567,6 +581,9 @@ const PRESETS = [
   { id: 'partial-10', name: 'partial, 10%', by: 'timing', set: { mode: 'partial', offload: 10 },
     hint: 'Every byte held, but the last 10% of the buffer sits in host RAM. Above the ~5% resolution, so it separates.',
     expect: [['answers', 'all correct'], ['speed', '~1.7× honest']] },
+  { id: 'partial-5', name: 'partial, 5%', by: 'inside the noise', set: { mode: 'partial', offload: 5 },
+    hint: 'The last 5% of the buffer in host RAM. It adds roughly 11 µs of GPU work, but the kernel is only about an eighth of a ~200 µs response, and the rest drifts by ~20 µs between runs, so the total usually lands inside the honest range. One earlier H100 sweep separated it at 1.32×; this session did not reproduce that.',
+    expect: [['answers', 'all correct'], ['kernel', '~1.5× honest'], ['response', '~1.0–1.3× honest']] },
   { id: 'partial-2', name: 'partial, 2%', by: 'not caught', set: { mode: 'partial', offload: 2 },
     hint: 'The last 2% of the buffer in host RAM. Below the ~5% resolution: the slowdown is inside the honest noise.',
     expect: [['answers', 'all correct'], ['speed', '~1.1× honest, within noise']] },
@@ -621,8 +638,11 @@ function handle(e) {
   switch (e.t) {
     case 'status':
       state.phase = e.phase; state.cfg = e.cfg || state.cfg;
+      // A new run starts: drop the last run's results, so nothing on the page
+      // is drawn under the new run's name before it has answered anything.
+      if (e.phase === 'starting prover') { state.gpu = []; state.challenges = []; state.end = null; }
       el.statusText.textContent = e.error ? `error: ${e.error}`
-        : e.phase === 'uploading' ? `uploading ${(e.mb || (e.cfg && e.cfg.mb) || 0)} MiB…` : e.phase;
+        : e.phase === 'uploading' ? `generating and uploading ${(e.mb || (e.cfg && e.cfg.mb) || 0)} MiB…` : e.phase;
       el.led.style.background = ['running', 'uploading'].includes(e.phase) ? P().good
         : e.phase === 'error' ? P().absent : P().muted;
       el.runBtn.disabled = ['running', 'starting prover', 'uploading'].includes(e.phase);
@@ -647,6 +667,10 @@ function handle(e) {
     case 'c':
       state.challenges.push({ us: e.us, ph: e.ph, ok: e.ok, checked: e.checked });
       if (state.challenges.length > 5000) state.challenges.shift();
+      if (state.phase === 'running' && state.cfg) {
+        const total = (state.cfg.warmup || 0) + (state.cfg.n || 0);
+        el.statusText.textContent = `running · challenge ${state.challenges.length} of ${total}`;
+      }
       break;
     case 'g':
       state.gpu.push(e);
