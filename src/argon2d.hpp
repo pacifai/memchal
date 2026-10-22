@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
+#include <thread>
+#include <vector>
 
 namespace mc {
 namespace a2 {
@@ -345,8 +347,10 @@ static inline void fill_first_blocks(uint64_t* mem, const uint8_t h0[kPrehashLen
     }
 }
 
-// Lanes interact only at slice boundaries, so filling them in order here matches
-// the reference implementation's threaded fill byte for byte.
+// Fills one segment: one lane's share of one slice. Within a slice, a lane
+// writes only its own segment and reads other lanes only in slices that are
+// already finished, so the p segments of a slice can fill in any order or at
+// once. fill_slice() runs them on threads; the output is the same either way.
 static inline void fill_segment(uint64_t* mem, uint32_t pass, uint32_t slice,
                                 uint32_t lane, uint32_t lanes,
                                 uint32_t lane_len, uint32_t seg_len) {
@@ -372,6 +376,32 @@ static inline void fill_segment(uint64_t* mem, uint32_t pass, uint32_t slice,
                    mem + (size_t)curr * kBlockWords,
                    pass != 0);
     }
+}
+
+// Fills every lane's segment of one slice on `workers` threads, worker w taking
+// lanes w, w + workers, ... The calling thread is worker 0. Returning joins all
+// of them, which is the slice boundary Argon2 synchronizes on. If the OS
+// refuses a thread, the calling thread fills that worker's lanes itself.
+static inline void fill_slice(uint64_t* mem, uint32_t pass, uint32_t slice,
+                              uint32_t lanes, uint32_t lane_len, uint32_t seg_len,
+                              uint32_t workers) {
+    auto run = [=](uint32_t w) {
+        for (uint32_t lane = w; lane < lanes; lane += workers)
+            fill_segment(mem, pass, slice, lane, lanes, lane_len, seg_len);
+    };
+    if (workers <= 1) { run(0); return; }
+
+    std::vector<std::thread> pool;
+    pool.reserve(workers - 1);
+    uint32_t started = 1;
+    try {
+        for (; started < workers; ++started) pool.emplace_back(run, started);
+    } catch (...) {
+        // Fall through: the workers that did not start run below.
+    }
+    run(0);
+    for (uint32_t w = started; w < workers; ++w) run(w);
+    for (std::thread& th : pool) th.join();
 }
 
 // XOR the last column across lanes, then squeeze with H'. Used only by tests.
@@ -405,10 +435,16 @@ static inline bool argon2d_raw(uint64_t* mem, const Params& prm,
     initial_hash(h0, prm, tag ? taglen : 32);
     fill_first_blocks(mem, h0, prm.p, lane_len);
 
+    // Up to one thread per lane, never more than the machine has cores. The
+    // thread count changes only speed: p, not the thread count, defines the
+    // matrix.
+    uint32_t hw = std::thread::hardware_concurrency();
+    if (hw == 0) hw = 1;
+    const uint32_t workers = prm.p < hw ? prm.p : hw;
+
     for (uint32_t pass = 0; pass < prm.t; ++pass)
         for (uint32_t slice = 0; slice < kSyncPoints; ++slice)
-            for (uint32_t lane = 0; lane < prm.p; ++lane)
-                fill_segment(mem, pass, slice, lane, prm.p, lane_len, seg_len);
+            fill_slice(mem, pass, slice, prm.p, lane_len, seg_len, workers);
 
     if (tag) finalize_tag(mem, prm.p, lane_len, tag, taglen);
     return true;
