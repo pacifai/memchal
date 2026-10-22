@@ -5,8 +5,7 @@
 // argon2d_ctx() for random m, t, p, tag length, and input lengths. Test-only —
 // nothing that ships links libargon2.
 //
-//   g++ -O3 -std=c++17 -I/work/src -o tests/differential_argon2d \
-//       tests/differential_argon2d.cpp -largon2
+//   Build: make tests/differential_argon2d   (links -largon2)
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>

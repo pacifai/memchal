@@ -4,8 +4,7 @@
 //   Vector B — Argon2d, RFC 9106 section 5.1
 //   Vector C — memchal's build_buffer() wrapper, which no RFC covers
 //
-//   g++ -O3 -std=c++17 -I/work/src -o tests/known_answer_argon2d \
-//       tests/known_answer_argon2d.cpp
+//   Build: make tests/known_answer_argon2d
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
