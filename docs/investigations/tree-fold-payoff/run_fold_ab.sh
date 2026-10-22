@@ -20,18 +20,6 @@ for LANES in 16384 131072; do
     rc=$?
     kp
     if [ $rc -ne 0 ]; then printf '%-8s %-10s %10s   verifier exited %d\n' $FOLD $LANES $K $rc; continue; fi
-    python3 - "$OUT/$FOLD-$LANES.json" "$OUT/p-$FOLD-$LANES.log" "$FOLD" "$LANES" "$K" <<'PY'
-import json,sys,statistics,re
-d=json.load(open(sys.argv[1]))['result']
-p50=d['percentiles_us']['p50']['value']; err=d['errors']
-ks=[];cs=[];fs=[]
-for line in open(sys.argv[2]):
-    if '"t":"g"' in line:
-        e=json.loads(line[1:])
-        ks.append(e['kernel_ms']); cs.append(e['copy_ms']); fs.append(e['fold_ms'])
-med=lambda a: statistics.median(a) if a else float('nan')
-print('%-8s %-10s %10s %10.1f %10.4f %10.4f %10.4f   errors=%d' %
-      (sys.argv[3],sys.argv[4],sys.argv[5],p50,med(ks),med(cs),med(fs),err))
-PY
+    python3 docs/investigations/tree-fold-payoff/fold_row.py "$OUT/$FOLD-$LANES.json" "$OUT/p-$FOLD-$LANES.log" "$FOLD" "$LANES" "$K"
   done
 done

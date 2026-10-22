@@ -182,9 +182,8 @@ CODE=$(curl -sS -o /tmp/gpu_demo_pod.json -w '%{http_code}' "$API/pods/$POD_ID" 
 if [ "$CODE" = "404" ]; then
   STATUS=GONE
 else
-  STATUS=$(python3 -c 'import json,sys
-try: print(json.load(open(sys.argv[1])).get("status") or "UNKNOWN")
-except Exception: print("UNKNOWN")' /tmp/gpu_demo_pod.json 2>/dev/null)
+  STATUS=$(python3 scripts/runpod_json.py get status < /tmp/gpu_demo_pod.json 2>/dev/null)
+  STATUS=${STATUS:-UNKNOWN}
 fi
 rm -f /tmp/gpu_demo_pod.json
 case "$ACTION:$STATUS" in

@@ -76,12 +76,7 @@ api()  { # api METHOD PATH [BODY]
     curl -sS -X "$m" "$API$p" -H "Authorization: Bearer $RUNPOD_API_KEY"
   fi
 }
-jget() { python3 -c 'import json,sys
-d=json.load(sys.stdin)
-for k in sys.argv[1].split("."):
-    if d is None: break
-    d = d.get(k) if isinstance(d,dict) else None
-print("" if d is None else d)' "$1" 2>/dev/null; }
+jget() { python3 scripts/runpod_json.py get "$1" 2>/dev/null; }
 
 # --- 0. prerequisites -------------------------------------------------------
 say "prerequisites"
@@ -108,26 +103,7 @@ say "price"
 # that is not in the list is a typo in --gpu, and renting would fail anyway.
 CAT=$(curl -sS "$API/catalog/gpus?include=AVAILABILITY&product=POD" \
         -H "Authorization: Bearer $RUNPOD_API_KEY")
-INFO=$(printf '%s' "$CAT" | python3 -c '
-import json, sys
-gpu, cloud = sys.argv[1], sys.argv[2].lower()
-try:
-    gpus = json.load(sys.stdin).get("gpus", [])
-except Exception:
-    print("ERR|the catalog did not answer with JSON")
-    raise SystemExit
-g = next((x for x in gpus if x.get("id") == gpu), None)
-if g is None:
-    word = gpu.split()[-1].lower()
-    near = [x["id"] for x in gpus if word in x.get("id", "").lower()][:5]
-    hint = (" - did you mean: " + ", ".join(near)) if near else ""
-    print("ERR|no card with id " + repr(gpu) + hint)
-else:
-    price = (g.get("price") or {}).get(cloud)
-    print("|".join([g.get("name", gpu),
-                    "?" if price is None else str(price),
-                    g.get("availability", "?")]))
-' "$GPU" "$CLOUD" 2>&1)
+INFO=$(printf '%s' "$CAT" | python3 scripts/runpod_json.py catalog "$GPU" "$CLOUD" 2>&1)
 case "$INFO" in ERR\|*) die "${INFO#ERR|}" 1 ;; esac
 IFS='|' read -r GPU_NAME PRICE STOCK <<< "$INFO"
 if [ -z "${PRICE:-}" ] || [ "$PRICE" = "?" ]; then
@@ -156,10 +132,7 @@ case "$IDLE_MIN"  in ''|*[!0-9]*) die "--idle-min takes a whole number of minute
 # calls are a fallback for an image where it is missing.
 CAP='(sleep '"$CAP_S"'; echo "hard cap reached" > /root/watchdog.cap; runpodctl pod delete $RUNPOD_POD_ID; for u in https://rest.runpod.io/v1/pods/$RUNPOD_POD_ID https://api.runpod.io/v2/pods/$RUNPOD_POD_ID; do curl -sS -o /dev/null -X DELETE "$u" -H "Authorization: Bearer $RUNPOD_API_KEY"; done) > /dev/null 2>&1 &'
 BOOT=$CAP' apt-get update -q >/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server rsync git python3 build-essential curl >/dev/null 2>&1; mkdir -p /run/sshd /root/.ssh; echo "$PUBLIC_KEY" > /root/.ssh/authorized_keys; chmod 700 /root/.ssh; chmod 600 /root/.ssh/authorized_keys; echo "export PATH=/usr/local/cuda/bin:\$PATH" >> /root/.bashrc; touch /root/.ssh_ready; /usr/sbin/sshd -D -p 22'
-BODY=$(python3 -c 'import json,sys
-print(json.dumps({"name":"memchal-demo","image":sys.argv[1],"gpu":{"id":sys.argv[2]},
- "disk":int(sys.argv[3]),"ports":["22/tcp"],"cloud":sys.argv[4],"startSsh":True,
- "entrypoint":["bash","-lc"],"cmd":[sys.argv[5]]}))' "$IMAGE" "$GPU" "$DISK" "$CLOUD" "$BOOT")
+BODY=$(python3 scripts/runpod_json.py pod-body "$IMAGE" "$GPU" "$DISK" "$CLOUD" "$BOOT")
 RESP=$(api POST "/pods" "$BODY")
 POD_ID=$(printf '%s' "$RESP" | jget id)
 if [ -z "$POD_ID" ]; then

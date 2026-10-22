@@ -26,9 +26,5 @@ for HOG in 0 36000 39000 40000 41000 42000 42500 43000; do
   rc=$?
   FREE=$((TOTAL - HOG))
   if [ $rc -ne 0 ]; then printf '%10s %10s %12s\n' "$HOG" "$FREE" "failed/timeout"; continue; fi
-  python3 -c "
-import json
-d=json.load(open('$OUT/uvm-$HOG.json'))['result']
-p=d['percentiles_us']['p50']['value']
-print('%10s %10s %12.1f %9.2fx %8d' % ('$HOG','$FREE',p,p/$BASE,d['errors']))"
+  python3 docs/investigations/uvm-needs-hbm/uvm_row.py "$OUT/uvm-$HOG.json" "$HOG" "$FREE" "$BASE"
 done
