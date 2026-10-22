@@ -1,0 +1,21 @@
+t1: honest p50 median 185.6 us, sd 29.4 us over 6 baselines; separation threshold (median + 3sd) 273.8 us
+   keep HBM saved      p50 us  x honest  errors rebuilt/ch rounds/ch rebuild ms/ch gave up  separated?
+  1.000     0.00%       212.8     1.15x       0        0.0       1.0         0.000       0  no
+  0.999     0.10%       704.4     3.79x       0      246.3       2.9         0.316       0  yes
+  0.990     1.00%      1452.9     7.83x       0     2534.6       4.1         1.094       0  yes
+  0.950     5.01%      3625.7    19.53x       0    12687.2       6.4         2.229       0  yes
+  0.900    10.00%      6319.2    34.04x       0    25415.0       8.5         4.652       0  yes
+  0.500    50.00%    269050.6  1449.37x      30   127043.4      16.0       106.593      35  yes
+
+t2: honest p50 median 216.4 us, sd 27.5 us over 6 baselines; separation threshold (median + 3sd) 299.0 us
+   keep HBM saved      p50 us  x honest  errors rebuilt/ch rounds/ch rebuild ms/ch gave up  separated?
+  1.000     0.00%       237.3     1.10x       0        0.0       1.0         0.000       0  no
+  0.999     0.10%    354205.3  1636.67x      30        nan       nan           nan       ?  yes
+  0.990     1.00%    871201.9  4025.54x      30     2545.2       4.3       734.776      35  yes
+  0.950     5.01%   3392675.1 15676.46x      30    12736.1       6.7      3298.094      35  yes
+  0.900    10.00%   6512174.8 30090.66x      30    25413.0       8.4      6417.998      35  yes
+  0.500    50.00%  31767281.8 146786.35x      30   127024.1      15.9     31618.904      35  yes
+
+Errors are the verifier's count of wrong answers. A cheat that ran out of
+rebuild budget answers wrong, so a nonzero count there means it gave up.
+Only ratios within this session are quotable; absolute microseconds are not.

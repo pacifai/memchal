@@ -11,6 +11,7 @@
 /tests/known_answer
 /tests/known_answer_argon2d
 /tests/differential_argon2d
+/tests/rebuild_argon2d
 # scratch experiment artifacts
 /scratch/
 *.o
