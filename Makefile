@@ -60,10 +60,10 @@ gpu_answer.o: src/gpu_answer.cu src/gpu_answer.hpp src/challenge.hpp src/chacha2
 
 # These two are ordinary C++: they include gpu_answer.hpp, which is free of CUDA
 # types, so they compile with g++ and only need libcudart at link time.
-prover_cuda: src/prover_cuda.cpp src/common.hpp src/challenge.hpp src/net.hpp src/argon2d.hpp src/gpu_answer.hpp gpu_answer.o
+prover_cuda: src/prover_cuda.cpp src/common.hpp src/challenge.hpp src/net.hpp src/argon2d.hpp src/gpu_answer.hpp src/gpu_ingest.hpp gpu_answer.o
 	$(CXX) $(CXXFLAGS) -Isrc -o $@ src/prover_cuda.cpp gpu_answer.o $(CUDA_LIBS)
 
-cheating_prover_cuda: src/cheating_prover_cuda.cpp src/common.hpp src/challenge.hpp src/net.hpp src/argon2d.hpp src/gpu_answer.hpp gpu_answer.o
+cheating_prover_cuda: src/cheating_prover_cuda.cpp src/common.hpp src/challenge.hpp src/net.hpp src/argon2d.hpp src/gpu_answer.hpp src/gpu_ingest.hpp gpu_answer.o
 	$(CXX) $(CXXFLAGS) -Isrc -o $@ src/cheating_prover_cuda.cpp gpu_answer.o $(CUDA_LIBS)
 
 tests/known_answer_gpu: tests/known_answer_gpu.cpp src/challenge.hpp src/gpu_answer.hpp gpu_answer.o

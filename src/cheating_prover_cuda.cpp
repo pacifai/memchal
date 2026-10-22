@@ -43,6 +43,7 @@
 // card's total asks for memory that does not exist and the reserve fails.
 #include "common.hpp"
 #include "gpu_answer.hpp"
+#include "gpu_ingest.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -98,6 +99,12 @@ static void serve(int cfd) {
     Hello hello{};
     if (!recv_all(cfd, &hello, sizeof(hello))) { fprintf(stderr, "[cheat] no hello\n"); return; }
     if (hello.magic != kMagic) { fprintf(stderr, "[cheat] bad magic\n"); return; }
+    if (hello.version > kWireVersion) {
+        fprintf(stderr, "[cheat] unsupported wire version %u (max %u)\n",
+                hello.version, kWireVersion);
+        return;
+    }
+    const bool build = (hello.flags & kFlagBuild) != 0;
 
     size_t bytes = (size_t)hello.buffer_bytes;
     bytes = (bytes + 7) & ~size_t(7);
@@ -122,8 +129,8 @@ static void serve(int cfd) {
     }
 
     double held = (g_mode == FAKE) ? g_frac : 1.0;
-    printf("[cheat] mode=%s receiving %.2f MiB (%llu words), holding %.0f%%",
-           kModeNames[g_mode], bytes / 1048576.0,
+    printf("[cheat] mode=%s %s %.2f MiB (%llu words), holding %.0f%%",
+           kModeNames[g_mode], build ? "building" : "receiving", bytes / 1048576.0,
            (unsigned long long)num_words, held * 100.0);
     if (g_mode == PARTIAL) printf(", offloading %.1f%% off the card", g_offload * 100.0);
     printf("\n");
@@ -137,20 +144,27 @@ static void serve(int cfd) {
         return;
     }
 
-    size_t cap = 0;
-    unsigned char* stage = gpu::staging(p, &cap);
-    size_t left = bytes;
-    while (left) {
-        size_t chunk = left < cap ? left : cap;
-        if (!recv_all(cfd, stage, chunk)) {
-            fprintf(stderr, "[cheat] short data\n");
-            gpu::destroy(p); gpu::unhog(); return;
-        }
-        if (!gpu::push(p, chunk, err, sizeof err)) {
+    // Build mode: build on the host, then copy to the card (see gpu_ingest.hpp).
+    // Every mode then ingests through the same push() loop, so fake still
+    // discards its tail and uvm still prefetches. uvm and zerocopy also hold
+    // their buffer in host memory, so during the copy they need two full host
+    // copies at once.
+    Source src; src.fd = cfd;
+    HostBuild hb;
+    if (build) {
+        if (!host_build_from_wire(cfd, hello, hb, err, sizeof err)) {
             fprintf(stderr, "[cheat] FATAL: %s\n", err);
             gpu::destroy(p); gpu::unhog(); return;
         }
-        left -= chunk;
+        printf("[cheat] built on the host in %.3f s (m=%u KiB t=%u p=%u); copying to the card\n",
+               hb.build_s, hb.recipe.m_kib, hb.recipe.t, hb.recipe.p);
+        src.built = hb.buf;
+    }
+    bool ok = ingest(p, src, bytes, err, sizeof err);
+    host_build_free(hb);
+    if (!ok) {
+        fprintf(stderr, "[cheat] FATAL: %s\n", err);
+        gpu::destroy(p); gpu::unhog(); return;
     }
 
     const char* backing = "?";
@@ -167,10 +181,12 @@ static void serve(int cfd) {
     printf(",\"backing\":");
     json_str(stdout, backing);
     printf(",\"device_backed\":%s,\"held_frac\":%.4f,\"hog_mib\":%llu,"
-           "\"offload\":%.4f,\"hbm_used\":%llu,\"hbm_total\":%llu}\n",
+           "\"offload\":%.4f,\"hbm_used\":%llu,\"hbm_total\":%llu,"
+           "\"build\":%s,\"build_s\":%.4f}\n",
            is_device ? "true" : "false", held, offload,
            (unsigned long long)g_hog_mib,
-           (unsigned long long)(ht - hf), (unsigned long long)ht);
+           (unsigned long long)(ht - hf), (unsigned long long)ht,
+           build ? "true" : "false", hb.build_s);
 
     // The lie: claim a pinned baseline whatever the driver actually says.
     Ready ready{ kMagic, 1u, 0 };
