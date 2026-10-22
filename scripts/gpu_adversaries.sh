@@ -109,10 +109,7 @@ for c in $(seq 1 "$CYCLES"); do
   for m in honest fake uvm zerocopy; do
     printf '  %-9s ' "$m"
     if run_one "$m" "$c"; then
-      read -r p50 err < <(python3 -c "
-import json,sys
-d=json.load(open(sys.argv[1]))['result']
-print(d['percentiles_us']['p50']['value'], d['errors'])" "$OUT/$m-c$c.json" 2>/dev/null)
+      read -r p50 err < <(python3 scripts/gpu_adversaries.py p50 "$OUT/$m-c$c.json" 2>/dev/null)
       echo "p50=${p50:-?} us  errors=${err:-?}"
     fi
   done
@@ -120,35 +117,4 @@ done
 
 echo
 echo "=== summary (within this session only) ==="
-python3 - "$OUT" <<'PY'
-import json, sys, glob, os, statistics
-out = sys.argv[1]
-by = {}
-for f in sorted(glob.glob(os.path.join(out, "*-c*.json"))):
-    mode = os.path.basename(f).rsplit("-c", 1)[0]
-    try:
-        d = json.load(open(f))
-    except Exception:
-        continue
-    r = d.get("result") or {}
-    p50 = ((r.get("percentiles_us") or {}).get("p50") or {}).get("value")
-    err = r.get("errors")
-    if p50 is None:
-        continue
-    by.setdefault(mode, {"p50": [], "err": 0})
-    by[mode]["p50"].append(p50)
-    by[mode]["err"] += int(err or 0)
-
-base = statistics.median(by["honest"]["p50"]) if "honest" in by else None
-print(f"{'mode':<10} {'p50 us':>10} {'x honest':>10} {'errors':>8}")
-for m in ("honest", "fake", "uvm", "zerocopy"):
-    if m not in by:
-        print(f"{m:<10} {'did not run':>10}")
-        continue
-    p = statistics.median(by[m]["p50"])
-    r = f"{p/base:.2f}x" if base else "-"
-    print(f"{m:<10} {p:>10.1f} {r:>10} {by[m]['err']:>8}")
-print()
-print("fake is meant to be FAST and WRONG: judge it by the error column, not p50.")
-print("uvm with HBM taken away, and zerocopy, are meant to be SLOW and RIGHT.")
-PY
+python3 scripts/gpu_adversaries.py summary "$OUT"

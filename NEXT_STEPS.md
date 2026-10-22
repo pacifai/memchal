@@ -102,12 +102,18 @@ honest prover plus all three adversaries ran end to end
   own time. It is still the largest single term at 131k lanes. *Done when:* the
   fold is smaller than the kernel in an honest response, and the vectors still
   pass.
-- [ ] **Push the resolution below 5%.** The partial-residency sweep separated at
-  5% offload and not at 2%, but the limit is the honest distribution's width on a
-  card whose clocks cannot be locked — 11.6 us of spread on a 188.8 us median —
-  not anything physical. More samples per point, more probes per challenge, or a
-  provider that permits clock locking should all move it. *Done when:* the same
-  sweep runs with a narrowed baseline and the resolution is restated.
+- [ ] **Amplify the timing difference.** A cheat's extra cost has to stand out
+  from the honest response, and today it does not stand out by much. 5% in the lab
+  could mean 10% or more under real monitoring, and the
+  [host CPU's cache](docs/investigations/partial-residency-resolution/README.md#later-finding-the-host-cpus-cache)
+  can hide a few hundred MiB of offload almost for free. The kernel, where every
+  offload cost lands, is about 24 us of a ~200 us response; the rest drifts by
+  about 20 us between runs. The lever is to make each challenge read more: the
+  offload penalty grows with the number of probes, while the fold, readback, and
+  network costs barely move. Measure the resolution as a function of `k` (probes
+  per challenge) and, with the fold-collapse item above, of the fixed overhead.
+  *Done when:* the resolution sweep has run at several `k` on one host with its CPU
+  model recorded, and the resolution is restated as a function of `k`.
 - [ ] **Sweep resolution at deployment scale.** 5% was measured on a 4096 MiB
   buffer. The case that matters is tens of gigabytes, where both the absolute
   hideable bytes and the probe coverage per challenge change. *Done when:* the
