@@ -1,0 +1,15 @@
+{
+  "session": "20260917T141736Z-403ac210",
+  "recorded_utc": "2026-09-17T14:17:36Z",
+  "gpu": "NVIDIA A40",
+  "compute_cap": "86",
+  "gpu_memory_mib": "46068",
+  "gpu_count": "1",
+  "driver": "570.195.03",
+  "vcpus": "96",
+  "mig_mode": "[N/A]",
+  "clock_lock": "denied",
+  "nvlink": "no",
+  "rdma": "no",
+  "pcie": "1, 16"
+}

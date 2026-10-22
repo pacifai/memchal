@@ -3,6 +3,10 @@
 /verifier
 /cheating_prover
 /bench_build
+# compiled GPU binaries (built on a rented box, never committed)
+/prover_cuda
+/cheating_prover_cuda
+/tests/known_answer_gpu
 # compiled test binary
 /tests/known_answer
 /tests/known_answer_argon2d
@@ -14,6 +18,13 @@
 /tmp/
 # generated results (CSVs/plots) — regenerate with ./run.sh; summaries live in docs
 /results/
+# local dev scaffolding — useful on a laptop, not part of the project
+demo/fake_feed.py
 # python bytecode
 __pycache__/
 *.pyc
+
+# GPU demo state — which pod this checkout rented (gpu_demo_up.sh)
+/.gpu_demo_state
+# macOS Finder metadata
+.DS_Store

@@ -15,6 +15,9 @@ not comparable across sessions (see [decisions/0003](../decisions/0003-timing-de
 | [mmap-needs-ram](mmap-needs-ram/) | Does the mmap adversary survive without RAM to cache the file? | No — starved below the buffer it's ~840× honest; timing tracks residency, not device |
 | [prefetch-needs-pattern](prefetch-needs-pattern/) | Is the prefetch adversary real, and does chaining stop it? | Real only under memory pressure (~4× win starved; a strawman cached); dependent access removes the edge |
 | [latency-decomposition](latency-decomposition/) | Where does a challenge's time go? Why is `fake` faster? | ~45 µs transport floor + ~half ALU / ~half DRAM per probe; `fake` is genuinely cheaper (no memory reads) |
+| [partial-residency-resolution](partial-residency-resolution/) | How little can a prover offload before the detector stops seeing it? | ~5% of the buffer. A gradient, not a cliff — which is what a decision rule needs. **H100.** |
+| [tree-fold-payoff](tree-fold-payoff/) | Did moving the cross-lane fold onto the card pay off? | Yes: 8x the lanes cost the old fold 8.1x and the tree fold 1.24x. 8.9x faster response at 131k lanes. **H100.** |
+| [uvm-needs-hbm](uvm-needs-hbm/) | Does the GPU's UVM cheat survive without HBM to hold the buffer? | No — indistinguishable from honest until free HBM drops below the buffer size, then ~4,600x. No early warning. **First GPU measurement.** |
 | [session-variance](session-variance/) | How much of absolute latency is the environment? | Within-session stable; between-session P/E-core swing up to ~1.6× (load-dependent) → compare within-session only |
 
 Run from the repo root via `./run.sh bash <path>` — except session-variance and

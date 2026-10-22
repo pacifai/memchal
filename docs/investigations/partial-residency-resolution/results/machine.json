@@ -1,0 +1,9 @@
+{
+  "session": "h100-20260917",
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "compute_cap": "90",
+  "gpu_memory_mib": "81559",
+  "driver": "see pod",
+  "clock_lock": "denied",
+  "note": "RunPod Secure Cloud, US-NE-1, nvidia/cuda:12.8.0-devel-ubuntu22.04, $3.49/hr"
+}

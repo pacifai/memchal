@@ -1,0 +1,23 @@
+{
+  "schema": "memchal.verifier.v1",
+  "label": "uvm-hog36000",
+  "env": {"page_size": 4096, "online_cpus": 96, "clock": "steady_clock"},
+  "params": {"mb": 4096, "k": 262144, "lanes": 16384, "n": 30, "warmup": 5, "seed": "0xabcdef0123456789", "host": "127.0.0.1", "port": 9099, "gen": "chacha20", "chain": "dependent", "nonce": "random", "gap_us": 0, "chain_depth": 16},
+  "prover": {"locked": true},
+  "upload": {"bytes": 4294967296, "seconds": 3.480909, "gib_per_s": 1.1491},
+  "result": {
+    "samples": 30,
+    "errors": 0,
+    "mean_us": 637.4954,
+    "stddev_us": 55.0529,
+    "throughput_probes_per_us": 411.2093,
+    "percentiles_us": {
+      "min": {"value": 507.7450, "tail_n": 30, "reliable": true},
+      "p50": {"value": 648.0950, "tail_n": 15, "reliable": true},
+      "p90": {"value": 694.1810, "tail_n": 3, "reliable": false},
+      "p99": {"value": 713.4640, "tail_n": 0, "reliable": false},
+      "p99.9": {"value": 713.4640, "tail_n": 0, "reliable": false},
+      "max": {"value": 746.0980, "tail_n": 0, "reliable": true}
+    }
+  }
+}

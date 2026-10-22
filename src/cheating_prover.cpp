@@ -225,6 +225,15 @@ static void challenge_loop(int cfd, Load&& load, uint64_t num_words, const char*
         if (ch.flags & kFlagTerminate) break;
         g_probes_total += ch.k;
         bool chained = (ch.flags & kFlagChained) != 0;
+        if (ch.flags & kFlagTreeFold) {
+            // The CPU cheats still fold sequentially. Answering a tree-fold
+            // challenge with a chain answer would be silently wrong, which is
+            // far worse than refusing: it would look like a detection.
+            fprintf(stderr, "[cheat] tree fold (kFlagTreeFold) is not implemented "
+                            "on the CPU adversaries — it is a GPU optimisation. "
+                            "Re-run the verifier without --fold tree.\n");
+            break;
+        }
         Response r{ answer_challenge_t(load, num_words, ch.nonce, ch.k, ch.lanes, chained) };
         if (!send_all(cfd, &r, sizeof(r))) break;
         ++served;
@@ -301,6 +310,10 @@ static void precompute_worker(PrecomputeState* st, uint64_t* mmap_buf, uint64_t 
 
         // Precompute the next kPrecomputeLookahead predicted nonces.
         bool chained = (flags & kFlagChained) != 0;
+        if (flags & kFlagTreeFold) {
+            fprintf(stderr, "[cheat] tree fold not implemented on the CPU adversaries\n");
+            break;
+        }
         for (uint64_t j = 1; j <= kPrecomputeLookahead; ++j) {
             uint64_t predicted_nonce = base_nonce + step * j;
 
@@ -453,6 +466,15 @@ static void serve_precompute(int cfd, const char* datafile, uint32_t trace_every
         if (!hit) {
             // Cache miss: compute from mmap now (slow path).
             bool chained = (ch.flags & kFlagChained) != 0;
+        if (ch.flags & kFlagTreeFold) {
+            // The CPU cheats still fold sequentially. Answering a tree-fold
+            // challenge with a chain answer would be silently wrong, which is
+            // far worse than refusing: it would look like a detection.
+            fprintf(stderr, "[cheat] tree fold (kFlagTreeFold) is not implemented "
+                            "on the CPU adversaries — it is a GPU optimisation. "
+                            "Re-run the verifier without --fold tree.\n");
+            break;
+        }
             ans = answer_challenge_t(
                 [mmap_buf](uint64_t idx) -> uint64_t { return mmap_buf[idx]; },
                 num_words, ch.nonce, ch.k, ch.lanes, chained);
@@ -707,6 +729,15 @@ static void serve(int cfd, Mode mode, double frac, const char* datafile,
             if (ch.flags & kFlagTerminate) break;
             g_probes_total += ch.k;
             bool chained = (ch.flags & kFlagChained) != 0;
+        if (ch.flags & kFlagTreeFold) {
+            // The CPU cheats still fold sequentially. Answering a tree-fold
+            // challenge with a chain answer would be silently wrong, which is
+            // far worse than refusing: it would look like a detection.
+            fprintf(stderr, "[cheat] tree fold (kFlagTreeFold) is not implemented "
+                            "on the CPU adversaries — it is a GPU optimisation. "
+                            "Re-run the verifier without --fold tree.\n");
+            break;
+        }
 
             // --- Phase 1: dry run — enumerate indices (data-independent values if
             //     !chained, zero-derived values if chained — intentionally wrong). ---

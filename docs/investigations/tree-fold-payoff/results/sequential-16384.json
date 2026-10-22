@@ -1,0 +1,23 @@
+{
+  "schema": "memchal.verifier.v1",
+  "label": "fold-sequential-16384",
+  "env": {"page_size": 4096, "online_cpus": 208, "clock": "steady_clock"},
+  "params": {"mb": 8192, "k": 262144, "lanes": 16384, "n": 60, "warmup": 15, "seed": "0xabcdef0123456789", "host": "127.0.0.1", "port": 9099, "gen": "chacha20", "chain": "dependent", "nonce": "random", "gap_us": 0, "chain_depth": 16},
+  "prover": {"locked": true},
+  "upload": {"bytes": 8589934592, "seconds": 4.080560, "gib_per_s": 1.9605},
+  "result": {
+    "samples": 60,
+    "errors": 0,
+    "mean_us": 408.2040,
+    "stddev_us": 60.4153,
+    "throughput_probes_per_us": 642.1886,
+    "percentiles_us": {
+      "min": {"value": 189.2210, "tail_n": 60, "reliable": true},
+      "p50": {"value": 414.4810, "tail_n": 30, "reliable": true},
+      "p90": {"value": 456.8950, "tail_n": 6, "reliable": false},
+      "p99": {"value": 510.1050, "tail_n": 1, "reliable": false},
+      "p99.9": {"value": 510.1050, "tail_n": 0, "reliable": false},
+      "max": {"value": 528.9360, "tail_n": 0, "reliable": true}
+    }
+  }
+}

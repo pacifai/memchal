@@ -87,32 +87,73 @@ attacking it.
 > weights — the kind of friction we're trying to avoid. Revisit only if that
 > constraint changes.
 
-## Later — GPU port and decision rule
+## Now — what the first GPU session surfaced
 
-Timing is a core signal (it's what proves the data is in *fast* memory, not just
-stored somewhere), but the CPU-in-Docker environment can't measure it faithfully and
-CPU-DRAM latencies don't transfer to GPU-VRAM. So the authoritative timing/residency
-validation rides on the deployment target — the GPU port — rather than a bare-metal
-CPU run. The CPU version's job is to prove the design: the challenge math, the
-correctness detector, and the *shapes* of the defenses (chaining defeats prefetch,
-resident-vs-not is distinguishable in principle).
+The port is correct and runs: the known-answer gate passed on an A40, and the
+honest prover plus all three adversaries ran end to end
+([uvm-needs-hbm](docs/investigations/uvm-needs-hbm/README.md), and the table in
+`README.md`). That session raised three problems, in the order to fix them.
 
-- [ ] **The GPU port**, with timing validation built in. *Done when:* the answer path
-  runs as a CUDA kernel with the buffer in VRAM (`cudaMalloc`) and `map_index`'s
-  128-bit multiply replaced by `__umul64hi`, **and** a cold read on real hardware
-  shows the timing gap separates VRAM-resident from host-RAM or disk with the true
-  per-access cost. Settle the adversaries and the design on CPU first.
+- [ ] **Collapse the tree fold's per-level launches.** The tree fixed the
+  scaling — 8x the lanes cost it 1.24x against the sequential fold's 8.1x — but
+  it is now launch-bound: ~0.09 ms at 16k lanes and ~0.11 ms at 131k is 15 and 18
+  kernel launches at roughly 5 us each, not work. Doing the first several levels
+  in shared memory inside one kernel would take the fold well under the kernel's
+  own time. It is still the largest single term at 131k lanes. *Done when:* the
+  fold is smaller than the kernel in an honest response, and the vectors still
+  pass.
+- [ ] **Push the resolution below 5%.** The partial-residency sweep separated at
+  5% offload and not at 2%, but the limit is the honest distribution's width on a
+  card whose clocks cannot be locked — 11.6 us of spread on a 188.8 us median —
+  not anything physical. More samples per point, more probes per challenge, or a
+  provider that permits clock locking should all move it. *Done when:* the same
+  sweep runs with a narrowed baseline and the resolution is restated.
+- [ ] **Sweep resolution at deployment scale.** 5% was measured on a 4096 MiB
+  buffer. The case that matters is tens of gigabytes, where both the absolute
+  hideable bytes and the probe coverage per challenge change. *Done when:* the
+  curve exists at a buffer size representative of a real workload.
+- [ ] **Give the partial cheat a brain.** It offloads a contiguous tail. A real
+  adversary would pick *which* bytes to offload — coldest first, or whatever the
+  probe distribution touches least. 5% is therefore an upper bound on the
+  detector's resolution against a thoughtful opponent, not a guarantee. *Done
+  when:* an offload policy that chooses its bytes is measured against the naive
+  one.
+> The H100 run is **done**: the gate passed on sm_90, the fold A/B and the
+> resolution sweep both ran, and their numbers are in the two investigations
+> above. The A40 numbers stand only as the first-light record.
+
+> Two provider questions are now **settled** for RunPod, from the machine record:
+> clock locking is **denied**, and `/dev/infiniband` is **absent**, so the RDMA
+> experiments need a different provider. Neither blocks the port.
+
+## Later — the decision rule
+
+- [ ] **Understand offload to a neighbor GPU.** Every measurement so far ran on
+  one GPU, where the only place to hide data was host memory over PCIe. On a
+  multi-GPU server the GPUs are linked to each other directly (NVLink, through
+  NVSwitches), so a prover could keep part of the buffer in another GPU's
+  memory instead, which is much closer to local speed than host memory. Nothing in the
+  adversary taxonomy covers this yet. This is a direction to understand, not a
+  design: what the threat model should say about the other GPUs in the box,
+  and whether timing can separate it at all. *Done when:* the question is
+  written up well enough to decide whether it needs a decision record, an
+  experiment, or both.
+
 - [ ] **A decision rule with error rates.** Turn the harness's separations into an
   accept/reject classifier. *Done when:* it outputs a verdict given a response and a
   claimed configuration, with measured false-positive and false-negative rates.
-  Depends on the timing regime being settled on real hardware (the GPU validation
-  above).
+  Depends on the resolution sweep above: a cliff with no gradient gives a
+  classifier nothing to set a threshold on.
+- [ ] **Open a random subset of lanes.** The tree fold produces a Merkle root, so
+  the structure for opening lanes is now there, but nothing opens any: the
+  response is still one 64-bit value and the verifier still recomputes every
+  probe, which costs as much as proving. Returning the root plus a sampled set
+  of lane openings makes verification sublinear in `k` and takes the response
+  past 64 bits at the same time. *Done when:* the verifier checks a subset, and
+  soundness is published as a function of the number of lanes opened.
 
 ## Backlog
 
-- [ ] **Responses ≥128 bits with a cryptographic hash.** 64 bits is guessable or
-  precomputable against a real adversary. *Done when:* the response width grows, the
-  known-answer test is updated, and the wire version bumps.
 - [ ] **Optional: a bare-metal CPU cold read** (buffer > RAM and/or `O_DIRECT`,
   pinned with `taskset`). Not on the path — the real timing check happens on the GPU
   — but it's a cheap one-command early signal of whether the timing gap survives real
