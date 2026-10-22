@@ -15,6 +15,7 @@
 #include <cmath>
 #include <chrono>
 #include <random>
+#include <thread>
 
 using namespace mc;
 using Clock = std::chrono::steady_clock;
@@ -86,6 +87,32 @@ struct Args {
 // is safe to be off the card. Draws come from a random_device-seeded generator
 // the prover never sees.
 static bool g_gap_random = false;
+
+// fill_buffer_chacha() on every core. ChaCha20 is a counter-mode stream, so
+// block b of the output depends only on the key and b: each thread fills its
+// own range starting at that range's block index, and the result is
+// byte-identical to the one-thread fill. Ranges split on 64-byte block
+// boundaries so no block is shared. On one core a 4 GiB buffer took seconds
+// before the upload could start, which a live demo spent waiting.
+static void fill_chacha_parallel(uint64_t* buf, uint64_t num_words, const uint8_t key[32]) {
+    static const uint8_t zero_nonce[12] = {};
+    size_t nbytes = (size_t)num_words * 8;
+    size_t blocks = (nbytes + 63) / 64;
+    unsigned t = std::thread::hardware_concurrency();
+    if (t == 0) t = 1;
+    if (t > 64) t = 64;
+    if (blocks < (size_t)t * 1024) t = 1;     // small buffers: not worth the threads
+    std::vector<std::thread> pool;
+    size_t per = (blocks + t - 1) / t;
+    for (unsigned i = 0; i < t; ++i) {
+        size_t b0 = (size_t)i * per;
+        if (b0 >= blocks) break;
+        size_t off = b0 * 64;
+        size_t len = std::min(nbytes - off, per * 64);
+        pool.emplace_back([=] { chacha20_fill((uint8_t*)buf + off, len, key, zero_nonce, b0); });
+    }
+    for (auto& th : pool) th.join();
+}
 
 static void gap_sleep(uint32_t gap_us) {
     if (gap_us == 0) return;
@@ -373,11 +400,14 @@ int main(int argc, char** argv) {
     // Generate our reference copy.
     uint64_t* buf = (uint64_t*)malloc(bytes);
     if (!buf) { fprintf(stderr, "malloc failed\n"); return 1; }
+    auto gen0 = Clock::now();
     if (a.gen == Gen::CHACHA20) {
-        fill_buffer_chacha(buf, num_words, chacha_buf_key);
+        fill_chacha_parallel(buf, num_words, chacha_buf_key);
     } else {
         fill_buffer(buf, num_words, a.seed, a.gen);
     }
+    double gen_s = std::chrono::duration<double>(Clock::now() - gen0).count();
+    printf("[verifier] generated in %.3f s (%.2f GiB/s)\n", gen_s, bytes / 1073741824.0 / gen_s);
 
     int fd = connect_to(a.host, a.port);
 
@@ -415,10 +445,10 @@ int main(int argc, char** argv) {
             fprintf(stream.f,
                     "@{\"t\":\"run\",\"label\":\"%s\",\"mb\":%.6g,\"k\":%u,\"lanes\":%u,\"n\":%u,"
                     "\"warmup\":%u,\"pages\":%llu,\"page_bytes\":%ld,\"locked\":%s,"
-                    "\"upload_s\":%.4f,\"map_every\":%u}\n",
+                    "\"gen_s\":%.4f,\"upload_s\":%.4f,\"map_every\":%u}\n",
                     a.label, a.mb, a.k, a.lanes, a.n, a.warmup,
                     (unsigned long long)num_pages, page_bytes,
-                    ready.locked ? "true" : "false", up_s, a.probe_map_every);
+                    ready.locked ? "true" : "false", gen_s, up_s, a.probe_map_every);
         }
     }
     uint64_t seq = 0;
