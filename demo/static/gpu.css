@@ -1,0 +1,89 @@
+/* gpu.css — styles specific to the GPU page, loaded after app.css.
+ *
+ * Every canvas gets an explicit height here. That is not cosmetic: a canvas
+ * with no CSS height falls back to its own bitmap height, which the drawing
+ * code sets, so the element grows on every redraw until the tab dies. The CSS
+ * box has to be the authority. */
+#residency { height: 96px; }
+#timesplit { height: 132px; }
+#detect    { height: 210px; }
+#latency   { height: 200px; }
+
+/* A caveat you can see without reading a paragraph. */
+.badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-family: var(--face-num); font-size: 9.5px; letter-spacing: .02em;
+  color: var(--muted); border: 1px solid var(--hair); border-radius: 3px;
+  padding: 1px 5px; white-space: nowrap;
+}
+.badge.warn { color: var(--slow); border-color: var(--slow); }
+.badge-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+
+/* Shown only when the page is being fed by fake_feed.py, so a recording made
+ * against synthetic data can never be mistaken for a measurement. */
+#synthetic {
+  display: none; background: var(--slow); color: #12080a;
+  font-family: var(--face-num); font-size: 11px; font-weight: 700;
+  letter-spacing: .08em; text-align: center; padding: 3px;
+}
+#synthetic.on { display: block; }
+
+.screen-top .legend { margin-left: auto; }
+.mini { font-family: var(--face-num); font-size: 10px; color: var(--muted); }
+.knob { margin-top: 8px; }
+.knob input[type=range] { width: 100%; }
+
+/* Run history. Fixed height with its own scroll so the table can never push
+ * the page taller — the same reason every canvas above is pinned. */
+.hist-scroll { max-height: 190px; overflow: auto; }
+table.hist {
+  width: 100%; border-collapse: collapse;
+  font-family: var(--face-num); font-size: 10px;
+}
+table.hist th {
+  position: sticky; top: 0; background: var(--panel, #0f1518);
+  text-align: left; font-weight: 600; color: var(--muted);
+  padding: 3px 6px; border-bottom: 1px solid var(--hair);
+}
+table.hist td {
+  padding: 3px 6px; border-bottom: 1px solid var(--hair);
+  color: var(--ink); white-space: nowrap;
+}
+table.hist td.muted { color: var(--muted); }
+table.hist .bad { color: var(--critical); }
+#clearBaseBtn, #clearHistBtn { margin-top: 6px; }
+
+/* The run buttons lead the controls column. app.css gives .actions a top
+ * margin for its old place under the last control; at the top it needs the
+ * space below instead, matching the 14px gap between the other panels. */
+.col-controls > .actions { margin: 0 0 14px; }
+
+/* Presets lead the controls; every knob they set lives in the collapsed
+ * settings panel below, so a demo shows a named configuration and nothing to
+ * fiddle with unless you open it. */
+.col-controls { display: flex; flex-direction: column; gap: 14px; }
+.col-controls > .actions { margin: 0; }
+.presets { display: flex; flex-direction: column; gap: 4px; }
+button.preset {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+  width: 100%; text-align: left; padding: 7px 9px;
+  font-family: var(--face-label); text-transform: uppercase; letter-spacing: .1em;
+}
+button.preset .by {
+  font-family: var(--face-num); text-transform: none; letter-spacing: 0;
+  font-size: 9.5px; font-weight: 500; color: var(--muted);
+}
+button.preset[aria-pressed="true"] { border-color: var(--fast); }
+button.preset[aria-pressed="true"] .by { color: var(--fast); }
+.expect { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; margin: 10px 0 0; }
+.expect dt { font-family: var(--face-label); text-transform: uppercase; letter-spacing: .12em; font-size: 10px; color: var(--muted); }
+.expect dd { margin: 0; font-family: var(--face-num); font-size: 11px; color: var(--ink); }
+.adv > summary.block {
+  cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px;
+  font-family: var(--face-label); text-transform: uppercase; letter-spacing: .12em;
+  font-size: 11px; font-weight: 600; color: var(--muted);
+}
+.adv > summary.block::-webkit-details-marker { display: none; }
+.adv > summary.block::before { content: "▸"; }
+.adv[open] > summary.block::before { content: "▾"; }
+.adv[open] { display: flex; flex-direction: column; gap: 14px; }

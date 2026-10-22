@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 #include <sys/mman.h>
 #include <sys/resource.h>
 
@@ -115,13 +116,26 @@ static void serve(int cfd) {
     if (!send_all(cfd, &ready, sizeof(ready))) { munmap(raw, bytes); return; }
 
     // Challenge loop: answer as fast as possible.
+    // Scratch for the tree fold lives outside the loop — allocating inside it
+    // would put malloc in the timed path, which is the one thing being measured.
+    std::vector<uint64_t> scratch;
     uint64_t served = 0;
     for (;;) {
         Challenge ch{};
         if (!recv_all(cfd, &ch, sizeof(ch))) break;
         if (ch.flags & kFlagTerminate) break;
         bool chained = (ch.flags & kFlagChained) != 0;
-        Response resp{ answer_challenge(buf, num_words, ch.nonce, ch.k, ch.lanes, chained) };
+        bool tree    = (ch.flags & kFlagTreeFold) != 0;
+        uint64_t hash;
+        if (tree) {
+            uint32_t nl = ch.lanes ? ch.lanes : 1u;
+            if (scratch.size() < nl) scratch.resize(nl);
+            hash = answer_challenge_tree(buf, num_words, ch.nonce, ch.k, nl, chained,
+                                         scratch.data());
+        } else {
+            hash = answer_challenge(buf, num_words, ch.nonce, ch.k, ch.lanes, chained);
+        }
+        Response resp{ hash };
         if (!send_all(cfd, &resp, sizeof(resp))) break;
         ++served;
     }

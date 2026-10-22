@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>memory challenge · gpu</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230a0e0f'/><g fill='%233987e5'><rect x='4' y='7' width='16' height='6'/><rect x='4' y='16' width='11' height='6'/></g><g fill='%23d95926'><rect x='21' y='7' width='7' height='6'/><rect x='16' y='16' width='12' height='6'/></g></svg>">
+<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="gpu.css">
+</head>
+<body>
+<div id="synthetic">SYNTHETIC DATA — NO GPU — NOT A MEASUREMENT</div>
+<header class="rail">
+  <div class="rail-id">
+    <span class="led" id="led" aria-hidden="true"></span>
+    <span class="rail-name">memory challenge</span>
+    <span class="rail-role">gpu · live</span>
+  </div>
+  <div class="rail-right">
+    <span class="rail-status" id="deviceText">no device</span>
+    <span class="rail-status" id="statusText" role="status">idle</span>
+    <button id="themeBtn" class="chip" type="button">daylight</button>
+  </div>
+</header>
+
+<main>
+  <aside class="col-controls">
+    <section class="block actions">
+      <button id="runBtn" class="go" type="button">Interrogate</button>
+      <button id="stopBtn" class="chip" type="button">Stop</button>
+    </section>
+    <section class="block">
+      <h2 class="eyebrow">presets</h2>
+      <div class="presets" id="presets"></div>
+      <p class="prose" id="presetHint"></p>
+      <dl class="expect" id="presetExpect"></dl>
+    </section>
+
+    <details class="adv" id="adv">
+      <summary class="block">settings <span class="badge" id="customBadge" hidden>modified</span></summary>
+    <section class="block">
+      <h2 class="eyebrow">prover</h2>
+      <label class="field">
+        <select id="mode">
+          <option value="honest" selected>honest — cudaMalloc, verified</option>
+          <option value="partial">partial — slice served from host memory</option>
+          <option value="uvm">uvm — cudaMallocManaged, pages migrate</option>
+          <option value="zerocopy">zerocopy — whole buffer in host memory</option>
+          <option value="fake">fake — fabricates the withheld part</option>
+        </select>
+      </label>
+      <p class="prose" id="modeHint"></p>
+
+      <div class="knob" id="offloadKnob">
+        <span class="lab">host-resident fraction <b class="num" id="offloadLabel">10%</b></span>
+        <input type="range" id="offload" min="0" max="50" step="1" value="10">
+      </div>
+      <div class="knob" id="hogKnob">
+        <span class="lab">free hbm after reserve <b class="num" id="hogLabel">all</b></span>
+        <input type="range" id="hog" min="0" max="16" step="1" value="0">
+      </div>
+      <div class="knob" id="fracKnob">
+        <span class="lab">fraction held <b class="num" id="fracLabel">50%</b></span>
+        <input type="range" id="frac" min="0" max="100" step="5" value="50">
+      </div>
+    </section>
+
+    <section class="block">
+      <h2 class="eyebrow">challenge</h2>
+      <div class="pairs">
+        <label class="field"><span class="lab">buffer mib</span><input class="num" type="number" id="mb" value="1024" min="1" max="262144"></label>
+        <label class="field"><span class="lab">probes k</span><input class="num" type="number" id="k" value="2097152" min="1" max="16777216"></label>
+        <label class="field"><span class="lab">lanes</span><input class="num" type="number" id="lanes" value="131072" min="1" max="262144"></label>
+        <label class="field"><span class="lab">challenges</span><input class="num" type="number" id="n" value="300" min="1" max="20000"></label>
+        <label class="field"><span class="lab">warmup</span><input class="num" type="number" id="warmup" value="20" min="0" max="20000"></label>
+        <label class="field"><span class="lab">pace µs</span><input class="num" type="number" id="gap" value="0" min="0" max="100000"></label>
+        <label class="field"><span class="lab">check 1 in</span><input class="num" type="number" id="verify" value="50" min="1" max="1000"></label>
+      </div>
+      <p class="prose mini" id="geomHint"></p>
+    </section>
+
+    <section class="block">
+      <h2 class="eyebrow">defenses</h2>
+      <div class="pairs">
+        <label class="field"><span class="lab">generator</span>
+          <select id="gen"><option value="chacha" selected>chacha</option><option value="splitmix64">splitmix64 (weak)</option></select></label>
+        <label class="field"><span class="lab">offsets</span>
+          <select id="chain"><option value="dependent" selected>chained</option><option value="independent">independent (weak)</option></select></label>
+        <label class="field"><span class="lab">nonces</span>
+          <select id="nonce"><option value="random" selected>random</option><option value="sequential">sequential (weak)</option></select></label>
+        <label class="field"><span class="lab">fold</span>
+          <select id="fold"><option value="tree" selected>tree (on card)</option><option value="sequential">sequential (on host)</option></select></label>
+      </div>
+    </section>
+
+    </details>
+
+    <section class="block">
+      <h2 class="eyebrow">baseline</h2>
+      <p class="prose mini" id="baseText">no honest run yet</p>
+      <div class="badge-row" id="baseBadges"></div>
+      <button id="clearBaseBtn" class="chip" type="button">Clear baseline</button>
+    </section>
+
+  </aside>
+
+  <section class="col-instrument">
+    <figure class="screen-frame">
+      <div class="screen-top">
+        <h2 class="eyebrow">buffer location</h2>
+        <div class="legend" id="resLegend"></div>
+      </div>
+      <canvas id="residency"></canvas>
+      <div class="badge-row" id="resBadges"></div>
+    </figure>
+
+    <figure class="screen-frame">
+      <div class="screen-top">
+        <h2 class="eyebrow">response time breakdown</h2>
+        <div class="legend" id="timeLegend"></div>
+      </div>
+      <canvas id="timesplit"></canvas>
+      <div class="badge-row">
+        <span class="badge">verifier: same host, loopback</span>
+        <span class="badge warn">residual: not attributed</span>
+      </div>
+    </figure>
+
+    <div class="split">
+      <figure class="screen-frame">
+        <div class="screen-top"><h2 class="eyebrow">detector state</h2></div>
+        <canvas id="detect"></canvas>
+      </figure>
+
+      <section class="block">
+        <h2 class="eyebrow">device</h2>
+        <dl class="readouts">
+          <div><dt class="lab">sm clock</dt><dd class="num" id="cSm">—</dd><dd class="foot">MHz</dd></div>
+          <div><dt class="lab">temp</dt><dd class="num" id="cTemp">—</dd><dd class="foot">°C</dd></div>
+          <div><dt class="lab">probe bw</dt><dd class="num" id="cGbps">—</dd><dd class="foot">GB/s useful</dd></div>
+          <div><dt class="lab">wrong</dt><dd class="num" id="cErr">—</dd><dd class="foot">vs recompute</dd></div>
+        </dl>
+        <div class="badge-row" id="cardBadges"></div>
+      </section>
+    </div>
+
+    <figure class="screen-frame">
+      <div class="screen-top">
+        <h2 class="eyebrow">round trip per challenge</h2>
+        <div class="legend" id="latLegend"></div>
+      </div>
+      <canvas id="latency"></canvas>
+    </figure>
+
+    <figure class="screen-frame">
+      <div class="screen-top">
+        <h2 class="eyebrow">run history</h2>
+        <button id="clearHistBtn" class="chip" type="button">Clear</button>
+      </div>
+      <div class="hist-scroll"><table class="hist" id="hist"></table></div>
+    </figure>
+
+    <section class="block log-panel">
+      <h2 class="eyebrow">log</h2>
+      <div class="log-scroll" id="log"></div>
+    </section>
+  </section>
+</main>
+<script src="gpu.js"></script>
+</body>
+</html>
