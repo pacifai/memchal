@@ -183,8 +183,8 @@ static void serve(int cfd) {
     printf(",\"device_backed\":%s,\"held_frac\":%.4f,\"hog_mib\":%llu,"
            "\"offload\":%.4f,\"hbm_used\":%llu,\"hbm_total\":%llu,"
            "\"build\":%s,\"build_s\":%.4f}\n",
-           is_device ? "true" : "false", held, offload,
-           (unsigned long long)g_hog_mib,
+           is_device ? "true" : "false", held,
+           (unsigned long long)g_hog_mib, offload,
            (unsigned long long)(ht - hf), (unsigned long long)ht,
            build ? "true" : "false", hb.build_s);
 
