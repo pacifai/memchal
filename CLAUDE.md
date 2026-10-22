@@ -93,8 +93,9 @@ curve.
   way the challenge math is**: it is pinned against RFC vectors, so a change that breaks
   them means it is no longer Argon2d and ADR 0007's analysis no longer covers it. The
   `p` lanes of each slice fill on `p` threads. On the wire behind `--gen argon2d`: the
-  verifier sends a `RecipeMsg` and both sides build. Only the CPU provers handle build
-  mode so far. See [ADR 0007](docs/decisions/0007-buffer-generator-memory-hard-function.md).
+  verifier sends a `RecipeMsg` and both sides build. The CPU and GPU provers all handle
+  build mode; the GPU provers build on the host CPU and copy the result to the card
+  (building on the GPU itself is still open). See [ADR 0007](docs/decisions/0007-buffer-generator-memory-hard-function.md).
 - `src/bench_build.cpp` → `bench_build` — what one 1 KiB block costs to build, which is
   the attacker's unit of work in the build-buffer design. Not a protocol participant.
 - `src/prover.cpp` — the honest TCP server. Maps, prefaults, and `mlock`s the
@@ -115,8 +116,11 @@ curve.
 - `src/prover_cuda.cpp` — the honest GPU server. `cudaMalloc` replaces
   `mmap`+`mlock`, and `cudaPointerGetAttributes` replaces reading `VmLck`
   ([ADR 0008](docs/decisions/0008-gpu-residency-check-substitutes-for-mlock.md)).
+- `src/gpu_ingest.hpp` — the GPU provers' one ingestion path for both protocols:
+  receive the uploaded bytes, or receive a recipe and build the buffer on the host,
+  then push it to the card through pinned staging. Host only.
 - `src/cheating_prover_cuda.cpp` — the GPU adversaries: `honest`, `fake`, `uvm`,
-  `zerocopy`. It always claims `locked=true`, because nothing stops a real one
+  `zerocopy`, `partial`. It always claims `locked=true`, because nothing stops a real one
   doing the same. `--hog` occupies HBM so a managed buffer cannot fit.
 - `scripts/gpu_pod_setup.sh` — the first command on a rented box: records the
   machine, refuses boxes whose numbers would be meaningless, settles whether
