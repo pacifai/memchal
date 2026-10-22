@@ -13,7 +13,8 @@ HOW TO RUN (on the host, not inside run.sh — it drives docker):
     python3 demo/bridge.py            # then open http://127.0.0.1:8777
     PORT=9000 python3 demo/bridge.py
 
-Env: PORT IMAGE PLATFORM CPUS VERIFIER_MEM.
+Env: PORT IMAGE PLATFORM CPUS VERIFIER_MEM. CPUS also sets the Argon2d build
+lanes (see build_lanes()).
 
 WHAT THE PAGE IS ALLOWED TO ASK FOR is whitelisted below (modes, memory strings,
 numeric ranges) and every container is spawned with an argument list, never a
@@ -22,10 +23,17 @@ something else.
 
 TWO PROTOCOLS. gen=splitmix64 and gen=chacha upload the buffer. gen=argon2d sends
 a 92-byte recipe instead and both sides build the buffer with Argon2d (ADR 0007).
-Building needs buffer-sized RAM, so a prover whose memory budget is below the
-buffer cannot set up at all under argon2d — it fails during the build rather than
-running slowly. The page warns about that pairing; the bridge lets it through and
-reports the real error.
+argon2d is the default. Building needs buffer-sized RAM plus some headroom, so a
+prover whose memory budget is below about 1.2x the buffer cannot set up at all
+under argon2d — it is OOM-killed during the build rather than running slowly.
+(Measured with a 64 MiB buffer: mmapdisk is killed at 64 MiB and runs at 77 MiB.) That collides with the starved-budget runs
+the demo exists to show, so:
+  - the default run is the honest prover with room to spare, which argon2d can build;
+  - the page switches a starved run to chacha and says why;
+  - a request that names no generator gets chacha when it is starved (see
+    validate()), and the bridge logs the substitution;
+  - a request that asks for argon2d explicitly gets argon2d. The page warns about
+    that pairing; the bridge lets it through and reports the real error.
 
 MEASUREMENT NOTE. Live streaming makes both processes emit an event per challenge
 (and a mincore() residency snapshot every N), all of it after the response has
@@ -71,7 +79,49 @@ LIMITS = {           # field: (min, max, default)
     "probe":  (0, 10000, 20),     # verifier probed-page map every N challenges
     "frac":   (0, 1, 0.5),
 }
-DEFAULTS = {"mode": "mmapdisk", "gen": "splitmix64", "chain": "independent", "nonce": "sequential", "mem": "32m", **{k: v[2] for k, v in LIMITS.items()}}
+# The opening run is the honest prover at 1.5x a 64 MiB buffer: the page tells
+# you to run it first, and it is a run argon2d can build (an honest prover needs
+# about 1.2x the buffer anyway).
+DEFAULTS = {"mode": "honest", "gen": "argon2d", "chain": "independent", "nonce": "sequential", "mem": "96m", **{k: v[2] for k, v in LIMITS.items()}}
+STARVED_FALLBACK_GEN = "chacha"
+BUILD_T = 2
+
+
+def build_lanes(cpus=CPUS):
+    """Argon2d lanes (--build-p) for a container with `cpus` CPUs.
+
+    Lanes fill on threads, so p only pays off up to the CPUs the container may
+    use; past that the threads queue for the same quota. The answer is the largest
+    power of two no greater than min(cpus, 8): a power of two divides any whole
+    MiB buffer cleanly (Argon2 rounds m down to a multiple of 4*p KiB), and past
+    4 lanes a 1 GiB build gains little (0.30 s at p=4, 0.21 s at p=16). With the
+    default CPUS=1 this is 1. Both containers get the same CPUS, and the verifier
+    and prover build the same recipe, so one value fits both."""
+    try:
+        n = int(float(cpus))
+    except ValueError:
+        n = 1
+    n = max(1, min(n, 8))
+    return 1 << (n.bit_length() - 1)
+
+
+def mem_mib(mem):
+    """'96m' -> 96, '1g' -> 1024. mem has already passed MEM_RE."""
+    return int(mem[:-1]) * (1024 if mem.endswith("g") else 1)
+
+
+# A prover building an Argon2d buffer needs this multiple of the buffer as its
+# budget: the whole matrix, plus the process and the spill chunk. It matches the
+# ~1.2x the page already asks of the honest prover.
+BUILD_HEADROOM = 1.2
+
+
+def starved_for_build(mode, mem, mb):
+    """True when this prover cannot build an Argon2d buffer: a non-honest prover
+    whose budget is below BUILD_HEADROOM times the buffer. The honest prover is
+    left out because it needs that much under every generator, and the page warns
+    about that separately. app.js starvedForBuild() is the same rule."""
+    return mode != "honest" and mem_mib(mem) < BUILD_HEADROOM * mb
 
 
 def clamp(name, value):
@@ -99,6 +149,12 @@ def validate(req):
     }
     for name in LIMITS:
         out[name] = clamp(name, req.get(name, LIMITS[name][2]))
+    # Only a missing or unknown generator is replaced here. An explicit argon2d
+    # request is honored even when it cannot build, so its failure stays visible.
+    out["gen_fallback"] = (gen not in GENS and out["gen"] == "argon2d"
+                           and starved_for_build(out["mode"], out["mem"], out["mb"]))
+    if out["gen_fallback"]:
+        out["gen"] = STARVED_FALLBACK_GEN
     return out
 
 
@@ -292,6 +348,8 @@ class Run:
             "--label", f"demo-{c['mode']}-{c['mem']}",
             "--csv", "/dev/null", "--stream", "-", "--probe-map", str(c["probe"]),
         ]
+        if c["gen"] == "argon2d":
+            cmd += ["--build-t", str(BUILD_T), "--build-p", str(build_lanes())]
         if c["mode"] == "precompute":
             # The attack precomputes each answer offline in the gap between
             # challenges, so the gap must exceed the cost of one answer. In the
@@ -446,6 +504,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._events()
         if path == "/config":
             return self._json({"defaults": DEFAULTS, "modes": list(MODES),
+                               "build": {"t": BUILD_T, "p": build_lanes()},
                                "limits": {k: v[:2] for k, v in LIMITS.items()},
                                "status": HUB.last_status})
         name = "index.html" if path == "/" else path.lstrip("/")
@@ -473,6 +532,12 @@ class Handler(BaseHTTPRequestHandler):
                                  f"{cfg['mode']} at {cfg['mem']}, buffer {cfg['mb']} MiB, "
                                  f"gen={cfg['gen']} chain={cfg['chain']} "
                                  f"n={cfg['n']} warmup={cfg['warmup']}"})
+            if cfg["gen_fallback"]:
+                HUB.publish({"t": "log", "src": "bridge",
+                             "line": f"no generator named, and {cfg['mem']} is below "
+                                     f"{BUILD_HEADROOM}x the {cfg['mb']} MiB buffer: using "
+                                     f"{cfg['gen']}, because argon2d needs the whole buffer "
+                                     f"in RAM while building and this prover could not start."})
             MANAGER.start(cfg)
             return self._json({"started": cfg})
         if path == "/stop":
@@ -527,6 +592,7 @@ def main():
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"[bridge] memory-challenge demo on http://127.0.0.1:{PORT}")
     print(f"[bridge] image={IMAGE} platform={PLATFORM} cpus={CPUS} repo={ROOT}")
+    print(f"[bridge] argon2d builds use t={BUILD_T} p={build_lanes()}")
     print("[bridge] Ctrl-C to stop")
     try:
         server.serve_forever()
