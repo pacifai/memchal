@@ -48,7 +48,11 @@ tests/known_answer_argon2d: tests/known_answer_argon2d.cpp src/argon2d.hpp
 tests/differential_argon2d: tests/differential_argon2d.cpp src/argon2d.hpp
 	$(CXX) $(CXXFLAGS) -Isrc -o $@ tests/differential_argon2d.cpp -largon2
 
-tests: tests/known_answer tests/known_answer_argon2d tests/differential_argon2d
+# The partial-recompute cheat's engine rebuilds the same bytes build_buffer() does.
+tests/rebuild_argon2d: tests/rebuild_argon2d.cpp src/argon2d.hpp src/argon2d_rebuild.hpp
+	$(CXX) $(CXXFLAGS) -Isrc -o $@ tests/rebuild_argon2d.cpp
+
+tests: tests/known_answer tests/known_answer_argon2d tests/differential_argon2d tests/rebuild_argon2d
 
 # --- GPU targets -------------------------------------------------------------
 gpu: prover_cuda cheating_prover_cuda tests/known_answer_gpu
@@ -63,7 +67,7 @@ gpu_answer.o: src/gpu_answer.cu src/gpu_answer.hpp src/challenge.hpp src/chacha2
 prover_cuda: src/prover_cuda.cpp src/common.hpp src/challenge.hpp src/net.hpp src/argon2d.hpp src/gpu_answer.hpp src/gpu_ingest.hpp gpu_answer.o
 	$(CXX) $(CXXFLAGS) -Isrc -o $@ src/prover_cuda.cpp gpu_answer.o $(CUDA_LIBS)
 
-cheating_prover_cuda: src/cheating_prover_cuda.cpp src/common.hpp src/challenge.hpp src/net.hpp src/argon2d.hpp src/gpu_answer.hpp src/gpu_ingest.hpp gpu_answer.o
+cheating_prover_cuda: src/cheating_prover_cuda.cpp src/common.hpp src/challenge.hpp src/net.hpp src/argon2d.hpp src/argon2d_rebuild.hpp src/gpu_answer.hpp src/gpu_ingest.hpp gpu_answer.o
 	$(CXX) $(CXXFLAGS) -Isrc -o $@ src/cheating_prover_cuda.cpp gpu_answer.o $(CUDA_LIBS)
 
 tests/known_answer_gpu: tests/known_answer_gpu.cpp src/challenge.hpp src/gpu_answer.hpp gpu_answer.o
@@ -81,6 +85,7 @@ gpu-check:
 clean:
 	rm -f prover verifier cheating_prover bench_build \
 	      tests/known_answer tests/known_answer_argon2d tests/differential_argon2d \
+	      tests/rebuild_argon2d \
 	      prover_cuda cheating_prover_cuda tests/known_answer_gpu gpu_answer.o
 
 .PHONY: all tests gpu gpu-check clean

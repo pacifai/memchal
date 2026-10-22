@@ -77,6 +77,17 @@ else
     fail "differential test (generator)"
 fi
 
+# The partial-recompute adversary rebuilds discarded blocks from the recipe. If
+# its rebuilt bytes differ from the real matrix, every timing it reports is for
+# a cheat that answers wrong, so this gate comes before any GPU number.
+echo ""
+echo "=== REBUILD TEST (partial-recompute engine) ==="
+if tests/rebuild_argon2d; then
+    pass "rebuild test (partial-recompute engine)"
+else
+    fail "rebuild test (partial-recompute engine)"
+fi
+
 # ---------------------------------------------------------------------------
 # Step 3: INVARIANT tests
 # ---------------------------------------------------------------------------
