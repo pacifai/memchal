@@ -2,12 +2,15 @@
 /prover
 /verifier
 /cheating_prover
+/bench_build
 # compiled GPU binaries (built on a rented box, never committed)
 /prover_cuda
 /cheating_prover_cuda
 /tests/known_answer_gpu
 # compiled test binary
 /tests/known_answer
+/tests/known_answer_argon2d
+/tests/differential_argon2d
 # scratch experiment artifacts
 /scratch/
 *.o

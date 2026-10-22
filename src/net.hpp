@@ -2,8 +2,9 @@
 //
 // Split out of common.hpp so that challenge.hpp (the math) can be included from
 // a CUDA translation unit. Everything here is host-only by nature: POSIX
-// sockets, and /proc readers that report what the OS thinks this process is
-// doing. None of it has a device analog.
+// sockets, the build-buffer recipe and the Argon2d generator behind it
+// (argon2d.hpp, which uses std::thread), and /proc readers that report what the
+// OS thinks this process is doing. None of it has a device analog.
 //
 // The challenge math lives in challenge.hpp. common.hpp includes both.
 #pragma once
@@ -18,17 +19,26 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include "argon2d.hpp"   // Recipe and build_buffer(); host-only (std::thread)
 
 namespace mc {
 
 constexpr uint64_t kMagic       = 0x4D454D4348414C31ULL; // "MEMCHAL1"
 constexpr uint16_t kDefaultPort = 9099;
-constexpr uint32_t kFlagTerminate = 1u;
-constexpr uint32_t kFlagChained   = 2u;
-// Fold the per-lane hashes as a binary tree instead of a sequential chain.
+// Challenge.flags and Hello.flags are separate bit spaces: kFlagTreeFold and
+// kFlagBuild share the value 4 but never appear in the same field.
+constexpr uint32_t kFlagTerminate = 1u;   // Challenge.flags
+constexpr uint32_t kFlagChained   = 2u;   // Challenge.flags
+// Challenge.flags: fold the per-lane hashes as a binary tree instead of a sequential chain.
 // A different fold means a different answer, so this is a protocol change and
 // carries its own known-answer vectors. See tree_fold() in challenge.hpp.
-constexpr uint32_t kFlagTreeFold  = 4u;
+constexpr uint32_t kFlagTreeFold  = 4u;   // Challenge.flags
+constexpr uint32_t kFlagBuild     = 4u;   // Hello.flags: a Recipe follows, not bytes
+
+// Wire version. 1 = the verifier uploads the buffer. 2 = it may instead send a
+// Recipe and both sides build (ADR 0007). A version-1 Hello never carries
+// kFlagBuild, so a version-2 prover still serves a version-1 verifier.
+constexpr uint32_t kWireVersion = 2u;
 
 // Minimum effective chain depth (k / lanes) required when --chain dependent.
 // At depth D, an attacker can pipeline across lanes and achieve ~1/D of the
@@ -43,7 +53,29 @@ struct Hello     { uint64_t magic; uint64_t buffer_bytes; uint32_t version; uint
 struct Ready     { uint64_t magic; uint32_t locked; uint32_t pad; };
 struct Challenge { uint64_t nonce; uint32_t k; uint32_t lanes; uint32_t flags; uint32_t pad; };
 struct Response  { uint64_t hash; };
+// Sent immediately after a Hello carrying kFlagBuild, in place of the buffer.
+struct RecipeMsg { uint8_t key[32]; uint8_t salt[16];
+                   uint32_t m_kib; uint32_t t; uint32_t p;
+                   uint8_t workload_tag[32]; };
 #pragma pack(pop)
+static_assert(sizeof(RecipeMsg) == 92, "RecipeMsg is a fixed 92-byte wire layout");
+
+static inline Recipe recipe_from_msg(const RecipeMsg& m) {
+    Recipe r;
+    memcpy(r.key, m.key, sizeof r.key);
+    memcpy(r.salt, m.salt, sizeof r.salt);
+    memcpy(r.workload_tag, m.workload_tag, sizeof r.workload_tag);
+    r.m_kib = m.m_kib; r.t = m.t; r.p = m.p;
+    return r;
+}
+static inline RecipeMsg msg_from_recipe(const Recipe& r) {
+    RecipeMsg m{};
+    memcpy(m.key, r.key, sizeof m.key);
+    memcpy(m.salt, r.salt, sizeof m.salt);
+    memcpy(m.workload_tag, r.workload_tag, sizeof m.workload_tag);
+    m.m_kib = r.m_kib; m.t = r.t; m.p = r.p;
+    return m;
+}
 
 // ---------------------------------------------------------------------------
 // Blocking socket helpers
@@ -66,6 +98,25 @@ static inline bool recv_all(int fd, void* p, size_t n) {
     }
     return true;
 }
+// Where a prover's buffer bytes come from. Every mode ingests the buffer through
+// src_read(), so the send-buffer and build-buffer paths differ in one place
+// rather than in each mode's setup.
+//
+// Build mode materializes the whole matrix up front, because Argon2 cannot
+// produce part of it: a prover that intends to spill to disk still needs
+// buffer-sized RAM for the duration of the build.
+struct Source {
+    int             fd    = -1;       // socket, when receiving
+    const uint64_t* built = nullptr;  // whole built buffer, when building
+    size_t          off   = 0;        // read cursor into `built`
+};
+static inline bool src_read(Source& s, void* dst, size_t n) {
+    if (!s.built) return recv_all(s.fd, dst, n);
+    memcpy(dst, (const uint8_t*)s.built + s.off, n);
+    s.off += n;
+    return true;
+}
+
 static inline void set_low_latency(int fd) {
     int one = 1;
     ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)); // disable Nagle

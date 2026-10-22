@@ -361,9 +361,31 @@ static void serve_precompute(int cfd, const char* datafile, uint32_t trace_every
     size_t bytes = ((size_t)hello.buffer_bytes + 7) & ~size_t(7);
     uint64_t num_words = bytes / 8;
 
+    // Build mode: materialize the matrix, then spill it. See the note in serve().
+    uint64_t* scratch = nullptr;
+    Source src; src.fd = cfd;
+    if (hello.flags & kFlagBuild) {
+        RecipeMsg rmsg{};
+        if (!recv_all(cfd, &rmsg, sizeof rmsg)) {
+            fprintf(stderr, "[cheat:precompute] no recipe\n"); return;
+        }
+        const Recipe r = recipe_from_msg(rmsg);
+        if (build_buffer_words(r) != num_words) {
+            fprintf(stderr, "[cheat:precompute] recipe size disagrees with hello\n"); return;
+        }
+        scratch = (uint64_t*)mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
+                                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (scratch == MAP_FAILED || !build_buffer(scratch, num_words, r)) {
+            fprintf(stderr, "[cheat:precompute] cannot build %.1f MiB\n", bytes / 1048576.0);
+            if (scratch != MAP_FAILED) munmap(scratch, bytes);
+            return;
+        }
+        src.built = scratch;
+    }
+
     // Stream buffer to disk (never hold a full anonymous copy in RAM).
     int fd = open(datafile, O_RDWR | O_CREAT | O_TRUNC, 0600);
-    if (fd < 0) { perror("[precompute] open datafile"); return; }
+    if (fd < 0) { perror("[precompute] open datafile"); if (scratch) munmap(scratch, bytes); return; }
 
     {
         static const size_t kChunk = 1u << 20; // 1 MiB
@@ -373,7 +395,7 @@ static void serve_precompute(int cfd, const char* datafile, uint32_t trace_every
         bool ok = true;
         while (off < bytes) {
             size_t want = bytes - off < kChunk ? bytes - off : kChunk;
-            if (!recv_all(cfd, chunk, want)) { ok = false; break; }
+            if (!src_read(src, chunk, want)) { ok = false; break; }
             if (!write_all(fd, chunk, want)) { ok = false; break; }
             off += want;
             unflushed += want;
@@ -387,6 +409,7 @@ static void serve_precompute(int cfd, const char* datafile, uint32_t trace_every
             }
         }
         free(chunk);
+        if (scratch) { munmap(scratch, bytes); scratch = nullptr; src.built = nullptr; }
         if (!ok) {
             fprintf(stderr, "[cheat:precompute] short data / file write failed\n");
             close(fd); return;
@@ -499,13 +522,30 @@ static void serve(int cfd, Mode mode, double frac, const char* datafile,
     size_t bytes = ((size_t)hello.buffer_bytes + 7) & ~size_t(7);
     uint64_t num_words = bytes / 8;
 
+    const bool build = (hello.flags & kFlagBuild) != 0;
+    Recipe recipe;
+    if (build) {
+        RecipeMsg rmsg{};
+        if (!recv_all(cfd, &rmsg, sizeof rmsg)) { fprintf(stderr, "[cheat] no recipe\n"); return; }
+        recipe = recipe_from_msg(rmsg);
+        if (build_buffer_words(recipe) != num_words) {
+            fprintf(stderr, "[cheat] recipe size disagrees with hello\n"); return;
+        }
+    }
+
     int locked = 0;
     const char* mname = "honest";
 
     if (mode == HONEST) {
         int lk = 0; uint64_t* buf = (uint64_t*)alloc_pinned(bytes, &lk);
         if (!buf) return;
-        if (!recv_all(cfd, buf, bytes)) { fprintf(stderr, "[cheat] short data\n"); munmap(buf, bytes); return; }
+        if (build) {
+            if (!build_buffer(buf, num_words, recipe)) {
+                fprintf(stderr, "[cheat] build failed\n"); munmap(buf, bytes); return;
+            }
+        } else if (!recv_all(cfd, buf, bytes)) {
+            fprintf(stderr, "[cheat] short data\n"); munmap(buf, bytes); return;
+        }
         locked = lk;
         printf("[cheat:honest] resident+%s\n", lk ? "LOCKED" : "unlocked");
         if (!lk && !g_allow_unlocked) {
@@ -519,6 +559,29 @@ static void serve(int cfd, Mode mode, double frac, const char* datafile,
         free(tr.vec);
         munlock(buf, bytes); munmap(buf, bytes);
         return;
+    }
+
+    // Build mode has to materialize the whole matrix before anything can be
+    // spilled: Argon2 cannot produce a slice of it on demand. So a prover whose
+    // RAM budget is smaller than the buffer cannot even set up under --gen
+    // argon2d — the build-buffer design forces every prover to hold buffer-sized
+    // memory at least once. It may free it immediately afterward, which is why
+    // this raises the floor rather than proving residency.
+    uint64_t* scratch = nullptr;
+    Source src; src.fd = cfd;
+    if (build) {
+        scratch = (uint64_t*)mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
+                                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (scratch == MAP_FAILED) {
+            fprintf(stderr, "[cheat] cannot map %.1f MiB to build in: %s\n"
+                            "        --gen argon2d needs buffer-sized RAM at build time\n",
+                    bytes / 1048576.0, strerror(errno));
+            return;
+        }
+        if (!build_buffer(scratch, num_words, recipe)) {
+            fprintf(stderr, "[cheat] build failed\n"); munmap(scratch, bytes); return;
+        }
+        src.built = scratch;
     }
 
     if (mode == RECOMPUTE) {
@@ -535,7 +598,7 @@ static void serve(int cfd, Mode mode, double frac, const char* datafile,
         //
         // Receive just the first word, then drain-and-discard the rest of the stream.
         uint64_t word0 = 0;
-        if (!recv_all(cfd, &word0, 8)) { fprintf(stderr, "[cheat:recompute] short data\n"); return; }
+        if (!src_read(src, &word0, 8)) { fprintf(stderr, "[cheat:recompute] short data\n"); return; }
         uint64_t recovered_seed = splitmix64_recover_seed(word0);
 
         // Drain the rest of the incoming buffer (we don't store it).
@@ -546,12 +609,13 @@ static void serve(int cfd, Mode mode, double frac, const char* datafile,
             size_t remaining = bytes - 8;
             while (remaining > 0) {
                 size_t want = remaining < kDrain ? remaining : kDrain;
-                if (!recv_all(cfd, chunk, want)) { free(chunk); return; }
+                if (!src_read(src, chunk, want)) { free(chunk); return; }
                 remaining -= want;
             }
             free(chunk);
         }
 
+        if (scratch) { munmap(scratch, bytes); scratch = nullptr; src.built = nullptr; }
         printf("[cheat:recompute] holding ~0 data; recovered seed=0x%016llx from buf[0]=0x%016llx\n",
                (unsigned long long)recovered_seed, (unsigned long long)word0);
 
@@ -568,13 +632,14 @@ static void serve(int cfd, Mode mode, double frac, const char* datafile,
         return;
     }
 
-    // Disk-backed modes: stream the buffer straight from the socket to a file in
-    // chunks, so this process NEVER holds a full-size anonymous copy. That is
-    // what a real adversary would do, and it is what lets the cheater run in a
-    // memory budget smaller than the buffer it claims to hold (the regime where
-    // the mmap trick can no longer hide behind the page cache).
+    // Disk-backed modes stream the buffer to a file in chunks. On the upload path
+    // that means never holding a full-size anonymous copy, which is what lets the
+    // cheat run in a budget smaller than the buffer it claims to hold — the
+    // regime where the mmap trick can no longer hide behind the page cache.
+    // Under --gen argon2d the scratch above has already broken that: the matrix
+    // must exist whole before any of it can be spilled.
     int fd = open(datafile, O_RDWR | O_CREAT | O_TRUNC, 0600);
-    if (fd < 0) { perror("open datafile"); return; }
+    if (fd < 0) { perror("open datafile"); if (scratch) munmap(scratch, bytes); return; }
 
     uint64_t resident_words = 0;
     uint64_t* ram = nullptr;
@@ -596,7 +661,7 @@ static void serve(int cfd, Mode mode, double frac, const char* datafile,
         bool ok = true;
         while (off < bytes) {
             size_t want = bytes - off < kChunk ? bytes - off : kChunk;
-            if (!recv_all(cfd, chunk, want)) { ok = false; break; }
+            if (!src_read(src, chunk, want)) { ok = false; break; }
             if (!write_all(fd, chunk, want)) { ok = false; break; }
             // PARTIAL/FAKE keep a resident prefix: copy that part as it streams by.
             size_t prefix = resident_words * 8;
@@ -623,6 +688,7 @@ static void serve(int cfd, Mode mode, double frac, const char* datafile,
             }
         }
         free(chunk);
+        if (scratch) { munmap(scratch, bytes); scratch = nullptr; src.built = nullptr; }
         if (!ok) { fprintf(stderr, "[cheat] short data / file write failed\n"); close(fd); return; }
     }
     fsync(fd);

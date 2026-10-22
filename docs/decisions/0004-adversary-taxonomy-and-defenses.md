@@ -32,7 +32,7 @@ The verifier ships with all three defenses on: `--gen chacha`, `--chain dependen
 and `--nonce random` are the defaults, so a bare `./verifier` is secure out of the box.
 The **benchmark opt-out** is to name the weak setting explicitly — `--gen splitmix64
 --chain independent --nonce sequential` — which reproduces the byte-identical
-independent/splitmix64/sequential path the KAT and the headline measurements are pinned
+independent/splitmix64/sequential path the known-answer test and the headline measurements are pinned
 to. Nothing about the reproducibility relies on the *default* being weak: the
 known-answer test computes the math directly, the harness (`run_trials.py`) always
 passes the toggles it measures explicitly, and the demo sets its own starting toggles

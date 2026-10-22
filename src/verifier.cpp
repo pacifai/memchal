@@ -67,6 +67,12 @@ struct Args {
     // to name the weak setting explicitly: --gen splitmix64 / --chain independent /
     // --nonce sequential. See ADR 0004 (Safety) and the README adversary table.
     Gen gen = Gen::CHACHA20;    // buffer generator: chacha20 (default) or splitmix64
+    // --gen argon2d switches to the build-buffer design: the prover receives a
+    // recipe and builds the buffer itself (ADR 0007). Separate flag because it
+    // changes the protocol, not just the bytes.
+    bool build = false;
+    uint32_t build_t = 2;       // Argon2 passes
+    uint32_t build_p = 1;       // Argon2 BUILD lanes — not the challenge's --lanes
     // Live streaming for the browser demo (demo/bridge.py). Off unless asked for:
     // the experiment scripts must keep measuring an uninstrumented loop.
     const char* stream = nullptr;   // "-" for stdout, else a path
@@ -177,9 +183,13 @@ static Args parse(int argc, char** argv) {
         else if (!strcmp(k, "--label"))  a.label = v;
         else if (!strcmp(k, "--seed"))   a.seed = strtoull(v, nullptr, 0);
         else if (!strcmp(k, "--gen")) {
-            if      (!strcmp(v, "chacha20") || !strcmp(v, "chacha")) a.gen = Gen::CHACHA20;
+            a.build = false;
+            if      (!strcmp(v, "argon2d")) { a.build = true; }
+            else if (!strcmp(v, "chacha20") || !strcmp(v, "chacha")) a.gen = Gen::CHACHA20;
             else                                                      a.gen = Gen::SPLITMIX64;
         }
+        else if (!strcmp(k, "--build-t")) a.build_t = (uint32_t)strtoul(v, nullptr, 10);
+        else if (!strcmp(k, "--build-p")) a.build_p = (uint32_t)strtoul(v, nullptr, 10);
         else if (!strcmp(k, "--stream")) a.stream = v;
         else if (!strcmp(k, "--probe-map")) a.probe_map_every = (uint32_t)strtoul(v, nullptr, 10);
         else if (!strcmp(k, "--chain")) {
@@ -340,7 +350,33 @@ int main(int argc, char** argv) {
     bytes = (bytes + 7) & ~size_t(7);
     uint64_t num_words = bytes / 8;
 
-    const char* gen_name   = (a.gen == Gen::CHACHA20) ? "chacha20" : "splitmix64";
+    // Build mode: the recipe decides the size, because Argon2 rounds the
+    // requested memory down to a whole number of slices per lane.
+    Recipe recipe;
+    if (a.build) {
+        recipe.m_kib = (uint32_t)llround(a.mb * 1024.0);
+        recipe.t = a.build_t;
+        recipe.p = a.build_p;
+        num_words = build_buffer_words(recipe);
+        bytes = (size_t)num_words * 8;
+        if (num_words == 0) {
+            fprintf(stderr, "[verifier] ERROR: %u KiB is too small for %u build lanes "
+                            "(Argon2 needs at least 8*p KiB)\n", recipe.m_kib, recipe.p);
+            return 1;
+        }
+        std::random_device rd;
+        for (int i = 0; i < 8; ++i) {
+            uint32_t w = rd();
+            for (int b = 0; b < 4; ++b) recipe.key[i * 4 + b] = (uint8_t)(w >> (8 * b));
+        }
+        for (int i = 0; i < 4; ++i) {
+            uint32_t w = rd();
+            for (int b = 0; b < 4; ++b) recipe.salt[i * 4 + b] = (uint8_t)(w >> (8 * b));
+        }
+    }
+
+    const char* gen_name   = a.build ? "argon2d"
+                           : (a.gen == Gen::CHACHA20) ? "chacha20" : "splitmix64";
     const char* chain_name = a.chained ? "dependent" : "independent";
     const char* nonce_name = (a.nonce_mode == NonceMode::RANDOM) ? "random" : "sequential";
 
@@ -400,25 +436,46 @@ int main(int argc, char** argv) {
     // Generate our reference copy.
     uint64_t* buf = (uint64_t*)malloc(bytes);
     if (!buf) { fprintf(stderr, "malloc failed\n"); return 1; }
+    // gen_s is the time to produce the reference copy, whichever way it is made:
+    // the Argon2d build in build mode, the ChaCha20 or splitmix64 fill otherwise.
     auto gen0 = Clock::now();
-    if (a.gen == Gen::CHACHA20) {
+    if (a.build) {
+        if (!build_buffer(buf, num_words, recipe)) {
+            fprintf(stderr, "[verifier] build failed (m=%u t=%u p=%u)\n",
+                    recipe.m_kib, recipe.t, recipe.p);
+            return 1;
+        }
+    } else if (a.gen == Gen::CHACHA20) {
         fill_chacha_parallel(buf, num_words, chacha_buf_key);
     } else {
         fill_buffer(buf, num_words, a.seed, a.gen);
     }
     double gen_s = std::chrono::duration<double>(Clock::now() - gen0).count();
-    printf("[verifier] generated in %.3f s (%.2f GiB/s)\n", gen_s, bytes / 1073741824.0 / gen_s);
+    if (a.build)
+        printf("[verifier] built reference copy in %.3f s (%.2f GiB/s, m=%u KiB t=%u p=%u)\n",
+               gen_s, bytes / 1073741824.0 / gen_s, recipe.m_kib, recipe.t, recipe.p);
+    else
+        printf("[verifier] generated in %.3f s (%.2f GiB/s)\n", gen_s, bytes / 1073741824.0 / gen_s);
 
     int fd = connect_to(a.host, a.port);
 
-    // Upload.
-    Hello hello{ kMagic, (uint64_t)bytes, 1, 0 };
+    // Hand over the buffer: the bytes themselves, or the recipe that makes them.
+    Hello hello{ kMagic, (uint64_t)bytes, kWireVersion, a.build ? kFlagBuild : 0u };
     if (!send_all(fd, &hello, sizeof(hello))) { fprintf(stderr, "hello send fail\n"); return 1; }
     auto up0 = Clock::now();
-    if (!send_all(fd, buf, bytes)) { fprintf(stderr, "data send fail\n"); return 1; }
+    if (a.build) {
+        RecipeMsg rmsg = msg_from_recipe(recipe);
+        if (!send_all(fd, &rmsg, sizeof(rmsg))) { fprintf(stderr, "recipe send fail\n"); return 1; }
+    } else if (!send_all(fd, buf, bytes)) {
+        fprintf(stderr, "data send fail\n"); return 1;
+    }
     auto up1 = Clock::now();
     double up_s = std::chrono::duration<double>(up1 - up0).count();
-    printf("[verifier] uploaded in %.3f s (%.2f GiB/s)\n", up_s, bytes / 1073741824.0 / up_s);
+    if (a.build)
+        printf("[verifier] sent a %zu-byte recipe in place of %.1f MiB\n",
+               sizeof(RecipeMsg), bytes / 1048576.0);
+    else
+        printf("[verifier] uploaded in %.3f s (%.2f GiB/s)\n", up_s, bytes / 1073741824.0 / up_s);
 
     Ready ready{};
     if (!recv_all(fd, &ready, sizeof(ready)) || ready.magic != kMagic) {
@@ -445,10 +502,10 @@ int main(int argc, char** argv) {
             fprintf(stream.f,
                     "@{\"t\":\"run\",\"label\":\"%s\",\"mb\":%.6g,\"k\":%u,\"lanes\":%u,\"n\":%u,"
                     "\"warmup\":%u,\"pages\":%llu,\"page_bytes\":%ld,\"locked\":%s,"
-                    "\"gen_s\":%.4f,\"upload_s\":%.4f,\"map_every\":%u}\n",
+                    "\"gen\":\"%s\",\"gen_s\":%.4f,\"upload_s\":%.4f,\"map_every\":%u}\n",
                     a.label, a.mb, a.k, a.lanes, a.n, a.warmup,
                     (unsigned long long)num_pages, page_bytes,
-                    ready.locked ? "true" : "false", gen_s, up_s, a.probe_map_every);
+                    ready.locked ? "true" : "false", gen_name, gen_s, up_s, a.probe_map_every);
         }
     }
     uint64_t seq = 0;

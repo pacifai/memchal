@@ -19,6 +19,12 @@
 #include <vector>
 #include <sys/mman.h>
 #include <sys/resource.h>
+#include <chrono>
+
+static double now_s() {
+    using namespace std::chrono;
+    return duration<double>(steady_clock::now().time_since_epoch()).count();
+}
 
 using namespace mc;
 
@@ -88,18 +94,50 @@ static void serve(int cfd) {
     if (!recv_all(cfd, &hello, sizeof(hello))) { fprintf(stderr, "[prover] no hello\n"); return; }
     if (hello.magic != kMagic) { fprintf(stderr, "[prover] bad magic\n"); return; }
 
+    if (hello.version > kWireVersion) {
+        fprintf(stderr, "[prover] unsupported wire version %u (max %u)\n",
+                hello.version, kWireVersion);
+        return;
+    }
+    const bool build = (hello.flags & kFlagBuild) != 0;
+
     size_t bytes = (size_t)hello.buffer_bytes;
     bytes = (bytes + 7) & ~size_t(7);            // round to whole 64-bit words
     uint64_t num_words = bytes / 8;
-    printf("[prover] receiving %.2f MiB (%llu words)...\n",
-           bytes / 1048576.0, (unsigned long long)num_words);
+
+    RecipeMsg rmsg{};
+    if (build && !recv_all(cfd, &rmsg, sizeof(rmsg))) {
+        fprintf(stderr, "[prover] no recipe\n"); return;
+    }
+    printf("[prover] %s %.2f MiB (%llu words)...\n",
+           build ? "building" : "receiving", bytes / 1048576.0,
+           (unsigned long long)num_words);
 
     int locked = 0;
     void* raw = alloc_pinned(bytes, &locked);
     if (!raw) return;
     uint64_t* buf = (uint64_t*)raw;
 
-    if (!recv_all(cfd, buf, bytes)) { fprintf(stderr, "[prover] short data\n"); munmap(raw, bytes); return; }
+    // Build into the locked region, so the matrix is pinned as it is written and
+    // never lands in swap between construction and the first challenge.
+    if (build) {
+        const Recipe r = recipe_from_msg(rmsg);
+        if (build_buffer_words(r) != num_words) {
+            fprintf(stderr, "[prover] recipe yields %llu words, hello says %llu\n",
+                    (unsigned long long)build_buffer_words(r),
+                    (unsigned long long)num_words);
+            munmap(raw, bytes); return;
+        }
+        const double t0 = now_s();
+        if (!build_buffer(buf, num_words, r)) {
+            fprintf(stderr, "[prover] build failed (m=%u t=%u p=%u)\n", r.m_kib, r.t, r.p);
+            munmap(raw, bytes); return;
+        }
+        printf("[prover] built in %.3f s (m=%u KiB t=%u p=%u)\n",
+               now_s() - t0, r.m_kib, r.t, r.p);
+    } else if (!recv_all(cfd, buf, bytes)) {
+        fprintf(stderr, "[prover] short data\n"); munmap(raw, bytes); return;
+    }
     printf("[prover] buffer resident; memory %s.\n", locked ? "LOCKED (verified)" : "NOT locked");
 
     // An unpinned buffer makes the honest baseline meaningless (pages can swap

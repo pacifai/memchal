@@ -162,20 +162,133 @@ The **frozen challenge math is untouched.** `answer_lane_t` / `answer_challenge_
   fine because the verifier is allowed to be memory-heavy and is not the party under test.
 - **New known-answer vectors** pin `build_buffer`, exactly as ChaCha20 was pinned.
 
-## Open decision points (settled with the prototype)
+## Open decision points
 
 1. **Cost parameters `m`, `t`, `p`** such that the honest one-time build is tolerable
    *and* any memory cut below ~full pushes per-probe rebuild past the timing budget —
    measured as a TMTO curve via a new `partial-recompute` attack mode, not asserted.
+   **Still open.** The build side is now measured (`bench_build`, below); the rebuild
+   side needs the adversary.
 2. **The GPU parallelism knob** — how much lane parallelism the honest builder needs
    on-GPU without handing the attacker a cheap shrink. Shaped on CPU, confirmed on the
-   port.
-3. **Vendor vs dependency** — this is the [ADR 0006](0006-chacha20-vendored-vs-dependency.md)
-   question re-decided for this scope. Argon2d means a Blake2b-based core (vendor the
-   reference implementation, or depend on libsodium); Balloon-on-our-ChaCha keeps the
-   footprint but is less proven. Decided alongside the final MHF pick.
-4. **Block granularity** — the MHF rebuilds whole blocks (~1 KiB for Argon2) while the
-   challenge reads 8-byte words, so the TMTO cost model is per-block, not per-word.
+   port. **Still open.** The knob exists (`Recipe::p`), and the CPU fill walks lanes in
+   order rather than on threads, which yields identical bytes; what `p > 1` costs the
+   TMTO has not been measured.
+3. **Vendor vs dependency — settled: vendor the full standard.** See below.
+4. **Block granularity — settled: 1 KiB, Argon2's own block.** The generator rebuilds
+   whole blocks while the challenge reads 8-byte words, so the cost model is per-block.
+   A `k=4096` challenge therefore probes at most 4096 distinct blocks, which is the
+   quantity the TMTO curve is a function of.
+
+## What was decided at implementation, and why
+
+**Vendor Argon2d in full, not an Argon2d-shaped construction of our own.** The choice
+was between the real standard (Argon2d's dependency graph *and* its Blake2b core, so our
+bytes match every other Argon2d implementation) and the same graph over the ChaCha20
+already vendored here (~150 lines instead of ~700, but bytes nobody else can check).
+
+The memory-hardness argument rests on the graph, so both options inherit it. What the
+full standard buys is **provenance**: `tests/known_answer_argon2d.cpp` checks us against
+RFC 7693 and RFC 9106 vectors — values this codebase did not produce — so a reviewer can
+verify the generator without reading our index arithmetic. [ADR 0006](0006-chacha20-vendored-vs-dependency.md)'s
+revisit clause named this exact trigger and asked for external provenance when it fired.
+Runtime cost of the choice is nil (Blake2b's round function is no slower than ChaCha's,
+and `G` dominates either way); the cost is implementation size, paid once.
+
+A dependency was reconsidered before the branch went up, and rejected for a concrete
+reason rather than a stylistic one: **no C or C++ Argon2 library can return the block
+matrix**, which is the only thing memchal wants. The reference implementation's
+`finalize()` unconditionally calls `free_memory()`, which wipes the matrix before
+deallocating it, and no public API exposes it; retaining it needs custom allocator
+callbacks plus clearing the library-internal global `FLAG_clear_internal_memory`, which
+exists to erase secrets and is process-wide. libsodium omits Argon2d entirely. OpenSSL's
+`EVP_KDF` returns the derived key only. Rust's `argon2` crate does hand back
+caller-supplied blocks, at the cost of a Rust toolchain in a C++ project heading for a
+CUDA kernel. The tempting shortcut — seed a stream cipher from a library's Argon2 tag —
+throws away the memory-hardness, because the hardness lives in the matrix and nowhere
+else.
+
+The reference implementation is used **as a test oracle instead**:
+`tests/differential_argon2d.cpp` links `libargon2` and compares tags across a random
+sweep of `m`, `t`, `p`, tag length, and input lengths, with the library's threads set to
+its lane count so the comparison covers its threaded fill. Assurance moves from one
+published vector to agreement across the parameter space, and nothing that ships or ports
+to the GPU gains a dependency.
+
+Argon2d **only** — no Argon2i or Argon2id. Their data-independent addressing buys
+side-channel resistance memchal has no use for, at a proven TMTO ceiling, and a knob
+nobody should turn invites turning it.
+
+**The TMTO curve will be measured with a live recursive rebuild**, not an estimate: the
+`partial-recompute` adversary holds fraction `f` of blocks and genuinely walks the
+dependency graph rebuilding missing ancestors, reporting real microseconds. It needs a
+give-up cap, which is faithful rather than a distortion — a real cheat is also capped,
+by the verifier's stopwatch, and a probe needing thousands of rebuilds is already caught
+whether or not it is allowed to finish. Two limits to state when the numbers land: our
+cheat keeps a *random* fraction, where a real one would study the graph offline and keep
+the blocks that are costliest to rebuild; and partial-recompute is the attack this design
+*introduces*, not the likeliest one in the wild (time-slicing and host-RAM residency are
+cheaper, and are the existing `partial` / `mmapdisk` story).
+
+## Implementation status
+
+Landed: `src/argon2d.hpp` (the generator, with `mc::build_buffer()` handing back the
+matrix as the challenge buffer), `tests/known_answer_argon2d.cpp` (RFC-pinned),
+`tests/differential_argon2d.cpp` (swept against `libargon2`), `src/bench_build.cpp`
+(build cost), and the recipe handshake: `--gen argon2d` sends a 92-byte `RecipeMsg`
+behind wire version 2, and the prover builds inside its already-locked region. The
+send-buffer path is untouched, so every earlier result and the demo still run.
+
+Invariants cover the new path: an honest prover's independently built copy agrees with
+the verifier's on every challenge, `fake` still fails every challenge, and `mmapdisk` is
+still caught by timing. That the two independent builds agree on every answer is itself a
+byte-equality check on the generator across two processes.
+
+The `partial-recompute` adversary remains, in [NEXT_STEPS](../../NEXT_STEPS.md).
+
+### An unplanned consequence: build-time memory is not optional
+
+Argon2d cannot produce part of a matrix, so **every prover must hold buffer-sized memory
+at least once, during the build**. A cheat that intends to spill to disk still needs the
+full buffer in RAM to construct it, and one whose budget is below the buffer size cannot
+set up at all — it fails during the build rather than answering slowly.
+
+This raises the floor, and it is worth *not* overclaiming: it proves a prover once had
+the memory, not that it still does. Nothing stops it freeing the buffer the instant the
+build finishes, which is exactly the `partial-recompute` cheat. Treat it as a property of
+the design, not a second detector.
+
+### A first, preliminary reading
+
+One session in the container (64 MiB buffer, `t=2`, `p=1`, `k=4096`, `lanes=32`), with
+both numbers taken from the *same* session as ADR 0003 requires:
+
+| quantity | measured |
+|---|---|
+| honest challenge, p50 | 496 us |
+| build throughput at `t=2` | ~1.2 GiB/s (64 MiB in 0.053 s) |
+| one block rebuild, hot cache | 0.30 us |
+
+A cheat holding fraction `f` of the blocks faces about `4096*(1-f)` misses per challenge,
+so the rebuild bill alone is:
+
+- `f = 0.5` — ~2048 misses, ~608 us, already **~2.2x honest** before any cascade.
+- `f = 0.9` — ~410 misses, ~122 us, only **~1.25x honest**.
+
+Both are *lower* bounds: the 0.30 us figure is a hot-cache floor with no cascade and no
+cache misses, so the real cheat pays more. Read the two rows together and the shape of
+the open question is already visible — deep memory cuts are caught comfortably, and the
+contested region is a prover shaving a *small* fraction, where the separation may sit
+inside the noise floor. That is the same frontier the compression adversary probes from
+the other side (see [NEXT_STEPS](../../NEXT_STEPS.md)), and it is why point 1 needs a
+measured curve rather than a single operating point.
+
+These numbers are session-local and preliminary: they come from a build benchmark and an
+honest run, not from the `partial-recompute` adversary, which is what will actually
+measure the cascade.
+
+This ADR stays **proposed** until the cost parameters in point 1 are fixed against a
+measured TMTO curve, exactly as its own "done when" requires.
 
 ## Scope boundary
 

@@ -32,8 +32,8 @@
       <label class="field">
         <span class="lab">mode</span>
         <select id="mode">
-          <option value="honest">honest — mlock'd in RAM</option>
-          <option value="mmapdisk" selected>mmapdisk — on disk, mmap'd</option>
+          <option value="honest" selected>honest — mlock'd in RAM</option>
+          <option value="mmapdisk">mmapdisk — on disk, mmap'd</option>
           <option value="disk">disk — pread per probe</option>
           <option value="partial">partial — half RAM, half disk</option>
           <option value="fake">fake — fabricates the rest</option>
@@ -47,11 +47,13 @@
       <label class="field">
         <span class="lab">buffer generator</span>
         <select id="gen">
-          <option value="splitmix64" selected>splitmix64 (weak)</option>
-          <option value="chacha">chacha (crypto)</option>
+          <option value="splitmix64">splitmix64 (weak) — uploaded</option>
+          <option value="chacha">chacha (crypto) — uploaded</option>
+          <option value="argon2d" selected>argon2d (memory-hard) — built from a recipe</option>
         </select>
       </label>
-      <p class="prose">Flip to chacha to defend against recompute — the seed can't be recovered, so the attack regenerates wrong data and every challenge fails.</p>
+      <p class="prose" id="genHint"></p>
+      <p class="prose gen-note" id="genNote" role="status" hidden></p>
 
       <label class="field">
         <span class="lab">access pattern</span>
@@ -72,8 +74,8 @@
       <p class="prose">Flip to random to defend against precompute — the prover can't predict future nonces, so its cache misses and it must read from disk on the spot.</p>
 
       <label class="field">
-        <span class="lab">ram budget <b class="num" id="memLabel">32 MiB</b></span>
-        <input type="range" id="mem" min="0" max="10" step="1" value="0">
+        <span class="lab">ram budget <b class="num" id="memLabel">96 MiB</b></span>
+        <input type="range" id="mem" min="0" max="10" step="1" value="3">
       </label>
       <p class="prose" id="memHint"></p>
 
@@ -88,8 +90,8 @@
         <button id="runBtn" class="go" type="button">Interrogate</button>
         <button id="stopBtn" class="chip" type="button">Stop</button>
       </div>
-      <p class="prose">Every run starts a real container at that budget, uploads the
-        buffer, then challenges it. Tracing spaces the challenges out, so the
+      <p class="prose">Every run starts a real container at that budget, hands it the
+        buffer (uploaded, or built from a recipe under argon2d), then challenges it. Tracing spaces the challenges out, so the
         headline numbers still belong to the terminal experiments.</p>
     </section>
   </aside>

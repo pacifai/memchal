@@ -10,7 +10,50 @@ Three kinds of thing live in different places:
   promoted to `accepted` once agreed.
 - **Analyses** — the [investigations](docs/investigations/).
 
-## Next — proving residency of the real workload
+## Next — the compression frontier
+
+A cheating prover that stores its buffer **compressed** and decompresses on demand when
+probed. This is the open question named independently by two external advisors, and it
+is not blocked on anything below — it can run against today's upload path.
+
+The thing to understand about this adversary is that it is not trying to beat the honest
+prover, and it knows it cannot: decompressing a block is strictly more work than reading
+bytes that are already resident. It is trying to stay *close enough* that the gap
+disappears into the noise floor, while holding materially fewer bytes. **Its win
+condition is indistinguishability, not speed.** What it buys is free memory — floor space
+it can rent out while still passing the challenge.
+
+That makes the noise floor the real opponent, and this environment's is wide: about 40%
+of an honest response is TCP transport, and absolute latency swings ~1.6x between
+sessions ([ADR 0003](docs/decisions/0003-timing-detector-scope-and-measurement.md)). The
+cheat only has to hide inside that.
+
+Why this matters more than it first looks: the memory-hard buffer below is Argon2d
+output, so it is pseudorandom and compresses to nothing — against the primitive's own
+filler this attack buys exactly zero. But what memchal ultimately wants to prove
+residency of is **model weights**, which are structured, often quantized, and genuinely
+compressible. The attack is dead where it is easiest to measure and live exactly where it
+counts. So an experiment has to use a buffer with *tunable, realistic* compressibility;
+run it against the generator's output and it returns a reassuring null result that means
+nothing.
+
+- [ ] **Measure the frontier.** A `compressed` cheating-prover mode (hold the buffer
+  compressed, decompress the containing block per probe, with a small decompressed-block
+  cache) plus a verifier knob for buffer compressibility. *Done when:* there is a
+  measured curve of **memory saved** against **timing separation from honest**, swept
+  over compressibility and cache size, with the indistinguishable region stated plainly
+  in ratio terms with propagated error.
+
+The deliverable is **a measured frontier, not a pass/fail.** "Compression is defeated" is
+not an available answer. "A prover can hold X% fewer bytes while staying inside the noise
+floor" is.
+
+Untested hypotheses for what would move that frontier, to be checked rather than
+assumed: raising `k` (decompression cost scales with probes, transport does not),
+attacking the transport floor itself (it is the largest noise term), and timing
+individual probes rather than whole challenges.
+
+## Then — proving residency of the real workload
 
 Today the challenge proves you're holding a specific random buffer the verifier sent.
 The goal is to prove you're holding something tied to the actual workload — not
@@ -24,17 +67,19 @@ on demand (so the prover must store it) and tied to the model. The memory-hardne
 falls on the one-time *generation*, not the per-challenge answer, so it does **not**
 multiply the per-challenge cost — that cost is inescapable and accepted either way.
 
-- [ ] **Design the generator.** The construction and the decision fork are written up in
-  [ADR 0007](docs/decisions/0007-buffer-generator-memory-hard-function.md) (proposed):
-  a memory-hard function (lean: Argon2d, scrypt fallback), why the recompute defense
-  migrates from correctness to timing/TMTO, and the effect on the protocol and each
-  prover. *Done when:* ADR 0007 is accepted and its cost parameters (`m`, `t`, `p`) and
-  VRAM footprint are fixed against a real inference workload — measured with the
-  prototype below, not asserted.
-- [ ] **Prototype it on CPU.** *Done when:* a `cheating_prover` attack that answers
-  without genuinely holding the data (regenerate, or hold only part — a new
-  `partial-recompute` mode) loses against it, pinned by a known-answer test and an
-  invariant, and its TMTO curve backs the cost parameters chosen in ADR 0007.
+The generator runs on the wire. `--gen argon2d` sends a 92-byte recipe instead of the
+buffer, both sides build it, and the invariant suite covers the path. What remains is
+attacking it.
+
+- [ ] **Attack it: a `partial-recompute` mode.** Hold fraction `f` of the blocks and
+  genuinely rebuild missing ancestors on demand, with a give-up cap. *Done when:* it
+  loses on timing against the defended generator, an invariant pins that, and its TMTO
+  curve fixes the cost parameters (`m`, `t`, `p`) that ADR 0007 needs to move from
+  proposed to accepted.
+- [ ] **Then re-check the cheap wins.** Our cheat keeps a random fraction; a real one
+  studies the dependency graph offline and keeps the blocks costliest to rebuild. Add a
+  `--keep hot` policy once the random curve exists, and report whether it moves the
+  parameters.
 
 > Not in scope, noted for the future: **challenging the weights directly** (probe a
 > function of the weights the prover already holds for inference) would avoid a

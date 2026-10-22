@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/run_tests.sh — build + KAT + invariant tests for the memory-challenge PoC.
+# tests/run_tests.sh — build + known-answer + invariant tests for the memory-challenge PoC.
 #
 # Must be run inside the Docker container via:
 #   ./run.sh bash tests/run_tests.sh
@@ -35,24 +35,46 @@ wait_for_port() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 1: build binaries and KAT
+# Step 1: build binaries and the known-answer tests
 # ---------------------------------------------------------------------------
 cd /work
 
 echo "=== BUILD ==="
 make
-g++ -O3 -std=c++17 -I/work/src -o tests/known_answer tests/known_answer.cpp
+make tests
 echo "Build complete."
 
 # ---------------------------------------------------------------------------
-# Step 2: KAT
+# Step 2: known-answer tests
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== KAT (known-answer test) ==="
+echo "=== KNOWN-ANSWER TEST (challenge math) ==="
 if tests/known_answer; then
-    pass "KAT"
+    pass "known-answer test"
 else
-    fail "KAT"
+    fail "known-answer test"
+fi
+
+# The buffer generator is pinned separately, against vectors published by other
+# people (RFC 7693 for Blake2b, RFC 9106 for Argon2d). A failure here means the
+# generator is no longer Argon2d, so ADR 0007's analysis no longer applies to it.
+echo ""
+echo "=== KNOWN-ANSWER TEST (buffer generator) ==="
+if tests/known_answer_argon2d; then
+    pass "known-answer test (generator)"
+else
+    fail "known-answer test (generator)"
+fi
+
+# The published vectors pin one point each. This sweeps the parameter space
+# against the reference implementation, so a bug that the RFC vector happens to
+# miss still shows up. libargon2 is a test-only dependency.
+echo ""
+echo "=== DIFFERENTIAL TEST (generator vs libargon2) ==="
+if tests/differential_argon2d; then
+    pass "differential test (generator)"
+else
+    fail "differential test (generator)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -161,6 +183,32 @@ run_invariant "mmapdisk" 9103 \
 run_invariant "fake" 9104 \
     "e == s and s > 0" \
     ./cheating_prover --port 9104 --mode fake --frac 0.5 --datafile /tmp/memchal_test_fake.bin
+
+# --- Build-buffer path (--gen argon2d): the verifier sends a recipe instead of
+# the buffer and both sides build it. The prover's independently built copy has
+# to agree with the verifier's on every challenge, so 0 errors here also proves
+# the two builds are byte-identical. fake still fabricates, so it still fails
+# every challenge — the correctness detector is unaffected by where bytes came
+# from, which is the point of leaving the challenge math alone.
+_SAVE_ARGS="$VERIFIER_ARGS"; VERIFIER_ARGS="$VERIFIER_ARGS --gen argon2d"
+
+run_invariant "build_honest" 9121 \
+    "e == 0 and s > 0" \
+    ./prover 9121
+
+run_invariant "build_cheat_honest" 9122 \
+    "e == 0 and s > 0" \
+    ./cheating_prover --port 9122 --mode honest
+
+run_invariant "build_fake" 9123 \
+    "e == s and s > 0" \
+    ./cheating_prover --port 9123 --mode fake --frac 0.5 --datafile /tmp/memchal_build_fake.bin
+
+run_invariant "build_mmapdisk" 9124 \
+    "e == 0 and s > 0" \
+    ./cheating_prover --port 9124 --mode mmapdisk --datafile /tmp/memchal_build_mmap.bin
+
+VERIFIER_ARGS="$_SAVE_ARGS"
 
 # --- Case 5: cheating_prover prefetch mode — correct answers (timing attack only), errors must be 0 ---
 run_invariant "prefetch" 9109 \

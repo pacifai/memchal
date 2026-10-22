@@ -19,6 +19,7 @@
 // includes CUDA headers, and nothing in that file includes POSIX ones.
 #include "common.hpp"
 #include "gpu_answer.hpp"
+#include "gpu_ingest.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -68,12 +69,18 @@ static void serve(int cfd) {
     Hello hello{};
     if (!recv_all(cfd, &hello, sizeof(hello))) { fprintf(stderr, "[gpu] no hello\n"); return; }
     if (hello.magic != kMagic) { fprintf(stderr, "[gpu] bad magic\n"); return; }
+    if (hello.version > kWireVersion) {
+        fprintf(stderr, "[gpu] unsupported wire version %u (max %u)\n",
+                hello.version, kWireVersion);
+        return;
+    }
+    const bool build = (hello.flags & kFlagBuild) != 0;
 
     size_t bytes = (size_t)hello.buffer_bytes;
     bytes = (bytes + 7) & ~size_t(7);            // round to whole 64-bit words
     uint64_t num_words = bytes / 8;
-    printf("[gpu] receiving %.2f MiB (%llu words)...\n",
-           bytes / 1048576.0, (unsigned long long)num_words);
+    printf("[gpu] %s %.2f MiB (%llu words)...\n",
+           build ? "building" : "receiving", bytes / 1048576.0, (unsigned long long)num_words);
 
     char err[512] = {0};
     gpu::Prover p;
@@ -82,31 +89,48 @@ static void serve(int cfd) {
         return;
     }
 
-    // Stream the upload through pinned staging so a multi-GB buffer never needs
-    // a second full copy in host memory.
-    size_t cap = 0;
-    unsigned char* stage = gpu::staging(p, &cap);
-    size_t left = bytes;
-    while (left) {
-        size_t chunk = left < cap ? left : cap;
-        if (!recv_all(cfd, stage, chunk)) {
-            fprintf(stderr, "[gpu] short data (%zu bytes outstanding)\n", left);
-            gpu::destroy(p);
-            return;
-        }
-        if (!gpu::push(p, chunk, err, sizeof err)) {
+    // Build mode: build on the host, then copy to the card (see gpu_ingest.hpp).
+    // The device buffer is allocated first so a card that cannot hold it fails
+    // before a long build rather than after.
+    Source src; src.fd = cfd;
+    HostBuild hb;
+    if (build) {
+        if (!host_build_from_wire(cfd, hello, hb, err, sizeof err)) {
             fprintf(stderr, "[gpu] FATAL: %s\n", err);
             gpu::destroy(p);
             return;
         }
-        left -= chunk;
+        printf("[gpu] built on the host in %.3f s (m=%u KiB t=%u p=%u); copying to the card\n",
+               hb.build_s, hb.recipe.m_kib, hb.recipe.t, hb.recipe.p);
+        src.built = hb.buf;
+    }
+
+    // Stream the bytes through pinned staging, so an upload never needs a full
+    // host copy (a build needs exactly one, freed as soon as it is on the card).
+    bool ok = ingest(p, src, bytes, err, sizeof err);
+    host_build_free(hb);
+    if (!ok) {
+        fprintf(stderr, "[gpu] FATAL: %s\n", err);
+        gpu::destroy(p);
+        return;
     }
 
     const char* backing = "unknown";
     bool is_device = false;
     gpu::residency(p, &backing, &is_device);
-    printf("[gpu] buffer uploaded; backing = %s\n", backing);
+    printf("[gpu] buffer %s; backing = %s\n", build ? "built and copied" : "uploaded",
+           backing);
     report_hbm("after upload");
+    {
+        size_t hf = 0, ht = 0;
+        gpu::mem_info(&hf, &ht);
+        printf("@{\"t\":\"proverinfo\",\"backing\":");
+        json_str(stdout, backing);
+        printf(",\"device_backed\":%s,\"build\":%s,\"build_s\":%.4f,"
+               "\"hbm_used\":%llu,\"hbm_total\":%llu}\n",
+               is_device ? "true" : "false", build ? "true" : "false", hb.build_s,
+               (unsigned long long)(ht - hf), (unsigned long long)ht);
+    }
 
     // The ADR 0002 analog: an honest baseline on migratable or host-mapped
     // memory is meaningless, so refuse by default.

@@ -73,8 +73,10 @@ curve.
   headers, so it can be included from a `.cu` translation unit. `mulhi64` is the
   one operation with two spellings: the 128-bit multiply on the host,
   `__umul64hi` on the device, behind `MC_HOST_DEVICE`.
-- `src/net.hpp` — the wire structs, the socket helpers, and the `/proc` readers.
-  Host only; none of it has a device analog.
+- `src/net.hpp` — the wire structs (including the build-buffer `RecipeMsg`, the
+  `kFlagBuild` Hello flag, and `kWireVersion`), the socket helpers, the `Source`
+  reader the CPU provers ingest through, and the `/proc` readers. It includes
+  `argon2d.hpp`. Host only; none of it has a device analog.
 - `src/common.hpp` — a shim including both, so every host-side caller is
   unchanged. Include `challenge.hpp` alone from CUDA. Historically this file held
   both halves (`answer_lane_t`,
@@ -84,11 +86,24 @@ curve.
   ([ADR 0001](docs/decisions/0001-challenge-math-frozen-pinned-by-known-answer.md)).
 - `src/chacha20.hpp` — a small vendored ChaCha20 (RFC 8439) for keyed-stream buffer
   generation.
+- `src/argon2d.hpp` — vendored Argon2d (RFC 9106) for the build-buffer design: the
+  memory-hard generator that makes "regenerate on demand" more expensive than "keep the
+  bytes". `mc::build_buffer()` hands back the Argon2d **matrix** as the challenge buffer
+  — memchal wants the scratch memory, not the tag. Argon2d only, and **frozen the same
+  way the challenge math is**: it is pinned against RFC vectors, so a change that breaks
+  them means it is no longer Argon2d and ADR 0007's analysis no longer covers it. The
+  `p` lanes of each slice fill on `p` threads. On the wire behind `--gen argon2d`: the
+  verifier sends a `RecipeMsg` and both sides build. The CPU and GPU provers all handle
+  build mode; the GPU provers build on the host CPU and copy the result to the card
+  (building on the GPU itself is still open). See [ADR 0007](docs/decisions/0007-buffer-generator-memory-hard-function.md).
+- `src/bench_build.cpp` → `bench_build` — what one 1 KiB block costs to build, which is
+  the attacker's unit of work in the build-buffer design. Not a protocol participant.
 - `src/prover.cpp` — the honest TCP server. Maps, prefaults, and `mlock`s the
   buffer, verifies the lock through `VmLck`, and refuses to run if it isn't pinned
   ([ADR 0002](docs/decisions/0002-verify-and-refuse-on-mlock.md)).
-- `src/verifier.cpp` — the client. Generates the buffer (`--gen splitmix64|chacha`),
-  uploads it, times challenges, checks answers, and writes JSON and CSV. The three
+- `src/verifier.cpp` — the client. Generates the buffer (`--gen splitmix64|chacha`) and
+  uploads it, or sends a recipe (`--gen argon2d --build-t T --build-p P`) so both
+  sides build it, times challenges, checks answers, and writes JSON and CSV. The three
   defenses default **on** (`--gen chacha --chain dependent --nonce random`); the
   benchmark opt-out is to name the weak setting (`--gen splitmix64 --chain
   independent --nonce sequential`).
@@ -101,8 +116,11 @@ curve.
 - `src/prover_cuda.cpp` — the honest GPU server. `cudaMalloc` replaces
   `mmap`+`mlock`, and `cudaPointerGetAttributes` replaces reading `VmLck`
   ([ADR 0008](docs/decisions/0008-gpu-residency-check-substitutes-for-mlock.md)).
+- `src/gpu_ingest.hpp` — the GPU provers' one ingestion path for both protocols:
+  receive the uploaded bytes, or receive a recipe and build the buffer on the host,
+  then push it to the card through pinned staging. Host only.
 - `src/cheating_prover_cuda.cpp` — the GPU adversaries: `honest`, `fake`, `uvm`,
-  `zerocopy`. It always claims `locked=true`, because nothing stops a real one
+  `zerocopy`, `partial`. It always claims `locked=true`, because nothing stops a real one
   doing the same. `--hog` occupies HBM so a managed buffer cannot fit.
 - `scripts/gpu_pod_setup.sh` — the first command on a rented box: records the
   machine, refuses boxes whose numbers would be meaningless, settles whether
@@ -118,10 +136,13 @@ curve.
   floor, ratios and paired differences with propagated error, drift detection, and
   session-stamped output.
 - `scripts/plot.py` — one self-describing chart from `trials.json`.
-- `tests/` — `known_answer.cpp` (pins the math), `known_answer_gpu.cpp` (checks
-  the CUDA kernel against those **same pinned constants**, not against a fresh
-  CPU answer — two implementations agreeing only proves they drifted together),
-  and `run_tests.sh` (the CPU known-answer test plus invariants).
+- `tests/` — `known_answer.cpp` (pins the challenge math), `known_answer_gpu.cpp`
+  (checks the CUDA kernel against those **same pinned constants**, not against a
+  fresh CPU answer — two implementations agreeing only proves they drifted
+  together), `known_answer_argon2d.cpp` (pins the generator against RFC 7693 and
+  RFC 9106 vectors — values this codebase did not produce), `differential_argon2d.cpp`
+  (sweeps the generator against `libargon2`, a **test-only** dependency; nothing that
+  ships links it), and `run_tests.sh` (the CPU known-answer tests plus invariants).
 
 ## Build, run, test
 

@@ -20,9 +20,9 @@ Linux/arm64). Invariant tests assert `honest`/`disk`/`mmapdisk` never fail
 verification and `fake` always does.
 
 ## Consequences
-- Any change to the challenge math is caught immediately (KAT fails → "the math
+- Any change to the challenge math is caught immediately (the known-answer test fails → "the math
   changed, prior numbers are invalid").
 - Changing the math (e.g. a memory-hard derivation to beat the recompute adversary)
-  is deliberately out of stabilization scope and would require new KAT vectors —
+  is deliberately out of stabilization scope and would require new known-answer vectors —
   see NEXT_STEPS.md.
 - Run `./run.sh bash tests/run_tests.sh`.

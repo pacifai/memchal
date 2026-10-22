@@ -87,6 +87,30 @@ until you turn on a matching defense.
 | `prefetch` | Keeps the data on disk, derives all the offsets from the nonce up front, and prefetches those pages before answering — dodging the serial faults that make `mmapdisk` slow when starved. | `--chain dependent`: each offset depends on the previously read word, so the offsets can't be derived ahead of the reads, and the prover falls back to slow serial faults — timing. |
 | `precompute` | Exploits predictable nonces: a background thread infers the coming nonces and computes their answers from disk in the gaps between challenges, then serves them instantly. | `--nonce random`: each nonce comes from a cryptographic random generator, so there's nothing to precompute and the prover must read during the timed window — timing. |
 
+### Two ways to hand over the buffer
+
+`--gen splitmix64` and `--gen chacha` **upload** the buffer: the verifier generates
+every byte and sends them all. `--gen argon2d` **builds** it instead — the verifier
+sends a 92-byte recipe and both sides construct the same buffer with Argon2d
+(RFC 9106). Each 1 KiB block comes from the previous block and one earlier block
+that the data itself selects, so a prover that discards blocks must rebuild a
+cascade of ancestors to recover any one of them. That is what stops "hold the
+buffer" and "regenerate on demand" from costing the same, which is the problem an
+O(1) generator has once the prover holds the recipe.
+
+The challenge math is identical either way — `answer_lane_t` reads `load(idx)` and
+does not care how the buffer was filled — so every detection result above carries
+over. A build-buffer run is checked by the same invariants: `fake` still fails
+every challenge, the disk-backed cheats are still slow, and an honest prover's
+independently built copy agrees with the verifier's on every answer.
+
+One consequence is worth stating plainly: Argon2d cannot produce part of a matrix,
+so **every prover must hold buffer-sized memory at least once, while building**. A
+prover whose budget is below the buffer size cannot set up under `--gen argon2d`
+at all — it fails during the build rather than answering slowly. That raises the
+floor; it does not prove residency, because nothing stops a prover from freeing
+the memory the moment the build finishes.
+
 The last three defenses are verifier flags (`--gen chacha`, `--chain dependent`,
 `--nonce random`), and they ship **on** by default — the verifier is secure out of
 the box. To reproduce an attack winning, name the weak setting explicitly as a

@@ -89,6 +89,9 @@ body {
 .num { font-family: var(--face-num); font-variant-numeric: tabular-nums; }
 .prose { font-family: var(--face-prose); color: var(--ink-2); font-size: 12.5px; margin: 8px 0 0; }
 .prose.inline { display: inline; margin: 0; text-transform: none; letter-spacing: 0; }
+/* The page changed the generator on the operator's behalf: set it apart so it
+ * reads as a notice, not as more description. */
+.prose.gen-note { color: var(--ink); border-left: 2px solid var(--slow); padding-left: 8px; }
 
 /* ── top rail ─────────────────────────────────────────────────────────── */
 .rail {

@@ -15,6 +15,12 @@
 'use strict';
 
 const MEM_STEPS = [32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024]; // MiB
+const GEN_HINTS = {
+  splitmix64: "Weak: the seed is recoverable from a single word, so recompute regenerates the whole buffer and wins.",
+  chacha: "The buffer is still uploaded, but a random 256-bit key means the seed can't be recovered, so recompute regenerates wrong data and every challenge fails.",
+  argon2d: "Build-buffer: the verifier sends a 92-byte recipe instead of the whole buffer, and both sides build it with Argon2d. Each 1 KiB block is built from the previous one and an earlier block the data itself picks, so a prover that discards blocks has to rebuild a cascade of ancestors to get any one of them back.",
+};
+
 const MODE_HINTS = {
   honest: "Holds the whole buffer in RAM and mlock()s it. The baseline every other row is measured against.",
   mmapdisk: "Keeps the data on disk and reads it through a memory-mapped view — no syscall per probe. Fast while it has the RAM to cache the file; give it less and watch.",
@@ -63,7 +69,7 @@ const REDUCED_MOTION = window.matchMedia('(prefers-reduced-motion: reduce)').mat
 const $ = (id) => document.getElementById(id);
 const el = {
   mode: $('mode'), gen: $('gen'), chain: $('chain'), nonce: $('nonce'), mem: $('mem'), memLabel: $('memLabel'), memHint: $('memHint'),
-  modeHint: $('modeHint'), mb: $('mb'), k: $('k'), n: $('n'), warmup: $('warmup'),
+  modeHint: $('modeHint'), genHint: $('genHint'), genNote: $('genNote'), mb: $('mb'), k: $('k'), n: $('n'), warmup: $('warmup'),
   runBtn: $('runBtn'), stopBtn: $('stopBtn'), clearBtn: $('clearBtn'), themeBtn: $('themeBtn'),
   led: $('led'), statusText: $('statusText'),
   latency: $('latency'), pagemap: $('pagemap'), collapse: $('collapse'),
@@ -836,6 +842,33 @@ function currentCfg() {
   };
 }
 
+// Argon2d cannot build part of a matrix, so every prover has to hold the whole
+// buffer in RAM once while it builds — even a cheat that means to spill it to
+// disk straight after. With process overhead that takes about 1.2× the buffer
+// (a 64 MiB build is OOM-killed at 64 MiB and runs at 77 MiB). A cheat with less
+// fails during the build instead of answering slowly, which is not the result a
+// starved-budget run exists to show. The honest prover is left out: it needs
+// ~1.2× under every generator, and the memory hint warns about that.
+// demo/bridge.py's starved_for_build() is the same rule.
+const BUILD_HEADROOM = 1.2;
+function starvedForBuild() {
+  return el.mode.value !== 'honest' && MEM_STEPS[+el.mem.value] < BUILD_HEADROOM * +el.mb.value;
+}
+
+// True until the operator picks a generator. While it holds, the page picks:
+// argon2d, or chacha for a starved run. Once the operator picks, the choice
+// sticks — including argon2d for a starved run, which then gets a warning.
+let genAuto = true;
+
+/** A scenario control changed (mode, budget, buffer size). Under argon2d a
+ *  starved run would only show a build failure, so while the page is picking
+ *  the generator it runs a starved run on chacha and says so, and goes back to
+ *  argon2d when the budget covers the buffer again. */
+function onScenarioChange() {
+  if (genAuto) el.gen.value = starvedForBuild() ? 'chacha' : 'argon2d';
+  syncControls();
+}
+
 function syncControls() {
   const mib = MEM_STEPS[+el.mem.value];
   const buf = +el.mb.value;
@@ -847,11 +880,24 @@ function syncControls() {
       ? `${ratio.toFixed(2)}× the buffer — barely enough; expect it to hold most of the file.`
       : `${ratio.toFixed(2)}× the buffer — the page cache CANNOT keep the file. Probes have to fault to storage.`;
   el.modeHint.textContent = MODE_HINTS[el.mode.value] || '';
+  el.genHint.textContent = GEN_HINTS[el.gen.value] || '';
+  // See starvedForBuild(). Reached only when the operator chose argon2d for a
+  // starved run themselves; otherwise onScenarioChange() has picked chacha.
+  if (el.gen.value === 'argon2d' && starvedForBuild()) {
+    el.genHint.textContent += ` ⚠ At ${ratio.toFixed(2)}× the buffer this prover cannot build it: Argon2d needs buffer-sized RAM once, plus headroom, even for a cheat that means to spill to disk. This run will fail during the build. Raise the budget to ${BUILD_HEADROOM}× or more, or pick chacha.`;
+  }
+  const switched = genAuto && el.gen.value === 'chacha';
+  el.genNote.hidden = !switched;
+  el.genNote.textContent = switched
+    ? `Switched from argon2d to chacha for this run. Argon2d needs the whole buffer in RAM while it builds, plus headroom, so a prover given ${ratio.toFixed(2)}× the buffer cannot even start. chacha uploads the buffer instead, so this prover can take it and you can watch how it runs on this budget. Raise the budget to ${BUILD_HEADROOM}× or more and the generator goes back to argon2d.`
+    : '';
   if (el.mode.value === 'honest' && ratio < 1.2) {
     el.memHint.textContent += ' An honest prover needs the RAM: below ~1.2× it gets OOM-killed.';
   }
   if (el.mode.value === 'recompute') {
-    el.memHint.textContent = 'RAM budget is irrelevant for recompute — it holds no data, only the seed.';
+    el.memHint.textContent = el.gen.value === 'argon2d'
+      ? `Recompute holds no data afterward, only a seed — but under argon2d it must build the whole buffer once first, so the budget has to reach ${BUILD_HEADROOM}× the buffer.`
+      : 'RAM budget is irrelevant for recompute — it holds no data, only the seed.';
   }
   if (el.mode.value === 'precompute') {
     el.memHint.textContent = ratio < 1
@@ -887,11 +933,12 @@ el.themeBtn.addEventListener('click', () => {
   state.dirty.lat = state.dirty.map = state.dirty.collapse = true;
 });
 ['input', 'change'].forEach((evt) => {
-  el.mem.addEventListener(evt, syncControls);
-  el.mode.addEventListener(evt, syncControls);
-  el.mb.addEventListener(evt, syncControls);
+  el.mem.addEventListener(evt, onScenarioChange);
+  el.mode.addEventListener(evt, onScenarioChange);
+  el.mb.addEventListener(evt, onScenarioChange);
   el.chain.addEventListener(evt, syncControls);
   el.nonce.addEventListener(evt, syncControls);
+  el.gen.addEventListener(evt, () => { genAuto = false; syncControls(); });
 });
 window.addEventListener('resize', () => {
   state.dirty.lat = state.dirty.map = state.dirty.collapse = true;
@@ -900,7 +947,7 @@ window.addEventListener('resize', () => {
 setInterval(pump, 40);
 trackHover(el.latency, 'lat');
 trackHover(el.pagemap, 'map');
-syncControls();
+onScenarioChange();
 updateTiles();
 connect();
 requestAnimationFrame(tick);
