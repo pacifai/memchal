@@ -112,68 +112,26 @@ MC_HOST_DEVICE static inline uint64_t splitmix64_recover_seed(uint64_t word0) {
 }
 
 // ---------------------------------------------------------------------------
-// Generator selection
+// Buffer generators
 //
-// HOST ONLY: the generators allocate nothing but do run ChaCha20 over a whole
-// buffer, and only the verifier and the cheating prover call them. Keeping them
-// off the device keeps chacha20.hpp out of device code.
+// HOST ONLY: keeping them off the device keeps chacha20.hpp out of device code.
 // ---------------------------------------------------------------------------
-enum class Gen { SPLITMIX64, CHACHA20 };
 
-// Fill a uint64_t buffer using the selected generator.
-//
-// SPLITMIX64 (default): produces exactly what fill_random() produced —
-//   buf[i] = splitmix64_finalize(s + (i+1)*GOLDEN), where s = (seed ? seed : DEFAULT).
-//
-// CHACHA20: derive a 32-byte key from the 64-bit seed by running splitmix64
-//   four times (words 0..3 of the sequence, little-endian bytes), use a
-//   zero nonce and counter0=0.  The resulting keystream bytes are assembled
-//   into uint64_t words little-endian (buf[i] = LE64 of bytes [8i..8i+7]).
-//   The seed cannot be recovered from the output, so the recompute adversary
-//   produces wrong words against a ChaCha20-generated buffer.
-static inline void fill_buffer(uint64_t* buf, uint64_t num_words,
-                                uint64_t seed, Gen gen) {
-    if (gen == Gen::SPLITMIX64) {
-        uint64_t s = seed ? seed : 0xDEADBEEFCAFEF00DULL;
-        for (uint64_t i = 0; i < num_words; ++i) buf[i] = splitmix64(s);
-        return;
-    }
-    // CHACHA20: seed -> key via 4 splitmix64 words
-    uint64_t ks = seed ? seed : 0xDEADBEEFCAFEF00DULL;
-    uint8_t key[32];
-    for (int i = 0; i < 4; ++i) {
-        uint64_t w = splitmix64(ks);
-        // Little-endian store
-        for (int b = 0; b < 8; ++b)
-            key[i * 8 + b] = (uint8_t)(w >> (b * 8));
-    }
-    static const uint8_t zero_nonce[12] = {};
-    // Fill raw bytes, then the uint64_t words are already in the right order
-    // (host is little-endian for the purposes of this PoC; see the comment near
-    // kMagic in net.hpp: "same-endian machines").
-    chacha20_fill((uint8_t*)buf, num_words * 8, key, zero_nonce, 0);
-}
-
-// Fill a uint64_t buffer using a caller-supplied full 32-byte ChaCha20 key.
-//
-// This is the hardened entry point used by the verifier's --gen chacha path.
-// The key must be 32 bytes of entropy from std::random_device (not derived
-// from the 64-bit seed), so the buffer capacity is unconditionally 256 bits.
-//
-// A zero 12-byte nonce and block index 0 are used; the buffer is treated as
-// a stream of little-endian uint64_t words (consistent with the host-LE
-// assumption documented near kMagic).
+// Fill a buffer with ChaCha20 keystream under a 32-byte random key, read as
+// little-endian words. The key is never shared, so the prover can't regenerate
+// the buffer from anything it is given.
 static inline void fill_buffer_chacha(uint64_t* buf, uint64_t num_words,
                                       const uint8_t key[32]) {
     static const uint8_t zero_nonce[12] = {};
     chacha20_fill((uint8_t*)buf, num_words * 8, key, zero_nonce, 0);
 }
 
-// Deterministic buffer fill (verifier generates; also handy for tests).
-// Delegates to fill_buffer(SPLITMIX64) — behavior is bit-identical to the
-// original implementation.
+// Deterministic splitmix64 fill: buf[i] = splitmix64_finalize(s + (i+1)*GOLDEN),
+// where s = (seed ? seed : DEFAULT). The verifier's --gen splitmix64 and every
+// known-answer test use it.
 static inline void fill_random(uint64_t* buf, uint64_t num_words, uint64_t seed) {
-    fill_buffer(buf, num_words, seed, Gen::SPLITMIX64);
+    uint64_t s = seed ? seed : 0xDEADBEEFCAFEF00DULL;
+    for (uint64_t i = 0; i < num_words; ++i) buf[i] = splitmix64(s);
 }
 
 // mix64: MurmurHash3 finalizer, a strong 64-bit avalanche. GPU PORT: identical.
@@ -395,14 +353,7 @@ struct BufLoad {
     MC_HOST_DEVICE uint64_t operator()(uint64_t idx) const { return buf[idx]; }
 };
 
-// Raw-buffer wrappers — the honest prover and the verifier use these.
-// chained defaults to false so all existing callers and the known-answer test
-// are unchanged.
-static inline uint64_t answer_lane(const uint64_t* buf, uint64_t num_words,
-                                   uint64_t nonce, uint32_t lane, uint32_t samples,
-                                   bool chained = false) {
-    return answer_lane_t(BufLoad{buf}, num_words, nonce, lane, samples, chained);
-}
+// Raw-buffer wrapper — the honest prover and the verifier use it.
 static inline uint64_t answer_challenge(const uint64_t* buf, uint64_t num_words,
                                         uint64_t nonce, uint32_t k, uint32_t lanes,
                                         bool chained = false) {

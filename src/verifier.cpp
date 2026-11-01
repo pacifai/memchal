@@ -50,6 +50,7 @@ static size_t tail_count(double p, size_t n) {
 // JSON) rather than letting a single sample masquerade as a percentile.
 static constexpr size_t kMinTail = 10;
 
+enum class Gen { SPLITMIX64, CHACHA20 };
 enum class NonceMode { SEQUENTIAL, RANDOM };
 
 struct Args {
@@ -512,7 +513,7 @@ int main(int argc, char** argv) {
     } else if (a.gen == Gen::CHACHA20) {
         fill_chacha_parallel(buf, num_words, chacha_buf_key);
     } else {
-        fill_buffer(buf, num_words, a.seed, a.gen);
+        fill_random(buf, num_words, a.seed);
     }
     double gen_s = std::chrono::duration<double>(Clock::now() - gen0).count();
     if (a.build)
