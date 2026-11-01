@@ -1,0 +1,45 @@
+# CPU tests in the same container ./run.sh uses, plus a compile-only check of
+# the CUDA targets. Nothing here needs a GPU or any secret.
+#
+# Pull requests from forks run with a read-only token and no secrets, and the
+# repository setting "Require approval for all external contributors" holds
+# them until a maintainer approves the run. Never switch this workflow to
+# pull_request_target: that runs fork code with write access.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cpu:
+    name: CPU tests
+    # arm64, to match the linux/arm64 image the measurements are taken in.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Build and test in the toolchain container
+        run: ./run.sh bash tests/run_tests.sh
+
+  gpu-build:
+    name: GPU build (compile only)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container: nvidia/cuda:12.4.1-devel-ubuntu22.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Compile the CUDA targets
+        run: make gpu
