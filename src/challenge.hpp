@@ -118,8 +118,7 @@ MC_HOST_DEVICE static inline uint64_t splitmix64_recover_seed(uint64_t word0) {
 // the buffer from anything it is given.
 static inline void fill_buffer_chacha(uint64_t* buf, uint64_t num_words,
                                       const uint8_t key[32]) {
-    static const uint8_t zero_nonce[12] = {};
-    chacha20_fill((uint8_t*)buf, num_words * 8, key, zero_nonce, 0);
+    chacha20_fill((uint8_t*)buf, num_words * 8, key, 0);
 }
 
 // Deterministic splitmix64 fill: buf[i] = splitmix64_finalize(s + (i+1)*GOLDEN),

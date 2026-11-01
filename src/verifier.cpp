@@ -104,7 +104,6 @@ static bool g_gap_random = false;
 // boundaries so no block is shared. On one core a 4 GiB buffer took seconds
 // before the upload could start, which a live demo spent waiting.
 static void fill_chacha_parallel(uint64_t* buf, uint64_t num_words, const uint8_t key[32]) {
-    static const uint8_t zero_nonce[12] = {};
     size_t nbytes = (size_t)num_words * 8;
     size_t blocks = (nbytes + 63) / 64;
     unsigned t = std::thread::hardware_concurrency();
@@ -118,7 +117,7 @@ static void fill_chacha_parallel(uint64_t* buf, uint64_t num_words, const uint8_
         if (b0 >= blocks) break;
         size_t off = b0 * 64;
         size_t len = std::min(nbytes - off, per * 64);
-        pool.emplace_back([=] { chacha20_fill((uint8_t*)buf + off, len, key, zero_nonce, b0); });
+        pool.emplace_back([=] { chacha20_fill((uint8_t*)buf + off, len, key, b0); });
     }
     for (auto& th : pool) th.join();
 }
