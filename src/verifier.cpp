@@ -219,6 +219,8 @@ static Args parse(int argc, char** argv) {
 }
 
 // Run `count` challenges at fixed k, return latencies (ns) and #errors.
+// Returns false if the connection fails partway, so a prover that crashes or
+// hangs up can't pass for one that answered every challenge.
 // `st` (optional) streams one event per challenge for the browser demo; `seq` is
 // the running challenge counter across warmup+run so map sampling is stable.
 // `chained` selects the data-dependent index path (see common.hpp; default on).
@@ -226,7 +228,7 @@ static Args parse(int argc, char** argv) {
 // `gap_us` sleeps that many microseconds after recording each challenge latency
 // (simulates a periodic verifier; outside the timed window). With --gap-dist exp
 // it is the mean of an exponential draw instead; see gap_sleep().
-static void run_batch(int fd, const uint64_t* buf, uint64_t num_words,
+static bool run_batch(int fd, const uint64_t* buf, uint64_t num_words,
                       uint32_t k, uint32_t lanes, uint32_t count,
                       uint64_t nonce_base, std::vector<double>* out_ns, uint64_t* errors,
                       Stream* st = nullptr, const char* phase = "r", uint64_t* seq = nullptr,
@@ -307,9 +309,9 @@ static void run_batch(int fd, const uint64_t* buf, uint64_t num_words,
         }
 
         auto t0 = Clock::now();
-        if (!send_all(fd, &ch, sizeof(ch))) { fprintf(stderr, "send fail\n"); return; }
+        if (!send_all(fd, &ch, sizeof(ch))) return false;
         Response r{};
-        if (!recv_all(fd, &r, sizeof(r))) { fprintf(stderr, "recv fail\n"); return; }
+        if (!recv_all(fd, &r, sizeof(r))) return false;
         auto t1 = Clock::now();
 
         bool ok = do_check ? (r.hash == expect) : true;
@@ -341,6 +343,7 @@ static void run_batch(int fd, const uint64_t* buf, uint64_t num_words,
         // This is strictly outside the timed window (measured above).
         gap_sleep(gap_us);
     }
+    return true;
 }
 
 int main(int argc, char** argv) {
@@ -513,7 +516,7 @@ int main(int argc, char** argv) {
 
     // Warmup (fault in pages, warm caches/branch predictors) — not measured.
     uint64_t werr = 0;
-    run_batch(fd, buf, num_words, a.k, a.lanes, a.warmup, base, nullptr, &werr,
+    bool complete = run_batch(fd, buf, num_words, a.k, a.lanes, a.warmup, base, nullptr, &werr,
               stream.f ? &stream : nullptr, "w", &seq, a.chained, a.tree, a.verify_every, &checked,
               a.nonce_mode, a.gap_us,
               (a.nonce_mode == NonceMode::RANDOM) ? cc20_key : nullptr, &cc20_ctr);
@@ -522,10 +525,16 @@ int main(int argc, char** argv) {
     // Measured run.
     std::vector<double> lat; lat.reserve(a.n);
     uint64_t errors = 0;
-    run_batch(fd, buf, num_words, a.k, a.lanes, a.n, base, &lat, &errors,
-              stream.f ? &stream : nullptr, "r", &seq, a.chained, a.tree, a.verify_every, &checked,
-              a.nonce_mode, a.gap_us,
-              (a.nonce_mode == NonceMode::RANDOM) ? cc20_key : nullptr, &cc20_ctr);
+    if (complete)
+        complete = run_batch(fd, buf, num_words, a.k, a.lanes, a.n, base, &lat, &errors,
+                             stream.f ? &stream : nullptr, "r", &seq, a.chained, a.tree, a.verify_every, &checked,
+                             a.nonce_mode, a.gap_us,
+                             (a.nonce_mode == NonceMode::RANDOM) ? cc20_key : nullptr, &cc20_ctr);
+    if (!complete) {
+        fprintf(stderr, "[verifier] ERROR: connection lost after %zu of %u measured challenges; "
+                        "no results written\n", lat.size(), a.n);
+        return 1;
+    }
 
     // Stats.
     std::vector<double> s = lat; std::sort(s.begin(), s.end());
