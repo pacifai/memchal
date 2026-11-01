@@ -39,6 +39,13 @@ static void fail(char* err, size_t n, const char* what, cudaError_t e) {
 static void failmsg(char* err, size_t n, const char* msg) {
     if (err && n) snprintf(err, n, "%s", msg);
 }
+// A bad launch configuration is reported only by cudaGetLastError(), not by a
+// later synchronize, so every launch is followed by this.
+static bool launched(const char* what, char* err, size_t n) {
+    cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess) { fail(err, n, what, e); return false; }
+    return true;
+}
 
 const char* alloc_name(Alloc a) {
     switch (a) {
@@ -418,14 +425,15 @@ bool push(Prover& p, size_t bytes, char* err, size_t errlen) {
     // margin keeps room for the lane buffers and kernel launches.
     if (p.alloc == Alloc::Managed && before < held_bytes && (size_t)p.cursor >= held_bytes) {
         size_t free_b = 0, total_b = 0;
-        cudaMemGetInfo(&free_b, &total_b);
+        cudaError_t e = cudaMemGetInfo(&free_b, &total_b);
+        if (e != cudaSuccess) { fail(err, errlen, "cudaMemGetInfo", e); return false; }
         const size_t margin = (size_t)512 << 20;
         size_t fit = free_b > margin ? free_b - margin : 0;
         size_t n = held_bytes < fit ? held_bytes : fit;
         if (n) {
             int dev = 0;
-            cudaGetDevice(&dev);
-            cudaError_t e = cudaMemPrefetchAsync(p.d_buf, n, dev, 0);
+            if ((e = cudaGetDevice(&dev)) != cudaSuccess) { fail(err, errlen, "cudaGetDevice", e); return false; }
+            e = cudaMemPrefetchAsync(p.d_buf, n, dev, 0);
             if (e == cudaSuccess) e = cudaDeviceSynchronize();
             if (e != cudaSuccess) { fail(err, errlen, "cudaMemPrefetchAsync(managed)", e); return false; }
         }
@@ -442,6 +450,7 @@ bool fill_splitmix64(Prover& p, uint64_t seed, char* err, size_t errlen) {
     int tpb = 256;
     unsigned int blocks = 1024;
     k_fill<<<blocks, tpb>>>(p.d_buf, p.held_words, seed);
+    if (!launched("k_fill launch", err, errlen)) return false;
     cudaError_t e = cudaDeviceSynchronize();
     if (e != cudaSuccess) { fail(err, errlen, "k_fill", e); return false; }
     p.cursor = (uint64_t)p.held_words * 8;
@@ -485,7 +494,8 @@ bool answer(Prover& p, uint64_t nonce, uint32_t k, uint32_t lanes, bool chained,
     const int tpb = 256;
     unsigned int blocks = (unsigned int)(((uint64_t)lanes + tpb - 1) / tpb);
 
-    cudaEventRecord((cudaEvent_t)p.ev_start);
+    cudaError_t e = cudaEventRecord((cudaEvent_t)p.ev_start);
+    if (e != cudaSuccess) { fail(err, errlen, "cudaEventRecord(start)", e); return false; }
     if (p.fabricate) {
         k_lane<<<blocks, tpb>>>(LoadFake{p.d_buf, p.held_words},
                                 p.num_words, nonce, k, lanes, chained, p.d_lane);
@@ -496,14 +506,18 @@ bool answer(Prover& p, uint64_t nonce, uint32_t k, uint32_t lanes, bool chained,
         k_lane<<<blocks, tpb>>>(LoadDirect{p.d_buf},
                                 p.num_words, nonce, k, lanes, chained, p.d_lane);
     }
-    cudaEventRecord((cudaEvent_t)p.ev_stop);
-
-    cudaError_t e = cudaEventSynchronize((cudaEvent_t)p.ev_stop);
-    if (e != cudaSuccess) { fail(err, errlen, "k_lane", e); return false; }
-    if ((e = cudaGetLastError()) != cudaSuccess) { fail(err, errlen, "k_lane launch", e); return false; }
+    if (!launched("k_lane launch", err, errlen)) return false;
+    if ((e = cudaEventRecord((cudaEvent_t)p.ev_stop)) != cudaSuccess) {
+        fail(err, errlen, "cudaEventRecord(stop)", e); return false;
+    }
+    if ((e = cudaEventSynchronize((cudaEvent_t)p.ev_stop)) != cudaSuccess) {
+        fail(err, errlen, "k_lane", e); return false;
+    }
 
     float ms = 0.0f;
-    cudaEventElapsedTime(&ms, (cudaEvent_t)p.ev_start, (cudaEvent_t)p.ev_stop);
+    if ((e = cudaEventElapsedTime(&ms, (cudaEvent_t)p.ev_start, (cudaEvent_t)p.ev_stop)) != cudaSuccess) {
+        fail(err, errlen, "cudaEventElapsedTime", e); return false;
+    }
     if (kernel_ms) *kernel_ms = (double)ms;
 
     return fold(p, nonce, k, lanes, tree, out_hash, copy_ms, fold_ms, err, errlen);
@@ -526,11 +540,13 @@ static bool fold(Prover& p, uint64_t nonce, uint32_t k, uint32_t lanes, bool tre
         uint64_t* dst = p.d_lane2;
 
         k_tree_leaves<<<blocks, tpb>>>(src, lanes);
+        if (!launched("k_tree_leaves launch", err, errlen)) return false;
         uint32_t n = lanes, level = 0;
         while (n > 1) {
             uint32_t m = (n + 1) / 2;
             unsigned int lb = (unsigned int)(((uint64_t)m + tpb - 1) / tpb);
             k_tree_level<<<lb, tpb>>>(src, dst, n, level);
+            if (!launched("k_tree_level launch", err, errlen)) return false;
             uint64_t* t = src; src = dst; dst = t;
             n = m; ++level;
         }
@@ -614,9 +630,14 @@ static bool grow_scratch(Prover& p, uint32_t need, char* err, size_t errlen) {
         cudaFree(blk); fail(err, errlen, "cudaMalloc(rebuild scratch ids)", e); return false;
     }
     if (p.scratch_used) {
-        cudaMemcpy(blk, p.d_scratch, (size_t)p.scratch_used * kRecomputeBlockWords * 8,
-                   cudaMemcpyDeviceToDevice);
-        cudaMemcpy(ids, p.d_scratch_id, (size_t)p.scratch_used * 4, cudaMemcpyDeviceToDevice);
+        e = cudaMemcpy(blk, p.d_scratch, (size_t)p.scratch_used * kRecomputeBlockWords * 8,
+                       cudaMemcpyDeviceToDevice);
+        if (e == cudaSuccess)
+            e = cudaMemcpy(ids, p.d_scratch_id, (size_t)p.scratch_used * 4, cudaMemcpyDeviceToDevice);
+        if (e != cudaSuccess) {
+            cudaFree(blk); cudaFree(ids);
+            fail(err, errlen, "cudaMemcpy(rebuild scratch grow)", e); return false;
+        }
     }
     if (p.d_scratch)    cudaFree(p.d_scratch);
     if (p.d_scratch_id) cudaFree(p.d_scratch_id);
@@ -647,6 +668,7 @@ bool answer_recompute(Prover& p, uint64_t nonce, uint32_t k, uint32_t lanes, boo
         LoadRecompute ld{p.d_buf, p.d_scratch, p.d_slot, p.d_need, p.d_nneed, false};
         k_lane_recompute<<<blocks, tpb>>>(ld, p.num_words, nonce, k, lanes, chained,
                                           p.d_done, p.d_lane);
+        if (!launched("k_lane_recompute launch", err, errlen)) return false;
         ++s.rounds;
         uint32_t nneed = 0;
         if ((e = cudaMemcpy(&nneed, p.d_nneed, 4, cudaMemcpyDeviceToHost)) != cudaSuccess) {
@@ -676,10 +698,10 @@ bool answer_recompute(Prover& p, uint64_t nonce, uint32_t k, uint32_t lanes, boo
         if (e != cudaSuccess) { fail(err, errlen, "cudaMemcpy(rebuilt ids)", e); return false; }
         unsigned int nb = (n + tpb - 1) / tpb;
         k_point_slots<<<nb, tpb>>>(p.d_slot, p.d_scratch_id + p.scratch_used, n, p.scratch_used);
+        if (!launched("k_point_slots launch", err, errlen)) return false;
         p.scratch_used += n;
         s.rebuilt += n;
     }
-    if ((e = cudaGetLastError()) != cudaSuccess) { fail(err, errlen, "k_lane_recompute launch", e); return false; }
     if (kernel_ms)
         *kernel_ms = std::chrono::duration<double, std::milli>(
                          std::chrono::steady_clock::now() - t0).count();
@@ -692,6 +714,7 @@ bool recompute_forget(Prover& p, char* err, size_t errlen) {
     const int tpb = 256;
     unsigned int nb = (p.scratch_used + tpb - 1) / tpb;
     k_clear_slots<<<nb, tpb>>>(p.d_slot, p.d_scratch_id, p.scratch_used);
+    if (!launched("k_clear_slots launch", err, errlen)) return false;
     p.scratch_used = 0;
     cudaError_t e = cudaDeviceSynchronize();
     if (e != cudaSuccess) { fail(err, errlen, "k_clear_slots", e); return false; }
@@ -762,7 +785,7 @@ void unhog() {
 
 void mem_info(size_t* free_bytes, size_t* total_bytes) {
     size_t f = 0, t = 0;
-    cudaMemGetInfo(&f, &t);
+    if (cudaMemGetInfo(&f, &t) != cudaSuccess) f = t = 0;
     if (free_bytes)  *free_bytes = f;
     if (total_bytes) *total_bytes = t;
 }
