@@ -266,9 +266,9 @@ static bool alloc_scratch(Prover& p, uint32_t lane_cap, char* err, size_t errlen
     return true;
 }
 
-bool create(Prover& p, uint64_t num_words, Alloc alloc, uint32_t lane_cap,
-            double held_fraction, double offload_fraction, char* err, size_t errlen) {
-    destroy(p);
+static bool create_impl(Prover& p, uint64_t num_words, Alloc alloc, uint32_t lane_cap,
+                        double held_fraction, double offload_fraction,
+                        char* err, size_t errlen) {
     if (lane_cap == 0) lane_cap = 1;
     p.num_words = num_words;
     p.alloc     = alloc;
@@ -334,10 +334,9 @@ bool create(Prover& p, uint64_t num_words, Alloc alloc, uint32_t lane_cap,
     return alloc_scratch(p, lane_cap, err, errlen);
 }
 
-bool create_recompute(Prover& p, uint32_t n_blocks, const int32_t* slot,
-                      const uint64_t* kept_words, uint32_t n_kept, uint32_t lane_cap,
-                      char* err, size_t errlen) {
-    destroy(p);
+static bool create_recompute_impl(Prover& p, uint32_t n_blocks, const int32_t* slot,
+                                  const uint64_t* kept_words, uint32_t n_kept,
+                                  uint32_t lane_cap, char* err, size_t errlen) {
     if (lane_cap == 0) lane_cap = 1;
     p.alloc      = Alloc::Recompute;
     p.num_words  = (uint64_t)n_blocks * kRecomputeBlockWords;
@@ -362,6 +361,27 @@ bool create_recompute(Prover& p, uint32_t n_blocks, const int32_t* slot,
         fail(err, errlen, "cudaMalloc(need count)", e); return false;
     }
     return alloc_scratch(p, lane_cap, err, errlen);
+}
+
+// Both start from an empty Prover and free whatever they allocated if they
+// fail partway, so a caller that gets false has nothing to clean up.
+bool create(Prover& p, uint64_t num_words, Alloc alloc, uint32_t lane_cap,
+            double held_fraction, double offload_fraction, char* err, size_t errlen) {
+    destroy(p);
+    if (create_impl(p, num_words, alloc, lane_cap, held_fraction, offload_fraction, err, errlen))
+        return true;
+    destroy(p);
+    return false;
+}
+
+bool create_recompute(Prover& p, uint32_t n_blocks, const int32_t* slot,
+                      const uint64_t* kept_words, uint32_t n_kept, uint32_t lane_cap,
+                      char* err, size_t errlen) {
+    destroy(p);
+    if (create_recompute_impl(p, n_blocks, slot, kept_words, n_kept, lane_cap, err, errlen))
+        return true;
+    destroy(p);
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -727,16 +747,18 @@ bool recompute_forget(Prover& p, char* err, size_t errlen) {
 bool residency(const Prover& p, const char** backing, bool* is_device) {
     if (backing)   *backing = "unallocated";
     if (is_device) *is_device = false;
-    if (!p.d_buf) return false;
 
-    if (p.alloc == Alloc::Split) {
+    // A Split buffer offloaded entirely has no device part, so check the kind
+    // before the device pointer.
+    if (p.alloc == Alloc::Split && (p.d_buf || p.d_off)) {
         if (backing) *backing = "split — part on the card, the rest in host memory over PCIe";
         return true;                       // is_device stays false: not all of it is
     }
-    if (p.alloc == Alloc::Recompute) {
+    if (p.alloc == Alloc::Recompute && p.d_buf) {
         if (backing) *backing = "recompute — some blocks on the card, the rest rebuilt on demand";
         return true;                       // is_device stays false: not all of it is
     }
+    if (!p.d_buf) return false;
     cudaPointerAttributes a{};
     if (cudaPointerGetAttributes(&a, p.d_buf) != cudaSuccess) {
         if (backing) *backing = "unknown (driver would not say)";
