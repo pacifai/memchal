@@ -121,6 +121,31 @@ static void fill_chacha_parallel(uint64_t* buf, uint64_t num_words, const uint8_
     for (auto& th : pool) th.join();
 }
 
+// An unpredictable stream of 64-bit values: ChaCha20 keystream under a fresh
+// random key. The prover never sees the key, so it can't predict the next value.
+struct KeyStream {
+    uint8_t key[32];
+    uint8_t block[64];
+    uint32_t counter = 0;
+    unsigned used = 64;
+
+    KeyStream() {
+        std::random_device rd;
+        for (int i = 0; i < 8; ++i) {
+            uint32_t w = rd();
+            for (int b = 0; b < 4; ++b) key[i * 4 + b] = (uint8_t)(w >> (8 * b));
+        }
+    }
+    uint64_t next() {
+        static const uint8_t zero_nonce[12] = {};
+        if (used == 64) { chacha20_block(key, zero_nonce, counter++, block); used = 0; }
+        uint64_t v = 0;
+        for (int b = 0; b < 8; ++b) v |= (uint64_t)block[used + b] << (8 * b);
+        used += 8;
+        return v;
+    }
+};
+
 static void gap_sleep(uint32_t gap_us) {
     if (gap_us == 0) return;
     if (!g_gap_random) { usleep(gap_us); return; }
@@ -179,7 +204,7 @@ static const char kUsage[] =
     "  --chain dependent|independent     offset chaining (default dependent)\n"
     "  --fold sequential|tree        cross-lane fold (default sequential)\n"
     "  --nonce random|sequential     nonce source (default random)\n"
-    "  --verify-every N              check 1 in N answers (default 1, all)\n"
+    "  --verify-every N              check a random 1 in N answers (default 1, all)\n"
     "  --gap-us N --gap-dist fixed|exp   pause between challenges\n"
     "  --csv PATH --json PATH --label TEXT --seed N\n"
     "  --stream PATH|- --probe-map N live events for the demo\n";
@@ -288,7 +313,8 @@ static Args parse(int argc, char** argv) {
 // `st` (optional) streams one event per challenge for the browser demo; `seq` is
 // the running challenge counter across warmup+run so map sampling is stable.
 // `chained` selects the data-dependent index path (see common.hpp; default on).
-// `nonce_mode` selects sequential or random/CSPRNG nonces (random is the default).
+// `nonces` draws random nonces; without it nonces are sequential from `nonce_base`.
+// `checks` picks which answers to check when verify_every > 1.
 // `gap_us` sleeps that many microseconds after recording each challenge latency
 // (simulates a periodic verifier; outside the timed window). With --gap-dist exp
 // it is the mean of an exponential draw instead; see gap_sleep().
@@ -300,33 +326,16 @@ static bool run_batch(int fd, const uint64_t* buf, uint64_t num_words,
                       bool tree = false,
                       uint32_t verify_every = 1,
                       uint64_t* checked = nullptr,
-                      NonceMode nonce_mode = NonceMode::SEQUENTIAL,
-                      uint32_t gap_us = 0,
-                      uint8_t* cc20_key = nullptr,   // 32-byte key for random nonces
-                      uint32_t* cc20_ctr = nullptr)  // counter for random nonces
+                      KeyStream* nonces = nullptr,
+                      KeyStream* checks = nullptr,
+                      uint32_t gap_us = 0)
 {
     for (uint32_t i = 0; i < count; ++i) {
         Challenge ch{}; ch.k = k; ch.lanes = lanes;
         if (chained) ch.flags |= kFlagChained;
         if (tree)    ch.flags |= kFlagTreeFold;
 
-        // Nonce selection: sequential (original) or CSPRNG (unpredictable).
-        if (nonce_mode == NonceMode::RANDOM && cc20_key && cc20_ctr) {
-            // Draw 8 bytes of ChaCha20 keystream as the nonce.
-            static const uint8_t zero_nonce12[12] = {};
-            uint8_t block[64];
-            // Each 64-byte block gives 8 nonces; advance counter every 8 challenges.
-            uint32_t block_idx = *cc20_ctr / 8;
-            uint32_t word_in_block = *cc20_ctr % 8;
-            chacha20_block(cc20_key, zero_nonce12, block_idx, block);
-            uint64_t nonce_val = 0;
-            for (int b = 0; b < 8; ++b)
-                nonce_val |= ((uint64_t)block[word_in_block * 8 + b]) << (b * 8);
-            ch.nonce = nonce_val;
-            (*cc20_ctr)++;
-        } else {
-            ch.nonce = nonce_base + i;
-        }
+        ch.nonce = nonces ? nonces->next() : nonce_base + i;
         uint64_t idx = seq ? (*seq)++ : i;
         bool map = st && st->wants_map(idx);
 
@@ -335,10 +344,9 @@ static bool run_batch(int fd, const uint64_t* buf, uint64_t num_words,
         // Sampling keeps the timing series dense while the check stays
         // affordable. It weakens the correctness detector in proportion: a
         // prover wrong on a fraction f of challenges is caught with probability
-        // 1-(1-f)^(checked). Against `fake`, which is wrong on every challenge,
-        // one check is enough. The real fix is opening a subset of lanes from
-        // the Merkle root, which is still owed.
-        bool do_check = (verify_every <= 1) || (i % verify_every == 0);
+        // 1-(1-f)^(checked). That holds only if the prover can't tell which
+        // answers get checked, so the choice is random, not every Nth.
+        bool do_check = (verify_every <= 1) || (checks->next() % verify_every == 0);
         if (map) do_check = true;   // a probe map is only meaningful if computed
 
         uint64_t expect = 0;
@@ -468,21 +476,10 @@ int main(int argc, char** argv) {
            bytes / 1048576.0, a.k, a.lanes, a.n, a.warmup, a.host, a.port, gen_name, chain_name, a.tree ? "tree" : "sequential",
            nonce_name, a.gap_us, gap_dist, a.verify_every);
 
-    // For random nonce mode: derive a 32-byte CSPRNG key from std::random_device.
-    // The key is seeded fresh per run so the prover cannot predict future nonces
-    // by observing past ones.
-    uint8_t cc20_key[32] = {};
-    uint32_t cc20_ctr = 0;
-    if (a.nonce_mode == NonceMode::RANDOM) {
-        std::random_device rd;
-        for (int b = 0; b < 8; ++b) {
-            uint32_t w = rd();
-            cc20_key[b * 4 + 0] = (uint8_t)(w);
-            cc20_key[b * 4 + 1] = (uint8_t)(w >> 8);
-            cc20_key[b * 4 + 2] = (uint8_t)(w >> 16);
-            cc20_key[b * 4 + 3] = (uint8_t)(w >> 24);
-        }
-    }
+    // Fresh keys per run, so the prover can't predict nonces or which answers
+    // get checked from anything it has seen.
+    KeyStream nonce_stream, check_stream;
+    KeyStream* nonces = (a.nonce_mode == NonceMode::RANDOM) ? &nonce_stream : nullptr;
 
     // For --gen chacha: generate a full random 256-bit key from std::random_device.
     // This makes the capacity claim unconditional (not stretched from a 64-bit seed).
@@ -582,8 +579,7 @@ int main(int argc, char** argv) {
     uint64_t werr = 0;
     bool complete = run_batch(fd, buf, num_words, a.k, a.lanes, a.warmup, base, nullptr, &werr,
               stream.f ? &stream : nullptr, "w", &seq, a.chained, a.tree, a.verify_every, &checked,
-              a.nonce_mode, a.gap_us,
-              (a.nonce_mode == NonceMode::RANDOM) ? cc20_key : nullptr, &cc20_ctr);
+              nonces, &check_stream, a.gap_us);
     base += a.warmup;
 
     // Measured run.
@@ -592,8 +588,7 @@ int main(int argc, char** argv) {
     if (complete)
         complete = run_batch(fd, buf, num_words, a.k, a.lanes, a.n, base, &lat, &errors,
                              stream.f ? &stream : nullptr, "r", &seq, a.chained, a.tree, a.verify_every, &checked,
-                             a.nonce_mode, a.gap_us,
-                             (a.nonce_mode == NonceMode::RANDOM) ? cc20_key : nullptr, &cc20_ctr);
+                             nonces, &check_stream, a.gap_us);
     if (!complete) {
         fprintf(stderr, "[verifier] ERROR: connection lost after %zu of %u measured challenges; "
                         "no results written\n", lat.size(), a.n);
