@@ -1,24 +1,14 @@
 // gpu_answer.cu — the CUDA answer path.
 //
 // Includes challenge.hpp and the CUDA runtime, and nothing else. No POSIX, no
-// sockets. The server half of
-// the GPU prover is ordinary C++ in prover_cuda.cpp and links against this.
+// sockets. The server half of the GPU prover is ordinary C++ in prover_cuda.cpp
+// and links against this.
 //
-// What runs where, and why:
-//
-//   - One thread per lane. answer_lane_t() is the thread body, unchanged from
-//     the CPU reference — it was written as a template over a loader precisely
-//     so this would be possible.
-//   - The fold across lanes runs on the HOST. It is a strict sequential chain
-//     (combined = mix64(combined ^ term_l), lane order), so it is not
-//     associative and a warp-shuffle or tree reduction would produce a
-//     different hash. Folding on the host reuses the same fold_seed() and
-//     lane_fold_term() the CPU verifier calls, so there is exactly one
-//     definition of the order.
-//
-// The fold's cost is reported separately from the kernel's, because they are
-// different physics and adding them together is how a bandwidth claim gets
-// quietly flattered.
+// One thread per lane: answer_lane_t() from challenge.hpp is the thread body.
+// The verifier picks the fold across lanes on the wire. The sequential fold is
+// a chain in lane order, so it runs on the host with the same functions the
+// CPU reference uses. The tree fold runs on the device in log2(lanes) passes.
+// The fold's cost is reported separately from the kernel's.
 #include "gpu_answer.hpp"
 #include "challenge.hpp"
 #include <cuda_runtime.h>
@@ -812,11 +802,6 @@ void mem_info(size_t* free_bytes, size_t* total_bytes) {
     if (total_bytes) *total_bytes = t;
 }
 
-// Useful bytes per second: k probes of 8 bytes each. This is deliberately NOT
-// the DRAM traffic — an 8-byte probe drags at least a 32-byte sector, so the
-// real traffic is several times higher and the gap between the two is the
-// argument for widening the probe. Reporting useful bytes keeps that visible
-// instead of hiding it in a flattering number.
 double resident_fraction(const Prover& p) {
     if (!p.num_words) return 0.0;
     switch (p.alloc) {
@@ -829,6 +814,9 @@ double resident_fraction(const Prover& p) {
     return (double)p.held_words / (double)p.num_words;   // < 1 only for `fake`
 }
 
+// Useful bytes per second: k probes of 8 bytes each. Not the DRAM traffic: an
+// 8-byte probe moves at least a 32-byte sector, so real traffic is several
+// times higher.
 double probe_gbps(uint32_t k, double kernel_ms) {
     if (kernel_ms <= 0.0) return 0.0;
     return ((double)k * 8.0) / (kernel_ms / 1000.0) / 1e9;

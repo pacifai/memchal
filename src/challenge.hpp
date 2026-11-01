@@ -140,12 +140,9 @@ MC_HOST_DEVICE static inline uint64_t mix64(uint64_t x) {
 
 // High 64 bits of the 128-bit product a*b.
 //
-// This is the ONE operation in the challenge math with no portable spelling.
-// On the host it is the `unsigned __int128` expression map_index() has always
-// used; on the device it is the __umul64hi intrinsic. The two were checked
-// bit-identical across 2x10^7 random pairs plus all 64 boundary combinations of
-// {0, 1, 2^32-1, 2^32, 2^63, 2^64-1}, so this is a spelling change, not a math
-// change — and the known-answer vectors pin that.
+// This is the one operation in the challenge math with no portable spelling:
+// a 128-bit multiply on the host, the __umul64hi intrinsic on the device. The
+// GPU known-answer test pins that the two agree.
 //
 // The guard is __CUDA_ARCH__, not __CUDACC__: inside a .cu file nvcc also runs
 // a host pass, where __umul64hi does not exist.
@@ -157,8 +154,9 @@ MC_HOST_DEVICE static inline uint64_t mulhi64(uint64_t a, uint64_t b) {
 #endif
 }
 
-// Uniform index in [0, n) from a 64-bit random (Lemire multiply-shift, no modulo
-// bias).
+// Index in [0, n) from a 64-bit random (Lemire multiply-shift, without the
+// rejection step). Each index's probability is off by at most n/2^64, which is
+// negligible for any buffer that fits in memory.
 MC_HOST_DEVICE static inline uint64_t map_index(uint64_t r, uint64_t n) {
     return mulhi64(r, n);
 }

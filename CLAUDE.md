@@ -187,10 +187,11 @@ core-affinity questions (see `NEXT_STEPS.md`).
   intended, add new test vectors and say so loudly.
 - **Keep the math free of POSIX.** `challenge.hpp` must stay includable from a
   `.cu` file, so sockets and `/proc` belong in `net.hpp`.
-- **Never fold lane hashes out of order.** The cross-lane fold is a sequential
-  chain, so a tree or warp-shuffle reduction silently changes every answer.
-  `fold_seed`, `lane_samples`, and `lane_fold_term` exist so there is one
-  definition of that order.
+- **Fold lane hashes only through the functions in `challenge.hpp`.** The
+  sequential fold is a chain in lane order, and the tree fold pairs lanes in a
+  fixed order. Any other reduction, such as a warp shuffle, silently changes
+  every answer. `fold_seed`, `lane_fold_term`, `tree_combine`, and `tree_pad`
+  are the one definition of each order.
 - **Compare within a session only.** Never present absolute microseconds as
   portable; use the harness's ratios or `honest − floor` with propagated error.
 - **Don't tune parameters to make results look better.** A cheat that isn't caught

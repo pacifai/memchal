@@ -152,22 +152,17 @@ unsigned char* staging(Prover& p, size_t* cap);
 bool push(Prover& p, size_t bytes, char* err, size_t errlen);
 
 // Fill the buffer on-device from the splitmix64 generator instead of receiving
-// it. Used by the k=0 transport floor and by local self-tests, never as part of
-// an honest protocol run.
+// it. Only the GPU known-answer test uses it.
 bool fill_splitmix64(Prover& p, uint64_t seed, char* err, size_t errlen);
 
-// Answer one challenge. The lane kernel runs on the device; the fold across
-// lanes is a strict sequential chain in lane order, so it happens on the host
-// using the same functions the CPU reference uses.
+// Answer one challenge. The lane kernel runs on the device. `tree` selects the
+// fold across lanes, and must be whatever the verifier asked for on the wire,
+// because the two folds give different answers. The sequential fold copies the
+// lane hashes back and chains them on the host; the tree fold runs on the
+// device in log2(lanes) passes and copies back only the root.
 //
-// The three timings are reported separately because they are different physics:
-// kernel_ms is the memory-bound work, copy_ms is PCIe, fold_ms is host ALU.
-// Lumping them together is how a bandwidth number gets flattered.
-// `tree` selects the parallel Merkle fold over the sequential chain. The chain
-// runs on the host (the lane hashes come back over PCIe); the tree runs on the
-// device in log2(lanes) passes and only the root comes back. They are different
-// protocols with different answers — the caller must pass whatever the verifier
-// asked for on the wire.
+// The three timings are reported separately: kernel_ms is the memory-bound
+// work, copy_ms is PCIe, and fold_ms is the fold.
 bool answer(Prover& p, uint64_t nonce, uint32_t k, uint32_t lanes, bool chained,
             bool tree, uint64_t* out_hash, double* kernel_ms, double* copy_ms,
             double* fold_ms, char* err, size_t errlen);

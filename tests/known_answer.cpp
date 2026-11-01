@@ -19,9 +19,10 @@
 // mix64, Lemire multiply-shift, XOR/ADD).  There is no floating point and no
 // byte-order-dependent memory interpretation: fill_random() writes words via
 // a uint64_t pointer and answer_challenge() reads them back the same way.
-// Therefore the computed values are identical on any architecture (x86-64,
-// ARM64, big-endian POWER, etc.) and in any container.  These three constants
-// were computed on both macOS/arm64 and Linux/arm64 and matched exactly.
+// So the challenge-math constants should not depend on byte order. They were
+// computed on macOS/arm64 and Linux/arm64 and matched; no big-endian machine
+// has run them. The ChaCha20 fill (vector group 4) does depend on byte order:
+// it reads keystream bytes as little-endian words.
 //
 // COMPILE
 //   g++ -O3 -std=c++17 -I/work/src -o tests/known_answer tests/known_answer.cpp
