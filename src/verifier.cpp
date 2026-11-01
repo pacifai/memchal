@@ -421,6 +421,11 @@ static bool run_batch(int fd, const uint64_t* buf, uint64_t num_words,
 
 int main(int argc, char** argv) {
     Args a = parse(argc, argv);
+    if (a.lanes > kMaxLanes) {
+        fprintf(stderr, "[verifier] ERROR: --lanes %u is above the provers' limit of %u\n",
+                a.lanes, kMaxLanes);
+        return 2;
+    }
 
     size_t bytes = (size_t)llround(a.mb * 1048576.0);
     bytes = (bytes + 7) & ~size_t(7);
@@ -433,6 +438,11 @@ int main(int argc, char** argv) {
         recipe.m_kib = (uint32_t)llround(a.mb * 1024.0);
         recipe.t = a.build_t;
         recipe.p = a.build_p;
+        char err[256];
+        if (!recipe_ok(recipe, err, sizeof err)) {
+            fprintf(stderr, "[verifier] ERROR: %s\n", err);
+            return 2;
+        }
         num_words = build_buffer_words(recipe);
         bytes = (size_t)num_words * 8;
         if (num_words == 0) {

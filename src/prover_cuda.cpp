@@ -68,13 +68,9 @@ static void serve(int cfd) {
     set_low_latency(cfd);
 
     Hello hello{};
+    char err[512] = {0};
     if (!recv_all(cfd, &hello, sizeof(hello))) { fprintf(stderr, "[gpu] no hello\n"); return; }
-    if (hello.magic != kMagic) { fprintf(stderr, "[gpu] bad magic\n"); return; }
-    if (hello.version > kWireVersion) {
-        fprintf(stderr, "[gpu] unsupported wire version %u (max %u)\n",
-                hello.version, kWireVersion);
-        return;
-    }
+    if (!hello_ok(hello, err, sizeof err)) { fprintf(stderr, "[gpu] refusing: %s\n", err); return; }
     const bool build = (hello.flags & kFlagBuild) != 0;
 
     size_t bytes = (size_t)hello.buffer_bytes;
@@ -83,7 +79,6 @@ static void serve(int cfd) {
     printf("[gpu] %s %.2f MiB (%llu words)...\n",
            build ? "building" : "receiving", bytes / 1048576.0, (unsigned long long)num_words);
 
-    char err[512] = {0};
     gpu::Prover p;
     if (!gpu::create(p, num_words, gpu::Alloc::Device, g_lane_cap, 1.0, 0.0, err, sizeof err)) {
         fprintf(stderr, "[gpu] FATAL: %s\n", err);
@@ -154,6 +149,7 @@ static void serve(int cfd) {
         Challenge ch{};
         if (!recv_all(cfd, &ch, sizeof(ch))) break;
         if (ch.flags & kFlagTerminate) break;
+        if (!challenge_ok(ch, err, sizeof err)) { fprintf(stderr, "[gpu] refusing: %s\n", err); break; }
         bool chained = (ch.flags & kFlagChained) != 0;
         bool tree    = (ch.flags & kFlagTreeFold) != 0;
 

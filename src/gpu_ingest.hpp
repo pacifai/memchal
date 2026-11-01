@@ -49,6 +49,7 @@ static inline bool host_build_from_wire(int cfd, const Hello& hello, HostBuild& 
         return false;
     }
     hb.recipe = recipe_from_msg(rmsg);
+    if (!recipe_ok(hb.recipe, err, errlen)) return false;
     const uint64_t want = build_buffer_bytes(hb.recipe);
     if (hello.buffer_bytes != want) {
         snprintf(err, errlen, "refusing recipe: it builds %llu bytes (m=%u KiB t=%u p=%u) "

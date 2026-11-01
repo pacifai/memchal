@@ -267,6 +267,7 @@ static void serve_recompute(int cfd, gpu::Prover& p, RecomputeCtx& rc) {
         Challenge ch{};
         if (!recv_all(cfd, &ch, sizeof(ch))) break;
         if (ch.flags & kFlagTerminate) break;
+        if (!challenge_ok(ch, err, sizeof err)) { fprintf(stderr, "[cheat] refusing: %s\n", err); break; }
         bool chained = (ch.flags & kFlagChained) != 0;
         bool tree    = (ch.flags & kFlagTreeFold) != 0;
 
@@ -328,13 +329,9 @@ static void serve(int cfd) {
     set_low_latency(cfd);
 
     Hello hello{};
+    char err[512] = {0};
     if (!recv_all(cfd, &hello, sizeof(hello))) { fprintf(stderr, "[cheat] no hello\n"); return; }
-    if (hello.magic != kMagic) { fprintf(stderr, "[cheat] bad magic\n"); return; }
-    if (hello.version > kWireVersion) {
-        fprintf(stderr, "[cheat] unsupported wire version %u (max %u)\n",
-                hello.version, kWireVersion);
-        return;
-    }
+    if (!hello_ok(hello, err, sizeof err)) { fprintf(stderr, "[cheat] refusing: %s\n", err); return; }
     const bool build = (hello.flags & kFlagBuild) != 0;
     if (g_mode == RECOMPUTE && !build) {
         fprintf(stderr, "[cheat] recompute needs a build-mode verifier (--gen argon2d): "
@@ -346,7 +343,6 @@ static void serve(int cfd) {
     bytes = (bytes + 7) & ~size_t(7);
     uint64_t num_words = bytes / 8;
 
-    char err[512] = {0};
     if (g_leave_free_mib >= 0) {
         size_t free_b = 0, total_b = 0;
         gpu::mem_info(&free_b, &total_b);
@@ -471,6 +467,7 @@ static void serve(int cfd) {
         Challenge ch{};
         if (!recv_all(cfd, &ch, sizeof(ch))) break;
         if (ch.flags & kFlagTerminate) break;
+        if (!challenge_ok(ch, err, sizeof err)) { fprintf(stderr, "[cheat] refusing: %s\n", err); break; }
         bool chained = (ch.flags & kFlagChained) != 0;
         bool tree    = (ch.flags & kFlagTreeFold) != 0;
 

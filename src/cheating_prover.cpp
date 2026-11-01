@@ -356,7 +356,8 @@ static void serve_precompute(int cfd, const char* datafile, uint32_t trace_every
     set_low_latency(cfd);
 
     Hello hello{};
-    if (!recv_all(cfd, &hello, sizeof(hello)) || hello.magic != kMagic) {
+    char err[256];
+    if (!recv_all(cfd, &hello, sizeof(hello)) || !hello_ok(hello, err, sizeof err)) {
         fprintf(stderr, "[cheat:precompute] bad hello\n"); return;
     }
     size_t bytes = ((size_t)hello.buffer_bytes + 7) & ~size_t(7);
@@ -371,8 +372,8 @@ static void serve_precompute(int cfd, const char* datafile, uint32_t trace_every
             fprintf(stderr, "[cheat:precompute] no recipe\n"); return;
         }
         const Recipe r = recipe_from_msg(rmsg);
-        if (build_buffer_words(r) != num_words) {
-            fprintf(stderr, "[cheat:precompute] recipe size disagrees with hello\n"); return;
+        if (!recipe_ok(r, err, sizeof err) || build_buffer_words(r) != num_words) {
+            fprintf(stderr, "[cheat:precompute] bad recipe\n"); return;
         }
         scratch = (uint64_t*)mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
                                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -517,7 +518,8 @@ static void serve(int cfd, Mode mode, double frac, const char* datafile,
     set_low_latency(cfd);
 
     Hello hello{};
-    if (!recv_all(cfd, &hello, sizeof(hello)) || hello.magic != kMagic) {
+    char err[256];
+    if (!recv_all(cfd, &hello, sizeof(hello)) || !hello_ok(hello, err, sizeof err)) {
         fprintf(stderr, "[cheat] bad hello\n"); return;
     }
     size_t bytes = ((size_t)hello.buffer_bytes + 7) & ~size_t(7);
@@ -529,8 +531,8 @@ static void serve(int cfd, Mode mode, double frac, const char* datafile,
         RecipeMsg rmsg{};
         if (!recv_all(cfd, &rmsg, sizeof rmsg)) { fprintf(stderr, "[cheat] no recipe\n"); return; }
         recipe = recipe_from_msg(rmsg);
-        if (build_buffer_words(recipe) != num_words) {
-            fprintf(stderr, "[cheat] recipe size disagrees with hello\n"); return;
+        if (!recipe_ok(recipe, err, sizeof err) || build_buffer_words(recipe) != num_words) {
+            fprintf(stderr, "[cheat] bad recipe\n"); return;
         }
     }
 
