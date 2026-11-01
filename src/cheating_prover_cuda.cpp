@@ -56,7 +56,8 @@
 // know it — the CUDA context and allocator already hold a few hundred MiB that
 // cudaMemGetInfo's total still counts. A caller that computes a reserve from the
 // card's total asks for memory that does not exist and the reserve fails.
-#include "common.hpp"
+#include "challenge.hpp"
+#include "net.hpp"
 #include "gpu_answer.hpp"
 #include "gpu_ingest.hpp"
 #include <cstdio>

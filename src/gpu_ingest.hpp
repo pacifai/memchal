@@ -17,7 +17,8 @@
 // handles every allocation kind (Device, Managed with its prefetch, HostMapped,
 // Split, and fake's discarded tail). So there is one ingestion loop.
 #pragma once
-#include "common.hpp"
+#include "challenge.hpp"
+#include "net.hpp"
 #include "gpu_answer.hpp"
 #include <chrono>
 #include <cstdlib>

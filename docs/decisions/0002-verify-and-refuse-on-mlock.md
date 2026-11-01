@@ -17,7 +17,7 @@ load-bearing and its trustworthiness is platform/version dependent.
 
 ## Decision
 `prover.cpp` verifies the lock by reading `VmLck` from `/proc/self/status`
-(`mc::locked_bytes()` in `common.hpp`) and sets `locked=1` only if `VmLck >=`
+(`mc::locked_bytes()` in `net.hpp`) and sets `locked=1` only if `VmLck >=`
 buffer bytes (on no-`/proc` platforms it falls back to the return value, marked
 unverified). If the buffer is **not genuinely pinned**, the prover prints a FATAL
 banner and **refuses to run**. `--allow-unlocked` overrides, prints a prominent

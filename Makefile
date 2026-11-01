@@ -21,13 +21,13 @@ CUDA_LIBS ?= -L$(CUDA_HOME)/lib64 -lcudart
 
 all: prover verifier cheating_prover bench_build
 
-prover: src/prover.cpp src/common.hpp src/challenge.hpp src/net.hpp src/argon2d.hpp
+prover: src/prover.cpp src/challenge.hpp src/net.hpp src/argon2d.hpp
 	$(CXX) $(CXXFLAGS) -o $@ src/prover.cpp
 
-verifier: src/verifier.cpp src/common.hpp src/challenge.hpp src/net.hpp src/argon2d.hpp
+verifier: src/verifier.cpp src/challenge.hpp src/net.hpp src/argon2d.hpp
 	$(CXX) $(CXXFLAGS) -o $@ src/verifier.cpp
 
-cheating_prover: src/cheating_prover.cpp src/common.hpp src/challenge.hpp src/net.hpp src/argon2d.hpp
+cheating_prover: src/cheating_prover.cpp src/challenge.hpp src/net.hpp src/argon2d.hpp
 	$(CXX) $(CXXFLAGS) -o $@ src/cheating_prover.cpp
 
 # Build-cost benchmark for the memory-hard buffer generator (ADR 0007).
@@ -39,7 +39,7 @@ bench_build: src/bench_build.cpp src/argon2d.hpp
 # --- CPU tests ---------------------------------------------------------------
 # tests/run_tests.sh builds and runs these; the targets let you build one alone.
 # The differential test links libargon2, a test-only dependency (see Dockerfile).
-tests/known_answer: tests/known_answer.cpp src/common.hpp src/challenge.hpp src/net.hpp src/argon2d.hpp
+tests/known_answer: tests/known_answer.cpp src/challenge.hpp src/net.hpp src/argon2d.hpp
 	$(CXX) $(CXXFLAGS) -Isrc -o $@ tests/known_answer.cpp
 
 tests/known_answer_argon2d: tests/known_answer_argon2d.cpp src/argon2d.hpp
@@ -64,10 +64,10 @@ gpu_answer.o: src/gpu_answer.cu src/gpu_answer.hpp src/challenge.hpp src/chacha2
 
 # These two are ordinary C++: they include gpu_answer.hpp, which is free of CUDA
 # types, so they compile with g++ and only need libcudart at link time.
-prover_cuda: src/prover_cuda.cpp src/common.hpp src/challenge.hpp src/net.hpp src/argon2d.hpp src/gpu_answer.hpp src/gpu_ingest.hpp gpu_answer.o
+prover_cuda: src/prover_cuda.cpp src/challenge.hpp src/net.hpp src/argon2d.hpp src/gpu_answer.hpp src/gpu_ingest.hpp gpu_answer.o
 	$(CXX) $(CXXFLAGS) -Isrc -o $@ src/prover_cuda.cpp gpu_answer.o $(CUDA_LIBS)
 
-cheating_prover_cuda: src/cheating_prover_cuda.cpp src/common.hpp src/challenge.hpp src/net.hpp src/argon2d.hpp src/argon2d_rebuild.hpp src/gpu_answer.hpp src/gpu_ingest.hpp gpu_answer.o
+cheating_prover_cuda: src/cheating_prover_cuda.cpp src/challenge.hpp src/net.hpp src/argon2d.hpp src/argon2d_rebuild.hpp src/gpu_answer.hpp src/gpu_ingest.hpp gpu_answer.o
 	$(CXX) $(CXXFLAGS) -Isrc -o $@ src/cheating_prover_cuda.cpp gpu_answer.o $(CUDA_LIBS)
 
 tests/known_answer_gpu: tests/known_answer_gpu.cpp src/challenge.hpp src/gpu_answer.hpp gpu_answer.o

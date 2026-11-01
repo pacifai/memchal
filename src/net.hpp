@@ -1,12 +1,10 @@
 // net.hpp — the wire protocol and the host-only plumbing around it.
 //
-// Split out of common.hpp so that challenge.hpp (the math) can be included from
-// a CUDA translation unit. Everything here is host-only by nature: POSIX
+// Kept apart from challenge.hpp (the math) so the math can be included from a
+// CUDA translation unit. Everything here is host-only by nature: POSIX
 // sockets, the build-buffer recipe and the Argon2d generator behind it
 // (argon2d.hpp, which uses std::thread), and /proc readers that report what the
 // OS thinks this process is doing. None of it has a device analog.
-//
-// The challenge math lives in challenge.hpp. common.hpp includes both.
 #pragma once
 #include <cstdint>
 #include <cstddef>

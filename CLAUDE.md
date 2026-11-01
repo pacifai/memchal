@@ -78,18 +78,14 @@ curve.
 - `src/challenge.hpp` — the challenge math and nothing else, with no POSIX
   headers, so it can be included from a `.cu` translation unit. `mulhi64` is the
   one operation with two spellings: the 128-bit multiply on the host,
-  `__umul64hi` on the device, behind `MC_HOST_DEVICE`.
+  `__umul64hi` on the device, behind `MC_HOST_DEVICE`. The single source of
+  truth, called by the prover, the cheating prover, and the verifier. **Frozen**:
+  don't change it; a known-answer test pins it
+  ([ADR 0001](docs/decisions/0001-challenge-math-frozen-pinned-by-known-answer.md)).
 - `src/net.hpp` — the wire structs (including the build-buffer `RecipeMsg`, the
   `kFlagBuild` Hello flag, and `kWireVersion`), the socket helpers, the `Source`
   reader the CPU provers ingest through, and the `/proc` readers. It includes
   `argon2d.hpp`. Host only; none of it has a device analog.
-- `src/common.hpp` — a shim including both, so every host-side caller is
-  unchanged. Include `challenge.hpp` alone from CUDA. Historically this file held
-  both halves (`answer_lane_t`,
-  `answer_challenge_t`, `splitmix64`, `mix64`, `map_index`, `fill_buffer`). The
-  single source of truth, called by the prover, the cheating prover, and the
-  verifier. **Frozen** — don't change it; a known-answer test pins it
-  ([ADR 0001](docs/decisions/0001-challenge-math-frozen-pinned-by-known-answer.md)).
 - `src/chacha20.hpp` — a small vendored ChaCha20 (RFC 8439) for keyed-stream buffer
   generation.
 - `src/argon2d.hpp` — vendored Argon2d (RFC 9106) for the build-buffer design: the

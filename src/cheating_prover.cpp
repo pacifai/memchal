@@ -30,10 +30,11 @@
 //              and precomputes their answers from disk between challenges, serving
 //              instantly. Defeated by `--nonce random` (nothing to precompute).
 //
-// All modes reuse answer_challenge_t() from common.hpp, so a correct answer is
+// All modes reuse answer_challenge_t() from challenge.hpp, so a correct answer is
 // byte-identical to the verifier's local recomputation — only latency, or (for
 // fake / a defended recompute) correctness, exposes the cheat.
-#include "common.hpp"
+#include "challenge.hpp"
+#include "net.hpp"
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>

@@ -5,7 +5,8 @@
 // The latency distribution is the actual result: an honest prover with the data
 // resident in fast memory shows a low, tight profile; a prover that dropped the
 // data, recomputes it, or let it swap to disk shows misses / a fat tail / errors.
-#include "common.hpp"
+#include "challenge.hpp"
+#include "net.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -313,7 +314,7 @@ static Args parse(int argc, char** argv) {
 // hangs up can't pass for one that answered every challenge.
 // `st` (optional) streams one event per challenge for the browser demo; `seq` is
 // the running challenge counter across warmup+run so map sampling is stable.
-// `chained` selects the data-dependent index path (see common.hpp; default on).
+// `chained` selects the data-dependent index path (see challenge.hpp; default on).
 // `nonces` draws random nonces; without it nonces are sequential from `nonce_base`.
 // `checks` picks which answers to check when verify_every > 1.
 // `gap_us` sleeps that many microseconds after recording each challenge latency

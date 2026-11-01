@@ -1,7 +1,7 @@
 // gpu_answer.cu — the CUDA answer path.
 //
 // Includes challenge.hpp and the CUDA runtime, and nothing else. No POSIX, no
-// sockets: that is the whole reason common.hpp was split. The server half of
+// sockets. The server half of
 // the GPU prover is ordinary C++ in prover_cuda.cpp and links against this.
 //
 // What runs where, and why:

@@ -1,19 +1,15 @@
 // challenge.hpp — the challenge math, and nothing else.
 //
-// This header is the single source of truth for what a challenge *is*. It is
-// split out of common.hpp so it can be included from a CUDA translation unit:
-// it pulls in no POSIX headers, no sockets, and no /proc readers. Everything
+// This header is the single source of truth for what a challenge *is*. It
+// can be included from a CUDA translation unit because it pulls in no POSIX
+// headers, no sockets, and no /proc readers. Everything
 // here is plain C over fixed-width integers — no STL, no exceptions, no
 // allocation — so the same code compiles for host and device.
 //
 // FROZEN. The math below is pinned by tests/known_answer.cpp (ADR 0001). A
-// change that moves any vector invalidates every published number. The split
-// that created this file deliberately changed no operation: mulhi64() below is
-// the one addition, and on the host it expands to exactly the 128-bit multiply
-// that map_index() used before.
+// change that moves any vector invalidates every published number.
 //
-// Sockets, the wire structs, and the /proc readers live in net.hpp. common.hpp
-// includes both, so existing callers are unaffected.
+// Sockets, the wire structs, and the /proc readers live in net.hpp.
 #pragma once
 #include <cstdint>
 #include <cstddef>

@@ -1,6 +1,6 @@
 // prover.cpp — receives a large random buffer, pins it in RAM, and answers
 // memory challenges. The design keeps the answer path GPU-portable: a flat
-// word buffer plus the pure functions in common.hpp.
+// word buffer plus the pure functions in challenge.hpp.
 //
 // Memory pinning: we mmap an anonymous region, prefault every page, and mlock()
 // it so the kernel may never swap it out. We do not trust mlock()'s return value
@@ -12,7 +12,8 @@
 // GPU note: the on-GPU analog of mlock is simply cudaMalloc — VRAM is not
 // swappable. For host staging use cudaHostAlloc(cudaHostAllocDefault) pinned
 // memory so H2D copies are fast and non-pageable.
-#include "common.hpp"
+#include "challenge.hpp"
+#include "net.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

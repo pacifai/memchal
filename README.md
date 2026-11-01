@@ -15,7 +15,7 @@ AI-compute governance: proving a datacenter's memory really holds the workload i
 bills for.
 
 The prover and the verifier share one definition of the challenge
-(`src/common.hpp`). The prover answers; the verifier recomputes the same answer
+(`src/challenge.hpp`). The prover answers; the verifier recomputes the same answer
 locally and compares. Because both run the same code, a correct answer is
 identical no matter where the prover's bytes came from — so only a wrong answer or
 a slow one reveals a cheat.
@@ -63,7 +63,7 @@ them into a chained hash. Three properties make this bind to memory:
   large buffer. On this hardware about half the per-probe cost is the memory stall
   and half is the hashing itself.
 
-`answer_lane_t` and `answer_challenge_t` in `src/common.hpp` are the single
+`answer_lane_t` and `answer_challenge_t` in `src/challenge.hpp` are the single
 definition of this math, called by the prover, the cheating prover, and the
 verifier alike.
 

@@ -8,7 +8,7 @@
 //
 // WHY THIS MATTERS
 // ----------------
-// The challenge math in common.hpp is the single source of truth shared by both
+// The challenge math in challenge.hpp is the single source of truth shared by both
 // the prover and the verifier.  If these constants ever change, it means the
 // math changed — and every previously-published latency number and correctness
 // result is invalid, because it was produced against a different hash function.
@@ -30,7 +30,8 @@
 //   0 — all vectors pass
 //   1 — at least one vector failed
 
-#include "common.hpp"
+#include "challenge.hpp"
+#include "net.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

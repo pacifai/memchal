@@ -17,7 +17,8 @@
 //
 // Sockets live here; the kernel lives in gpu_answer.cu. Nothing in this file
 // includes CUDA headers, and nothing in that file includes POSIX ones.
-#include "common.hpp"
+#include "challenge.hpp"
+#include "net.hpp"
 #include "gpu_answer.hpp"
 #include "gpu_ingest.hpp"
 #include <cstdio>

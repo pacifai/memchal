@@ -2,9 +2,8 @@
 //
 // Deliberately free of CUDA types so it can be included by plain g++ code. The
 // implementation lives in gpu_answer.cu, which includes challenge.hpp and
-// cuda_runtime.h and nothing else — no POSIX, no sockets. That separation is
-// the reason common.hpp was split: the server half of the prover needs sockets,
-// the kernel half must not see them.
+// cuda_runtime.h and nothing else — no POSIX, no sockets. The server half of
+// the prover needs sockets; the kernel half must not see them.
 //
 // Every call that can fail takes an (err, errlen) pair and writes a human
 // readable reason, so the server can log why it is refusing to run.
