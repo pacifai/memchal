@@ -17,7 +17,7 @@
 # It does not terminate the pod. Releasing rented hardware is a decision, not a
 # side effect of running a script, and the provider API is the place for it.
 #
-# Usage:  bash scripts/gpu_teardown.sh [--keep-running]
+# Usage:  bash runpod/gpu_teardown.sh [--keep-running]
 # Exit:   0 the box is quiet and results are packed, 1 something still holds the
 #         card, 2 there were no results to pack.
 set -uo pipefail

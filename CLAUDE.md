@@ -129,7 +129,7 @@ curve.
   the blocks on the card and rebuilds the rest on host threads when a lane reaches
   one. It always claims `locked=true`, because nothing stops a real one doing the
   same. `--hog` occupies HBM so a managed buffer cannot fit.
-- `scripts/gpu_pod_setup.sh` — the first command on a rented box: records the
+- `runpod/gpu_pod_setup.sh` — the first command on a rented box: records the
   machine, refuses boxes whose numbers would be meaningless, settles whether
   clocks can be locked and whether RDMA exists, then builds and runs the gate.
 - `scripts/gpu_adversaries.sh` — the honest baseline and all three GPU cheats,

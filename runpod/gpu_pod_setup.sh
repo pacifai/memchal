@@ -15,7 +15,7 @@
 # after an hour of rental: whether clocks can be locked, and whether RDMA
 # devices exist at all.
 #
-# Usage:  bash scripts/gpu_pod_setup.sh [--device N] [--skip-build]
+# Usage:  bash runpod/gpu_pod_setup.sh [--device N] [--skip-build]
 # Exit:   0 everything passed, 1 the box is unusable, 2 the build or gate failed.
 set -uo pipefail
 cd "$(dirname "$0")/.."

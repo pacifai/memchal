@@ -6,9 +6,9 @@
 # old bridge and starts a new one has "bridge_gpu.py" in its own command line —
 # so pkill kills the shell that was about to start the bridge, and pgrep finds
 # that shell and reports a bridge that is not there. Run as `bash
-# scripts/gpu_bridge_start.sh`, this process's command line names neither.
+# runpod/gpu_bridge_start.sh`, this process's command line names neither.
 #
-# Usage: bash scripts/gpu_bridge_start.sh     Exit: 0 running, 1 it did not start.
+# Usage: bash runpod/gpu_bridge_start.sh     Exit: 0 running, 1 it did not start.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 

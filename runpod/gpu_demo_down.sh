@@ -19,10 +19,10 @@
 # anyway, pass --stop and know what you are keeping.
 #
 # Usage:
-#   bash scripts/gpu_demo_down.sh              # pull results, terminate
-#   bash scripts/gpu_demo_down.sh --stop       # pull results, stop instead
-#   bash scripts/gpu_demo_down.sh --keep-pod   # pull results, leave it running
-#   bash scripts/gpu_demo_down.sh --force      # release even if the pod is unreachable
+#   bash runpod/gpu_demo_down.sh              # pull results, terminate
+#   bash runpod/gpu_demo_down.sh --stop       # pull results, stop instead
+#   bash runpod/gpu_demo_down.sh --keep-pod   # pull results, leave it running
+#   bash runpod/gpu_demo_down.sh --force      # release even if the pod is unreachable
 #
 # Exit: 0 everything is down, 1 no demo recorded, 2 the pod is still up.
 set -uo pipefail
@@ -89,7 +89,7 @@ if [ -n "$SSH" ] && deadline 30 $SSH true 2>/dev/null; then
   say "teardown on the pod"
   # The subshell's 2>/dev/null only swallows the shell's own "Alarm clock" notice
   # when the deadline fires; the teardown's output still comes through the pipe.
-  ( deadline 180 $SSH 'cd /root/memchal && bash scripts/gpu_teardown.sh' 2>&1 ) 2>/dev/null | sed 's/^/  /'
+  ( deadline 180 $SSH 'cd /root/memchal && bash runpod/gpu_teardown.sh' 2>&1 ) 2>/dev/null | sed 's/^/  /'
   TD_RC=${PIPESTATUS[0]}
   [ "$TD_RC" -eq 142 ] && echo "  teardown did not finish in 180 s — the card is probably wedged"
 
@@ -159,7 +159,7 @@ fi
 say "pod"
 if [ "$ACTION" = keep ]; then
   echo "  --keep-pod: $POD_ID is still RUNNING and still billing"
-  echo "  release it later with: bash scripts/gpu_demo_down.sh"
+  echo "  release it later with: bash runpod/gpu_demo_down.sh"
   exit 0
 fi
 if [ -z "${RUNPOD_API_KEY:-}" ]; then
@@ -182,7 +182,7 @@ CODE=$(curl -sS -o /tmp/gpu_demo_pod.json -w '%{http_code}' "$API/pods/$POD_ID" 
 if [ "$CODE" = "404" ]; then
   STATUS=GONE
 else
-  STATUS=$(python3 scripts/runpod_json.py get status < /tmp/gpu_demo_pod.json 2>/dev/null)
+  STATUS=$(python3 runpod/runpod_json.py get status < /tmp/gpu_demo_pod.json 2>/dev/null)
   STATUS=${STATUS:-UNKNOWN}
 fi
 rm -f /tmp/gpu_demo_pod.json

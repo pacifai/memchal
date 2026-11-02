@@ -280,8 +280,8 @@ latency-bound rather than bandwidth-bound. Both are in
 From a laptop with no GPU, two commands do the whole thing:
 
 ```bash
-bash scripts/gpu_demo_up.sh        # rent a card, ship, build, gate, open the demo
-bash scripts/gpu_demo_down.sh      # pull results back, close it, release the card
+bash runpod/gpu_demo_up.sh        # rent a card, ship, build, gate, open the demo
+bash runpod/gpu_demo_down.sh      # pull results back, close it, release the card
 ```
 
 `gpu_demo_up.sh` prints the hourly price and waits for a yes before renting. It
@@ -297,10 +297,10 @@ that RunPod account (`~/.ssh/neta-pacifai-runpod`, or set `MEMCHAL_SSH_KEY`).
 Once a box is up, the individual steps are:
 
 ```bash
-bash scripts/gpu_pod_setup.sh      # machine record, refusals, build, then the gate
+bash runpod/gpu_pod_setup.sh      # machine record, refusals, build, then the gate
 bash scripts/gpu_adversaries.sh    # honest plus all three cheats, interleaved
 python3 demo/bridge_gpu.py         # the live demo, on the GPU box
-bash scripts/gpu_teardown.sh       # stop everything, check the card is idle, pack results
+bash runpod/gpu_teardown.sh       # stop everything, check the card is idle, pack results
 ```
 
 Run the teardown before you release the pod. It stops the bridge and any

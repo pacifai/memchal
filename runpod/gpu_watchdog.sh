@@ -18,7 +18,7 @@
 # The hard cap (MAX_HOURS from boot) is enforced separately by the pod's boot
 # command, so it holds even if this script never starts.
 #
-# Usage: setsid bash scripts/gpu_watchdog.sh [IDLE_MIN] > /root/watchdog.log 2>&1 &
+# Usage: setsid bash runpod/gpu_watchdog.sh [IDLE_MIN] > /root/watchdog.log 2>&1 &
 #   --check   confirm the key and pod id are present, then exit (0 ok, 1 not)
 set -uo pipefail
 cd "$(dirname "$0")/.."
