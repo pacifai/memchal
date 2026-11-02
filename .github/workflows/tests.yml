@@ -5,6 +5,11 @@
 # repository setting "Require approval for all external contributors" holds
 # them until a maintainer approves the run. Never switch this workflow to
 # pull_request_target: that runs fork code with write access.
+#
+# Each action is pinned to a full commit hash, with its release tag in a
+# comment. A tag like v4 can be moved to new code by whoever controls the
+# action's repository; a commit hash can't. To update, look up the hash of
+# the new release tag and replace both.
 name: tests
 
 on:
@@ -32,6 +37,10 @@ jobs:
       - name: Build and test in the toolchain container
         run: ./run.sh bash tests/run_tests.sh
 
+  # GitHub's standard runners have no GPU, so this job only proves the CUDA
+  # code compiles and links. The GPU known-answer test and the adversaries run
+  # by hand on a rented card. A self-hosted GPU runner would let any pull
+  # request run code on that machine, so it isn't used here.
   gpu-build:
     name: GPU build (compile only)
     runs-on: ubuntu-24.04
