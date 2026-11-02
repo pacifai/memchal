@@ -9,7 +9,7 @@ claim: the maintainers' private lab notes, each with its question, script, and r
 results.
 
 (Tooling/environment choices — containerization, JSON output, Python aggregation —
-are documented in [`CLAUDE.md`](../../CLAUDE.md) and `README.md`, not here.)
+are documented in [CONTRIBUTING.md](../../CONTRIBUTING.md) and `README.md`, not here.)
 
 | # | Decision | Why it matters |
 |---|---|---|

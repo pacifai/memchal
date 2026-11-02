@@ -311,8 +311,8 @@ active throttle reason next to every measurement.
 
 ## Learn more
 
-- [`CLAUDE.md`](CLAUDE.md) — orientation for anyone (human or agent) working in the
-  repo: goal, layout, and the rules that keep results trustworthy.
+- [CONTRIBUTING.md](CONTRIBUTING.md) — the repository layout, how to build and test, and
+  the rules for changes.
 - [Decision records](docs/decisions/) — why the challenge math is frozen, why the
   prover refuses to run unpinned, and what the timing signal does and doesn't show.
 - [NEXT_STEPS.md](NEXT_STEPS.md) — what's still open, and why it matters.
