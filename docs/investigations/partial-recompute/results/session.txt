@@ -1,0 +1,5 @@
+geometry: 4096 MiB, k=262144, lanes=16384, fold=tree, n=30, warmup=5
+recipe:   argon2d, build-p=16, passes in {1 2}
+cheat:    keeps in {1.0 0.999 0.99 0.95 0.9 0.5}, budget=65536 fills/thread/challenge, threads=23 (0 = all allowed CPUs)
+cpus:     224 allowed of 224 online
+NVIDIA H100 80GB HBM3, 81559 MiB, 595.91.07

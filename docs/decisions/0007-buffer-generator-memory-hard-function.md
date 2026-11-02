@@ -167,8 +167,10 @@ The **frozen challenge math is untouched.** `answer_lane_t` / `answer_challenge_
 1. **Cost parameters `m`, `t`, `p`** such that the honest one-time build is tolerable
    *and* any memory cut below ~full pushes per-probe rebuild past the timing budget —
    measured as a TMTO curve via a new `partial-recompute` attack mode, not asserted.
-   **Still open.** The build side is now measured (`bench_build`, below); the rebuild
-   side needs the adversary.
+   **Measured once; the pass count is the parameter that matters.** The adversary
+   exists, and one H100 sweep (below) shows `t=2` defeats it outright while `t=1`
+   leaves a timing gap that shrinks with the fraction discarded. `m` and `p` are not
+   yet pinned.
 2. **The GPU parallelism knob** — how much lane parallelism the honest builder needs
    on-GPU without handing the attacker a cheap shrink. Shaped on CPU, confirmed on the
    port. **Still open.** The knob exists (`Recipe::p`), and the CPU fill walks lanes in
@@ -244,7 +246,9 @@ the verifier's on every challenge, `fake` still fails every challenge, and `mmap
 still caught by timing. That the two independent builds agree on every answer is itself a
 byte-equality check on the generator across two processes.
 
-The `partial-recompute` adversary remains, in [NEXT_STEPS](../../NEXT_STEPS.md).
+The `partial-recompute` adversary has landed on the GPU as `cheating_prover_cuda --mode
+recompute` (results below). A CPU invariant that pins its loss remains, in
+[NEXT_STEPS](../../NEXT_STEPS.md).
 
 ### An unplanned consequence: build-time memory is not optional
 
@@ -286,6 +290,34 @@ measured curve rather than a single operating point.
 These numbers are session-local and preliminary: they come from a build benchmark and an
 honest run, not from the `partial-recompute` adversary, which is what will actually
 measure the cascade.
+
+### The measured curve
+
+One session on one H100 SXM (4096 MiB buffer, `k=262144`, 16,384 lanes, tree fold,
+`p=16`), with honest re-measured before every point. The cheat keeps a random fraction
+of blocks on the card, rebuilds the rest on 23 host threads, and gets 65,536 block
+computations per thread per challenge before it gives up. Full method and limits are in
+[partial-recompute](../investigations/partial-recompute/README.md).
+
+| Kept | `t=1`: × honest, wrong answers | `t=2`: × honest, wrong answers |
+|---|---|---|
+| 1.000 | 1.15×, 0/30 | 1.10×, 0/30 |
+| 0.999 | 3.79×, 0/30 | 1,637×, 30/30 |
+| 0.990 | 7.83×, 0/30 | 4,026×, 30/30 |
+| 0.900 | 34.0×, 0/30 | 30,091×, 30/30 |
+| 0.500 | 1,449×, 30/30 | 146,786×, 30/30 |
+
+Two readings follow. At `t=1` a missing block costs about one block computation, since
+what it depends on was usually kept, so the penalty is proportional to the discarded
+blocks a challenge reads. That is a timing signal, and it separates at 0.1% discarded
+here, but it has a floor somewhere below that. At `t=2` a missing block needs its own
+first-pass value, which nobody kept, and the rebuild pulls in most of the first pass, so
+the cheat cannot answer correctly within any budget that fits the stopwatch. That moves
+the recompute defense back from timing to correctness, which the context section above
+did not expect. It is the strongest argument for keeping `t >= 2` as the default.
+
+The preliminary hot-cache estimate above, 0.30 µs per block with no cascade, held
+roughly for `t=1` and was off by four orders of magnitude for `t=2`.
 
 This ADR stays **proposed** until the cost parameters in point 1 are fixed against a
 measured TMTO curve, exactly as its own "done when" requires.

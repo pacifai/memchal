@@ -1,0 +1,23 @@
+{
+  "schema": "memchal.verifier.v1",
+  "label": "keep-t2-0.95",
+  "env": {"page_size": 4096, "online_cpus": 224, "clock": "steady_clock"},
+  "params": {"mb": 4096, "k": 262144, "lanes": 16384, "n": 30, "warmup": 5, "seed": "0xabcdef0123456789", "host": "127.0.0.1", "port": 9099, "gen": "argon2d", "chain": "dependent", "nonce": "random", "gap_us": 0, "gap_dist": "fixed", "chain_depth": 16},
+  "prover": {"locked": true},
+  "upload": {"bytes": 4294967296, "seconds": 0.000007, "gib_per_s": 545033.3833},
+  "result": {
+    "samples": 30,
+    "errors": 30,
+    "mean_us": 3404100.5554,
+    "stddev_us": 49283.3910,
+    "throughput_probes_per_us": 0.0770,
+    "percentiles_us": {
+      "min": {"value": 3305028.2900, "tail_n": 30, "reliable": true},
+      "p50": {"value": 3392675.0840, "tail_n": 15, "reliable": true},
+      "p90": {"value": 3476568.4320, "tail_n": 3, "reliable": false},
+      "p99": {"value": 3499814.2220, "tail_n": 0, "reliable": false},
+      "p99.9": {"value": 3499814.2220, "tail_n": 0, "reliable": false},
+      "max": {"value": 3514302.8410, "tail_n": 0, "reliable": true}
+    }
+  }
+}

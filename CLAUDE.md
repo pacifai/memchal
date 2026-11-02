@@ -60,6 +60,12 @@ curve.
   the tree fold 1.24x, for an 8.9x faster response at 131k lanes. It is now
   launch-bound rather than work-bound. See
   [tree-fold-payoff](docs/investigations/tree-fold-payoff/README.md).
+- **Two Argon2d passes defeat partial recompute.** A GPU prover that discards
+  blocks and rebuilds them from the recipe answers wrong on every challenge at
+  `t=2`, even discarding 0.1%, because each rebuild needs a first-pass value
+  nobody kept. At `t=1` it answers correctly but slowly: 3.8x honest at 0.1%
+  discarded, 34x at 10%. One H100 session. See
+  [partial-recompute](docs/investigations/partial-recompute/README.md).
 - **The detector's resolution is ~5% of the buffer.** A prover that holds every
   byte but keeps 5% off the card separates from honest; below that it hides in
   the noise. Unlike the UVM cliff this is a smooth gradient, which is what a
@@ -96,6 +102,9 @@ curve.
   verifier sends a `RecipeMsg` and both sides build. The CPU and GPU provers all handle
   build mode; the GPU provers build on the host CPU and copy the result to the card
   (building on the GPU itself is still open). See [ADR 0007](docs/decisions/0007-buffer-generator-memory-hard-function.md).
+- `src/argon2d_rebuild.hpp` — the partial-recompute adversary's engine: rebuilds one
+  final block from a partial copy of the matrix by walking Argon2d's dependency graph,
+  with a per-challenge memo and a budget. Calls the frozen primitives; changes none.
 - `src/bench_build.cpp` → `bench_build` — what one 1 KiB block costs to build, which is
   the attacker's unit of work in the build-buffer design. Not a protocol participant.
 - `src/prover.cpp` — the honest TCP server. Maps, prefaults, and `mlock`s the
@@ -120,8 +129,10 @@ curve.
   receive the uploaded bytes, or receive a recipe and build the buffer on the host,
   then push it to the card through pinned staging. Host only.
 - `src/cheating_prover_cuda.cpp` — the GPU adversaries: `honest`, `fake`, `uvm`,
-  `zerocopy`, `partial`. It always claims `locked=true`, because nothing stops a real one
-  doing the same. `--hog` occupies HBM so a managed buffer cannot fit.
+  `zerocopy`, `partial`, `recompute`. `recompute` (build mode only) keeps `--keep` of
+  the blocks on the card and rebuilds the rest on host threads when a lane reaches
+  one. It always claims `locked=true`, because nothing stops a real one doing the
+  same. `--hog` occupies HBM so a managed buffer cannot fit.
 - `scripts/gpu_pod_setup.sh` — the first command on a rented box: records the
   machine, refuses boxes whose numbers would be meaningless, settles whether
   clocks can be locked and whether RDMA exists, then builds and runs the gate.
@@ -140,7 +151,8 @@ curve.
   (checks the CUDA kernel against those **same pinned constants**, not against a
   fresh CPU answer — two implementations agreeing only proves they drifted
   together), `known_answer_argon2d.cpp` (pins the generator against RFC 7693 and
-  RFC 9106 vectors — values this codebase did not produce), `differential_argon2d.cpp`
+  RFC 9106 vectors — values this codebase did not produce), `rebuild_argon2d.cpp` (every block the
+  recompute engine rebuilds matches a full build), `differential_argon2d.cpp`
   (sweeps the generator against `libargon2`, a **test-only** dependency; nothing that
   ships links it), and `run_tests.sh` (the CPU known-answer tests plus invariants).
 

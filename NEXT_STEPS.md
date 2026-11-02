@@ -71,11 +71,13 @@ The generator runs on the wire. `--gen argon2d` sends a 92-byte recipe instead o
 buffer, both sides build it, and the invariant suite covers the path. What remains is
 attacking it.
 
-- [ ] **Attack it: a `partial-recompute` mode.** Hold fraction `f` of the blocks and
-  genuinely rebuild missing ancestors on demand, with a give-up cap. *Done when:* it
-  loses on timing against the defended generator, an invariant pins that, and its TMTO
-  curve fixes the cost parameters (`m`, `t`, `p`) that ADR 0007 needs to move from
-  proposed to accepted.
+- [ ] **Pin the recompute loss and fix the cost parameters.** The GPU adversary runs
+  (`cheating_prover_cuda --mode recompute`), and one H100 sweep shows `t=2` makes it
+  answer wrong at any discarded fraction while `t=1` only slows it
+  ([partial-recompute](docs/investigations/partial-recompute/README.md)). Nothing in
+  `run_tests.sh` checks that yet, because it has no GPU. *Done when:* a CPU recompute
+  mode (or a GPU check in the pod gate) fails under `t=2`, an invariant pins that, and
+  ADR 0007 records the chosen `m`, `t`, and `p`.
 - [ ] **Then re-check the cheap wins.** Our cheat keeps a random fraction; a real one
   studies the dependency graph offline and keeps the blocks costliest to rebuild. Add a
   `--keep hot` policy once the random curve exists, and report whether it moves the

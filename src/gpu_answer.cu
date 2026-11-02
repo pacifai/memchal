@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstring>
 #include <chrono>
+#include <algorithm>
 
 namespace mc {
 namespace gpu {
@@ -45,6 +46,7 @@ const char* alloc_name(Alloc a) {
         case Alloc::Managed:    return "managed";
         case Alloc::HostMapped: return "hostmapped";
         case Alloc::Split:      return "split";
+        case Alloc::Recompute:  return "recompute";
     }
     return "?";
 }
@@ -114,6 +116,30 @@ struct LoadStaged {
     }
 };
 
+// The recompute cheat. Reads a kept block or one rebuilt this challenge; on a
+// missing block it asks for it and stops reading, returning zeros so the rest
+// of the lane runs to completion as garbage. The kernel throws that hash away
+// and the lane runs again once the block is on the card.
+struct LoadRecompute {
+    const uint64_t* __restrict__ kept;
+    const uint64_t* __restrict__ scratch;
+    const int32_t*  __restrict__ slot;
+    uint32_t* need;
+    uint32_t* nneed;
+    bool missed;
+    __device__ __forceinline__ uint64_t operator()(uint64_t idx) {
+        if (missed) return 0;
+        const uint32_t b = (uint32_t)(idx / kRecomputeBlockWords);
+        const uint64_t w = idx % kRecomputeBlockWords;
+        const int32_t s = slot[b];
+        if (s >= 0)  return kept[(uint64_t)s * kRecomputeBlockWords + w];
+        if (s <= -2) return scratch[(uint64_t)(-2 - s) * kRecomputeBlockWords + w];
+        missed = true;
+        need[atomicAdd(nneed, 1u)] = b;   // at most one per lane per round
+        return 0;
+    }
+};
+
 // Where lane l's probes start in a flat array of all k, matching
 // lane_samples(): the first k % lanes lanes take one extra.
 __device__ __forceinline__ uint32_t lane_offset(uint32_t k, uint32_t lanes, uint32_t l) {
@@ -131,6 +157,29 @@ __global__ void k_lane(Load load, uint64_t num_words, uint64_t nonce,
     if (l >= lanes) return;
     out[l] = mc::answer_lane_t(load, num_words, nonce, l,
                                mc::lane_samples(k, lanes, l), chained);
+}
+
+__global__ void k_lane_recompute(LoadRecompute load, uint64_t num_words, uint64_t nonce,
+                                 uint32_t k, uint32_t lanes, bool chained,
+                                 uint8_t* done, uint64_t* out) {
+    uint32_t l = blockIdx.x * blockDim.x + threadIdx.x;
+    if (l >= lanes || done[l]) return;
+    LoadRecompute ld = load;
+    ld.missed = false;
+    uint64_t h = mc::answer_lane_t(ld, num_words, nonce, l,
+                                   mc::lane_samples(k, lanes, l), chained);
+    if (!ld.missed) { out[l] = h; done[l] = 1; }
+}
+
+// Point each newly rebuilt block's slot at its scratch entry, from `first` on.
+__global__ void k_point_slots(int32_t* slot, const uint32_t* ids, uint32_t n, uint32_t first) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) slot[ids[i]] = -2 - (int32_t)(first + i);
+}
+
+__global__ void k_clear_slots(int32_t* slot, const uint32_t* ids, uint32_t n) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) slot[ids[i]] = -1;
 }
 
 __global__ void k_pf_record(uint64_t num_words, uint64_t nonce, uint32_t k,
@@ -217,6 +266,14 @@ bool select_device(int ordinal, char* name, size_t name_len, char* err, size_t e
 }
 
 void destroy(Prover& p) {
+    if (p.d_slot)       cudaFree(p.d_slot);
+    if (p.d_scratch)    cudaFree(p.d_scratch);
+    if (p.d_scratch_id) cudaFree(p.d_scratch_id);
+    if (p.d_need)       cudaFree(p.d_need);
+    if (p.d_nneed)      cudaFree(p.d_nneed);
+    if (p.d_done)       cudaFree(p.d_done);
+    if (p.h_need)       cudaFreeHost(p.h_need);
+    if (p.h_rebuilt)    cudaFreeHost(p.h_rebuilt);
     if (p.d_pf_idx) cudaFree(p.d_pf_idx);
     if (p.d_pf_val) cudaFree(p.d_pf_val);
     if (p.h_swap)   cudaFreeHost(p.h_swap);
@@ -235,6 +292,34 @@ void destroy(Prover& p) {
     if (p.ev_start) cudaEventDestroy((cudaEvent_t)p.ev_start);
     if (p.ev_stop)  cudaEventDestroy((cudaEvent_t)p.ev_stop);
     p = Prover{};
+}
+
+// The per-lane buffers, upload staging, and timing events every kind of
+// prover needs.
+static bool alloc_scratch(Prover& p, uint32_t lane_cap, char* err, size_t errlen) {
+    cudaError_t e;
+    if ((e = cudaMalloc((void**)&p.d_lane, (size_t)lane_cap * 8)) != cudaSuccess) {
+        fail(err, errlen, "cudaMalloc(lane scratch)", e); return false;
+    }
+    if ((e = cudaMalloc((void**)&p.d_lane2, (size_t)lane_cap * 8)) != cudaSuccess) {
+        fail(err, errlen, "cudaMalloc(tree scratch)", e); return false;
+    }
+    if ((e = cudaHostAlloc((void**)&p.h_lane, (size_t)lane_cap * 8, cudaHostAllocDefault)) != cudaSuccess) {
+        fail(err, errlen, "cudaHostAlloc(lane staging)", e); return false;
+    }
+    p.lane_cap = lane_cap;
+
+    p.stage_cap = 8u << 20; // 8 MiB of pinned staging for the upload
+    if ((e = cudaHostAlloc((void**)&p.h_stage, p.stage_cap, cudaHostAllocDefault)) != cudaSuccess) {
+        fail(err, errlen, "cudaHostAlloc(upload staging)", e); return false;
+    }
+
+    cudaEvent_t a = nullptr, b = nullptr;
+    if ((e = cudaEventCreate(&a)) != cudaSuccess) { fail(err, errlen, "cudaEventCreate", e); return false; }
+    if ((e = cudaEventCreate(&b)) != cudaSuccess) { fail(err, errlen, "cudaEventCreate", e); return false; }
+    p.ev_start = a; p.ev_stop = b;
+    p.cursor = 0;
+    return true;
 }
 
 bool create(Prover& p, uint64_t num_words, Alloc alloc, uint32_t lane_cap,
@@ -282,6 +367,9 @@ bool create(Prover& p, uint64_t num_words, Alloc alloc, uint32_t lane_cap,
             e = cudaHostGetDevicePointer((void**)&p.d_buf, p.h_mapped, 0);
             if (e != cudaSuccess) { fail(err, errlen, "cudaHostGetDevicePointer", e); return false; }
             break;
+        case Alloc::Recompute:
+            failmsg(err, errlen, "a recompute buffer is made by create_recompute()");
+            return false;
         case Alloc::Split: {
             size_t dev_bytes = (size_t)p.split_words * 8;
             size_t off_bytes = bytes - dev_bytes;
@@ -299,28 +387,37 @@ bool create(Prover& p, uint64_t num_words, Alloc alloc, uint32_t lane_cap,
         }
     }
 
-    if ((e = cudaMalloc((void**)&p.d_lane, (size_t)lane_cap * 8)) != cudaSuccess) {
-        fail(err, errlen, "cudaMalloc(lane scratch)", e); return false;
-    }
-    if ((e = cudaMalloc((void**)&p.d_lane2, (size_t)lane_cap * 8)) != cudaSuccess) {
-        fail(err, errlen, "cudaMalloc(tree scratch)", e); return false;
-    }
-    if ((e = cudaHostAlloc((void**)&p.h_lane, (size_t)lane_cap * 8, cudaHostAllocDefault)) != cudaSuccess) {
-        fail(err, errlen, "cudaHostAlloc(lane staging)", e); return false;
-    }
-    p.lane_cap = lane_cap;
+    return alloc_scratch(p, lane_cap, err, errlen);
+}
 
-    p.stage_cap = 8u << 20; // 8 MiB of pinned staging for the upload
-    if ((e = cudaHostAlloc((void**)&p.h_stage, p.stage_cap, cudaHostAllocDefault)) != cudaSuccess) {
-        fail(err, errlen, "cudaHostAlloc(upload staging)", e); return false;
-    }
+bool create_recompute(Prover& p, uint32_t n_blocks, const int32_t* slot,
+                      const uint64_t* kept_words, uint32_t n_kept, uint32_t lane_cap,
+                      char* err, size_t errlen) {
+    destroy(p);
+    if (lane_cap == 0) lane_cap = 1;
+    p.alloc      = Alloc::Recompute;
+    p.num_words  = (uint64_t)n_blocks * kRecomputeBlockWords;
+    p.held_words = p.num_words;     // it can produce every word, just not quickly
+    p.n_blocks   = n_blocks;
+    p.n_kept     = n_kept;
 
-    cudaEvent_t a = nullptr, b = nullptr;
-    if ((e = cudaEventCreate(&a)) != cudaSuccess) { fail(err, errlen, "cudaEventCreate", e); return false; }
-    if ((e = cudaEventCreate(&b)) != cudaSuccess) { fail(err, errlen, "cudaEventCreate", e); return false; }
-    p.ev_start = a; p.ev_stop = b;
-    p.cursor = 0;
-    return true;
+    const size_t kept_bytes = (size_t)(n_kept ? n_kept : 1) * kRecomputeBlockWords * 8;
+    cudaError_t e = cudaMalloc((void**)&p.d_buf, kept_bytes);
+    if (e != cudaSuccess) { fail(err, errlen, "cudaMalloc(kept blocks)", e); return false; }
+    if (n_kept) {
+        e = cudaMemcpy(p.d_buf, kept_words, (size_t)n_kept * kRecomputeBlockWords * 8,
+                       cudaMemcpyHostToDevice);
+        if (e != cudaSuccess) { fail(err, errlen, "cudaMemcpy(kept blocks)", e); return false; }
+    }
+    if ((e = cudaMalloc((void**)&p.d_slot, (size_t)n_blocks * 4)) != cudaSuccess) {
+        fail(err, errlen, "cudaMalloc(slot table)", e); return false;
+    }
+    e = cudaMemcpy(p.d_slot, slot, (size_t)n_blocks * 4, cudaMemcpyHostToDevice);
+    if (e != cudaSuccess) { fail(err, errlen, "cudaMemcpy(slot table)", e); return false; }
+    if ((e = cudaMalloc((void**)&p.d_nneed, 4)) != cudaSuccess) {
+        fail(err, errlen, "cudaMalloc(need count)", e); return false;
+    }
+    return alloc_scratch(p, lane_cap, err, errlen);
 }
 
 // ---------------------------------------------------------------------------
@@ -438,10 +535,15 @@ static bool grow_lanes(Prover& p, uint32_t lanes, char* err, size_t errlen) {
     return true;
 }
 
+static bool fold(Prover& p, uint64_t nonce, uint32_t k, uint32_t lanes, bool tree,
+                 uint64_t* out_hash, double* copy_ms, double* fold_ms,
+                 char* err, size_t errlen);
+
 bool answer(Prover& p, uint64_t nonce, uint32_t k, uint32_t lanes, bool chained,
             bool tree, uint64_t* out_hash, double* kernel_ms, double* copy_ms,
             double* fold_ms, char* err, size_t errlen) {
     if (lanes == 0) lanes = 1;
+    if (p.alloc == Alloc::Recompute) { failmsg(err, errlen, "a recompute buffer answers through answer_recompute()"); return false; }
     if (p.swapped_out) { failmsg(err, errlen, "answer() while the buffer is swapped out"); return false; }
     if (!grow_lanes(p, lanes, err, errlen)) return false;
     if (p.prefetch && k > p.pf_cap) {
@@ -489,6 +591,17 @@ bool answer(Prover& p, uint64_t nonce, uint32_t k, uint32_t lanes, bool chained,
     float ms = 0.0f;
     cudaEventElapsedTime(&ms, (cudaEvent_t)p.ev_start, (cudaEvent_t)p.ev_stop);
     if (kernel_ms) *kernel_ms = (double)ms;
+
+    return fold(p, nonce, k, lanes, tree, out_hash, copy_ms, fold_ms, err, errlen);
+}
+
+// Folds the lane hashes the kernel left in d_lane into the answer.
+static bool fold(Prover& p, uint64_t nonce, uint32_t k, uint32_t lanes, bool tree,
+                 uint64_t* out_hash, double* copy_ms, double* fold_ms,
+                 char* err, size_t errlen) {
+    const int tpb = 256;
+    unsigned int blocks = (unsigned int)(((uint64_t)lanes + tpb - 1) / tpb);
+    cudaError_t e;
 
     if (tree) {
         // The whole fold stays on the device: log2(lanes) passes, then eight
@@ -544,6 +657,134 @@ bool answer(Prover& p, uint64_t nonce, uint32_t k, uint32_t lanes, bool chained,
 }
 
 // ---------------------------------------------------------------------------
+// recompute
+// ---------------------------------------------------------------------------
+
+// Room for `lanes` paused lanes per round: the device's request list, the
+// done flags, and the host's pinned copies.
+static bool grow_recompute_lanes(Prover& p, uint32_t lanes, char* err, size_t errlen) {
+    if (lanes <= p.rebuilt_cap && p.d_need) return true;
+    if (p.d_need)    cudaFree(p.d_need);
+    if (p.d_done)    cudaFree(p.d_done);
+    if (p.h_need)    cudaFreeHost(p.h_need);
+    if (p.h_rebuilt) cudaFreeHost(p.h_rebuilt);
+    p.d_need = nullptr; p.d_done = nullptr; p.h_need = nullptr; p.h_rebuilt = nullptr;
+    p.rebuilt_cap = 0;
+    cudaError_t e;
+    if ((e = cudaMalloc((void**)&p.d_need, (size_t)lanes * 4)) != cudaSuccess) {
+        fail(err, errlen, "cudaMalloc(need list)", e); return false;
+    }
+    if ((e = cudaMalloc((void**)&p.d_done, (size_t)lanes)) != cudaSuccess) {
+        fail(err, errlen, "cudaMalloc(done flags)", e); return false;
+    }
+    if ((e = cudaHostAlloc((void**)&p.h_need, (size_t)lanes * 4, cudaHostAllocDefault)) != cudaSuccess) {
+        fail(err, errlen, "cudaHostAlloc(need list)", e); return false;
+    }
+    e = cudaHostAlloc((void**)&p.h_rebuilt, (size_t)lanes * kRecomputeBlockWords * 8,
+                      cudaHostAllocDefault);
+    if (e != cudaSuccess) { fail(err, errlen, "cudaHostAlloc(rebuilt blocks)", e); return false; }
+    p.rebuilt_cap = lanes;
+    return true;
+}
+
+// Room for `need` rebuilt blocks this challenge, keeping the ones already there.
+static bool grow_scratch(Prover& p, uint32_t need, char* err, size_t errlen) {
+    if (need <= p.scratch_cap) return true;
+    uint32_t cap = p.scratch_cap ? p.scratch_cap : 1024;
+    while (cap < need) cap *= 2;
+    uint64_t* blk = nullptr;
+    uint32_t* ids = nullptr;
+    cudaError_t e = cudaMalloc((void**)&blk, (size_t)cap * kRecomputeBlockWords * 8);
+    if (e != cudaSuccess) { fail(err, errlen, "cudaMalloc(rebuild scratch)", e); return false; }
+    if ((e = cudaMalloc((void**)&ids, (size_t)cap * 4)) != cudaSuccess) {
+        cudaFree(blk); fail(err, errlen, "cudaMalloc(rebuild scratch ids)", e); return false;
+    }
+    if (p.scratch_used) {
+        cudaMemcpy(blk, p.d_scratch, (size_t)p.scratch_used * kRecomputeBlockWords * 8,
+                   cudaMemcpyDeviceToDevice);
+        cudaMemcpy(ids, p.d_scratch_id, (size_t)p.scratch_used * 4, cudaMemcpyDeviceToDevice);
+    }
+    if (p.d_scratch)    cudaFree(p.d_scratch);
+    if (p.d_scratch_id) cudaFree(p.d_scratch_id);
+    p.d_scratch = blk; p.d_scratch_id = ids; p.scratch_cap = cap;
+    return true;
+}
+
+bool answer_recompute(Prover& p, uint64_t nonce, uint32_t k, uint32_t lanes, bool chained,
+                      bool tree, RebuildFn rebuild, void* ctx, uint64_t* out_hash,
+                      double* kernel_ms, double* copy_ms, double* fold_ms,
+                      RecomputeStats* st, char* err, size_t errlen) {
+    if (lanes == 0) lanes = 1;
+    if (p.alloc != Alloc::Recompute) { failmsg(err, errlen, "not a recompute buffer"); return false; }
+    if (!grow_lanes(p, lanes, err, errlen)) return false;
+    if (!grow_recompute_lanes(p, lanes, err, errlen)) return false;
+    RecomputeStats s;
+
+    const int tpb = 256;
+    unsigned int blocks = (unsigned int)(((uint64_t)lanes + tpb - 1) / tpb);
+    auto t0 = std::chrono::steady_clock::now();
+    cudaError_t e = cudaMemset(p.d_done, 0, lanes);
+    if (e != cudaSuccess) { fail(err, errlen, "cudaMemset(done flags)", e); return false; }
+
+    for (;;) {
+        if ((e = cudaMemset(p.d_nneed, 0, 4)) != cudaSuccess) {
+            fail(err, errlen, "cudaMemset(need count)", e); return false;
+        }
+        LoadRecompute ld{p.d_buf, p.d_scratch, p.d_slot, p.d_need, p.d_nneed, false};
+        k_lane_recompute<<<blocks, tpb>>>(ld, p.num_words, nonce, k, lanes, chained,
+                                          p.d_done, p.d_lane);
+        ++s.rounds;
+        uint32_t nneed = 0;
+        if ((e = cudaMemcpy(&nneed, p.d_nneed, 4, cudaMemcpyDeviceToHost)) != cudaSuccess) {
+            fail(err, errlen, "k_lane_recompute", e); return false;
+        }
+        if (nneed == 0) break;
+
+        e = cudaMemcpy(p.h_need, p.d_need, (size_t)nneed * 4, cudaMemcpyDeviceToHost);
+        if (e != cudaSuccess) { fail(err, errlen, "cudaMemcpy(need list)", e); return false; }
+        // Lanes that paused on the same block need it rebuilt once.
+        std::sort(p.h_need, p.h_need + nneed);
+        const uint32_t n = (uint32_t)(std::unique(p.h_need, p.h_need + nneed) - p.h_need);
+
+        auto r0 = std::chrono::steady_clock::now();
+        if (!rebuild(ctx, p.h_need, n, p.h_rebuilt)) {
+            failmsg(err, errlen, "rebuild callback failed"); return false;
+        }
+        s.rebuild_ms += std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() - r0).count();
+
+        if (!grow_scratch(p, p.scratch_used + n, err, errlen)) return false;
+        e = cudaMemcpy(p.d_scratch + (size_t)p.scratch_used * kRecomputeBlockWords, p.h_rebuilt,
+                       (size_t)n * kRecomputeBlockWords * 8, cudaMemcpyHostToDevice);
+        if (e != cudaSuccess) { fail(err, errlen, "cudaMemcpy(rebuilt blocks)", e); return false; }
+        e = cudaMemcpy(p.d_scratch_id + p.scratch_used, p.h_need, (size_t)n * 4,
+                       cudaMemcpyHostToDevice);
+        if (e != cudaSuccess) { fail(err, errlen, "cudaMemcpy(rebuilt ids)", e); return false; }
+        unsigned int nb = (n + tpb - 1) / tpb;
+        k_point_slots<<<nb, tpb>>>(p.d_slot, p.d_scratch_id + p.scratch_used, n, p.scratch_used);
+        p.scratch_used += n;
+        s.rebuilt += n;
+    }
+    if ((e = cudaGetLastError()) != cudaSuccess) { fail(err, errlen, "k_lane_recompute launch", e); return false; }
+    if (kernel_ms)
+        *kernel_ms = std::chrono::duration<double, std::milli>(
+                         std::chrono::steady_clock::now() - t0).count();
+    if (st) *st = s;
+    return fold(p, nonce, k, lanes, tree, out_hash, copy_ms, fold_ms, err, errlen);
+}
+
+bool recompute_forget(Prover& p, char* err, size_t errlen) {
+    if (p.alloc != Alloc::Recompute || p.scratch_used == 0) return true;
+    const int tpb = 256;
+    unsigned int nb = (p.scratch_used + tpb - 1) / tpb;
+    k_clear_slots<<<nb, tpb>>>(p.d_slot, p.d_scratch_id, p.scratch_used);
+    p.scratch_used = 0;
+    cudaError_t e = cudaDeviceSynchronize();
+    if (e != cudaSuccess) { fail(err, errlen, "k_clear_slots", e); return false; }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // prefetch and swap
 // ---------------------------------------------------------------------------
 void enable_prefetch(Prover& p) { p.prefetch = true; }
@@ -592,6 +833,10 @@ bool residency(const Prover& p, const char** backing, bool* is_device) {
 
     if (p.alloc == Alloc::Split) {
         if (backing) *backing = "split — part on the card, the rest in host memory over PCIe";
+        return true;                       // is_device stays false: not all of it is
+    }
+    if (p.alloc == Alloc::Recompute) {
+        if (backing) *backing = "recompute — some blocks on the card, the rest rebuilt on demand";
         return true;                       // is_device stays false: not all of it is
     }
     cudaPointerAttributes a{};
@@ -658,6 +903,7 @@ double resident_fraction(const Prover& p) {
         case Alloc::HostMapped: return 0.0;
         case Alloc::Split:      return (double)p.split_words / (double)p.num_words;
         case Alloc::Managed:    return 1.0;   // unknowable from here, by design
+        case Alloc::Recompute:  return p.n_blocks ? (double)p.n_kept / (double)p.n_blocks : 0.0;
         case Alloc::Device:     break;
     }
     return (double)p.held_words / (double)p.num_words;   // < 1 only for `fake`

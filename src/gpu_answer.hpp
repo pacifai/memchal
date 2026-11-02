@@ -31,7 +31,11 @@ namespace gpu {
 //                RESOLUTION: uvm and zerocopy answer "can you catch a prover
 //                holding none of it", this one answers "how little can a prover
 //                offload before you stop seeing it".
-enum class Alloc { Device, Managed, HostMapped, Split };
+//   Recompute  — the partial-recompute adversary (ADR 0007). Only some of the
+//                Argon2d blocks are on the card; a probe that lands on a missing
+//                one pauses its lane while the host rebuilds the block from the
+//                recipe. See create_recompute() and answer_recompute().
+enum class Alloc { Device, Managed, HostMapped, Split, Recompute };
 
 const char* alloc_name(Alloc a);
 
@@ -72,7 +76,29 @@ struct Prover {
     // freed between challenges and restored when one arrives.
     void*     h_swap     = nullptr;
     bool      swapped_out = false;
+
+    // recompute cheat. d_buf holds the kept blocks, packed. d_slot maps each
+    // block of the buffer to where its words are: >= 0 is a kept block in
+    // d_buf, <= -2 is block (-2 - slot) of d_scratch, rebuilt this challenge,
+    // and -1 is missing.
+    int32_t*  d_slot       = nullptr;
+    uint32_t  n_blocks     = 0;
+    uint32_t  n_kept       = 0;
+    uint64_t* d_scratch    = nullptr; // blocks rebuilt for the current challenge
+    uint32_t* d_scratch_id = nullptr; // which block each scratch entry is
+    uint32_t  scratch_cap  = 0;       // in blocks
+    uint32_t  scratch_used = 0;
+    uint32_t* d_need       = nullptr; // blocks the paused lanes asked for
+    uint32_t* d_nneed      = nullptr;
+    uint8_t*  d_done       = nullptr; // per lane: finished this challenge
+    uint32_t* h_need       = nullptr; // pinned copy of d_need
+    uint64_t* h_rebuilt    = nullptr; // pinned: the host's rebuilt blocks
+    uint32_t  rebuilt_cap  = 0;       // in blocks, for h_rebuilt and h_need
 };
+
+// Words per Argon2d block. gpu_answer.cu cannot include argon2d.hpp, so the
+// caller checks this against a2::kBlockWords.
+static constexpr uint32_t kRecomputeBlockWords = 128;
 
 // The prefetch cheat. Turns on a three-pass answer: a dry run that lists the
 // probe addresses, one parallel batch that fetches those words, then the real
@@ -109,6 +135,44 @@ bool create(Prover& p, uint64_t num_words, Alloc alloc, uint32_t lane_cap,
             double held_fraction, double offload_fraction, char* err, size_t errlen);
 
 void destroy(Prover& p);
+
+// The recompute cheat's buffer. slot has n_blocks entries: the position of each
+// block in kept_words, or -1 if the cheat discarded it. kept_words holds n_kept
+// blocks of kRecomputeBlockWords words, already built. Only these go to the
+// card; the HBM the cheat saves is the discarded blocks.
+bool create_recompute(Prover& p, uint32_t n_blocks, const int32_t* slot,
+                      const uint64_t* kept_words, uint32_t n_kept, uint32_t lane_cap,
+                      char* err, size_t errlen);
+
+// Rebuilds blocks[0..n) into out, kRecomputeBlockWords words each. The cheat
+// supplies it, so the Argon2d code stays out of the .cu file. Returning false
+// aborts the answer; a block it could not rebuild in budget should be filled
+// with anything and the answer left to be wrong.
+using RebuildFn = bool (*)(void* ctx, const uint32_t* blocks, uint32_t n, uint64_t* out);
+
+struct RecomputeStats {
+    uint32_t rounds     = 0;   // kernel launches; each one ends with every lane done or paused
+    uint32_t rebuilt    = 0;   // distinct blocks rebuilt this challenge
+    double   rebuild_ms = 0;   // host time inside RebuildFn
+};
+
+// Answer one challenge with the recompute cheat. Each round runs every lane
+// not yet done until it finishes or reaches a missing block. The host rebuilds
+// the blocks the paused lanes asked for and puts them on the card, then the
+// next round re-runs those lanes from the start, now able to read further.
+// Re-running rather than resuming reuses answer_lane_t() unchanged, at the cost
+// of repeating each paused lane's earlier probes. kernel_ms covers all rounds,
+// host rebuilds included, because together they are what replaces the one
+// honest pass.
+bool answer_recompute(Prover& p, uint64_t nonce, uint32_t k, uint32_t lanes, bool chained,
+                      bool tree, RebuildFn rebuild, void* ctx, uint64_t* out_hash,
+                      double* kernel_ms, double* copy_ms, double* fold_ms,
+                      RecomputeStats* st, char* err, size_t errlen);
+
+// Marks the blocks rebuilt for the last challenge missing again, so the next
+// challenge cannot read them for free. Call after the response is sent: it is
+// housekeeping, not part of answering.
+bool recompute_forget(Prover& p, char* err, size_t errlen);
 
 // Pinned staging for the upload. The server recv()s straight into this, then
 // calls push() to move it onto the device, so a multi-GB buffer never needs a
