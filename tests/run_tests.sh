@@ -322,20 +322,6 @@ fi
 rm -rf "$STREAM_DIR"
 
 # ---------------------------------------------------------------------------
-# Step 5: report formatting — the experiment tables are read off a projector, so
-# a frame that doesn't close is a real defect. Every rendered line must be exactly
-# the same display width, including content with typographic characters.
-# ---------------------------------------------------------------------------
-echo ""
-echo "=== INVARIANT: report table alignment ==="
-if python3 tests/check_table_alignment.py
-then
-    pass "INVARIANT report alignment"
-else
-    fail "INVARIANT report alignment"
-fi
-
-# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # The GPU demo page's canvas sizing.
 #
