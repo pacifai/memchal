@@ -1,6 +1,6 @@
 # ADR 0005 — Per-lane chaining: latency-hardness vs GPU parallelism
 
-**Status:** accepted for CPU (the send-buffer design); **explicitly to be revisited at the GPU port**
+**Status:** accepted
 
 ## Context
 The latency-hardness defense (`--chain dependent`, [ADR 0004](0004-adversary-taxonomy-and-defenses.md))
@@ -35,15 +35,14 @@ degrade to no hardness.
 - **Honest cost ~3–4×.** Pointer-chasing kills memory-level parallelism (the hardware
   can't prefetch the next address until the current read completes). That is the
   intrinsic price of latency-hardness and is paid by the honest prover too.
-- **The GPU port will re-open this.** A GPU wants many thousands of lanes; at fixed
-  `k` that forces shallow chains (weak). To keep both, the port likely needs `k` to
-  grow with the thread count (so `k = lanes × depth` stays large with a healthy
-  `depth`), or a different memory-hard construction. This tradeoff — thread count vs
-  chain depth vs total probes — should be decided deliberately when the kernel is
-  written, not inherited by accident.
+- **On the GPU, `k` grows with the lane count.** A GPU wants many thousands of
+  lanes, and at a fixed `k` that makes each chain shallow. The verifier refuses
+  any challenge with `k / lanes` below 16, so the GPU runs use 16,384 lanes with
+  `k = 262,144`, a chain depth of 16.
 - **Orthogonal to build-buffer.** This is *latency*-hardness (can't prefetch a predictable
   pattern). It does nothing for *capacity*-hardness / the recompute regime, which
-  needs a memory-hard **generator** (Argon2-style) — a separate mechanism (NEXT_STEPS).
+  needs a memory-hard **generator** — a separate mechanism
+  ([ADR 0007](0007-buffer-generator-memory-hard-function.md)).
 
 ## Related
 [ADR 0003](0003-timing-detector-scope-and-measurement.md) (chain depth = k/lanes),

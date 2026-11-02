@@ -246,89 +246,31 @@ the verifier's on every challenge, `fake` still fails every challenge, and `mmap
 still caught by timing. That the two independent builds agree on every answer is itself a
 byte-equality check on the generator across two processes.
 
-The `partial-recompute` adversary has landed on the GPU as `cheating_prover_cuda --mode
-recompute` (results below). A CPU invariant that pins its loss remains, in
-[NEXT_STEPS](../../NEXT_STEPS.md).
+The partial-recompute adversary runs on the GPU as
+`cheating_prover_cuda --mode recompute`.
 
-### An unplanned consequence: build-time memory is not optional
+### Build-time memory
 
-Argon2d cannot produce part of a matrix, so **every prover must hold buffer-sized memory
-at least once, during the build**. A cheat that intends to spill to disk still needs the
-full buffer in RAM to construct it, and one whose budget is below the buffer size cannot
-set up at all — it fails during the build rather than answering slowly.
+Argon2d builds the whole matrix at once, so every prover holds buffer-sized memory at
+least during the build, and a prover whose memory budget is below the buffer size fails
+at setup. This shows the prover had the memory once, not that it still holds it: it can
+free blocks right after the build, which is the partial-recompute adversary.
 
-This raises the floor, and it is worth *not* overclaiming: it proves a prover once had
-the memory, not that it still does. Nothing stops it freeing the buffer the instant the
-build finishes, which is exactly the `partial-recompute` cheat. Treat it as a property of
-the design, not a second detector.
+### Evidence
 
-### A first, preliminary reading
+One H100 session (`partial-recompute`: 4 GiB buffer, `k=262,144`, 16,384 lanes, `p=16`)
+measured the partial-recompute adversary. With `t=2` it answered wrong on every
+challenge at every discarded fraction tested, down to 0.1%, because rebuilding a block
+needs first-pass values that nobody kept. With `t=1` it answered correctly but slowly:
+3.8x honest with 0.1% discarded, and 34x with 10%. So `t >= 2` is the default.
 
-One session in the container (64 MiB buffer, `t=2`, `p=1`, `k=4096`, `lanes=32`), with
-both numbers taken from the *same* session as ADR 0003 requires:
-
-| quantity | measured |
-|---|---|
-| honest challenge, p50 | 496 us |
-| build throughput at `t=2` | ~1.2 GiB/s (64 MiB in 0.053 s) |
-| one block rebuild, hot cache | 0.30 us |
-
-A cheat holding fraction `f` of the blocks faces about `4096*(1-f)` misses per challenge,
-so the rebuild bill alone is:
-
-- `f = 0.5` — ~2048 misses, ~608 us, already **~2.2x honest** before any cascade.
-- `f = 0.9` — ~410 misses, ~122 us, only **~1.25x honest**.
-
-Both are *lower* bounds: the 0.30 us figure is a hot-cache floor with no cascade and no
-cache misses, so the real cheat pays more. Read the two rows together and the shape of
-the open question is already visible — deep memory cuts are caught comfortably, and the
-contested region is a prover shaving a *small* fraction, where the separation may sit
-inside the noise floor. That is the same frontier the compression adversary probes from
-the other side (see [NEXT_STEPS](../../NEXT_STEPS.md)), and it is why point 1 needs a
-measured curve rather than a single operating point.
-
-These numbers are session-local and preliminary: they come from a build benchmark and an
-honest run, not from the `partial-recompute` adversary, which is what will actually
-measure the cascade.
-
-### The measured curve
-
-One session on one H100 SXM (4096 MiB buffer, `k=262144`, 16,384 lanes, tree fold,
-`p=16`), with honest re-measured before every point. The cheat keeps a random fraction
-of blocks on the card, rebuilds the rest on 23 host threads, and gets 65,536 block
-computations per thread per challenge before it gives up. Full method and limits are in
-`partial-recompute`.
-
-| Kept | `t=1`: × honest, wrong answers | `t=2`: × honest, wrong answers |
-|---|---|---|
-| 1.000 | 1.15×, 0/30 | 1.10×, 0/30 |
-| 0.999 | 3.79×, 0/30 | 1,637×, 30/30 |
-| 0.990 | 7.83×, 0/30 | 4,026×, 30/30 |
-| 0.900 | 34.0×, 0/30 | 30,091×, 30/30 |
-| 0.500 | 1,449×, 30/30 | 146,786×, 30/30 |
-
-Two readings follow. At `t=1` a missing block costs about one block computation, since
-what it depends on was usually kept, so the penalty is proportional to the discarded
-blocks a challenge reads. That is a timing signal, and it separates at 0.1% discarded
-here, but it has a floor somewhere below that. At `t=2` a missing block needs its own
-first-pass value, which nobody kept, and the rebuild pulls in most of the first pass, so
-the cheat cannot answer correctly within any budget that fits the stopwatch. That moves
-the recompute defense back from timing to correctness, which the context section above
-did not expect. It is the strongest argument for keeping `t >= 2` as the default.
-
-The preliminary hot-cache estimate above, 0.30 µs per block with no cascade, held
-roughly for `t=1` and was off by four orders of magnitude for `t=2`.
-
-This ADR stays **proposed** until the cost parameters in point 1 are fixed against a
-measured TMTO curve, exactly as its own "done when" requires.
+This ADR stays **proposed** until `m`, `t`, and `p` are fixed.
 
 ## Scope boundary
 
-This step proves **retention of a generated buffer without uploading it**. It does **not**
-yet prove the buffer is tied to the actual model weights — that weight-binding is the
-frontier flagged in [NEXT_STEPS](../../NEXT_STEPS.md); conflating the two would sink this
-decision. Keep this ADR to: memory-hard generation from a short recipe, and the
-recompute-defense migration to timing/TMTO.
+This design proves **retention of a buffer built from a short recipe**. Tying the buffer
+to the actual model weights is a separate item in [NEXT_STEPS](../../NEXT_STEPS.md). This
+ADR covers memory-hard generation from a recipe and how it defends against recompute.
 
 ## Related
 
@@ -338,5 +280,5 @@ recompute-defense migration to timing/TMTO.
   it can't reach the real workload.
 - [ADR 0006](0006-chacha20-vendored-vs-dependency.md) — the send-buffer cipher decision
   this revisits for the build-buffer scope.
-- [NEXT_STEPS](../../NEXT_STEPS.md) — the roadmap items this ADR covers ("Design the
-  generator", "Prototype it on CPU").
+- [NEXT_STEPS](../../NEXT_STEPS.md) — open work on the generator's parameters and on
+  building it on the GPU.
