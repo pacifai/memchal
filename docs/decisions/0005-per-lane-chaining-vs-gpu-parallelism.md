@@ -48,4 +48,4 @@ degrade to no hardness.
 ## Related
 [ADR 0003](0003-timing-detector-scope-and-measurement.md) (chain depth = k/lanes),
 [ADR 0004](0004-adversary-taxonomy-and-defenses.md) (the defense in the taxonomy),
-[prefetch-needs-pattern](../investigations/prefetch-needs-pattern/) (measured cost).
+`prefetch-needs-pattern` (measured cost).

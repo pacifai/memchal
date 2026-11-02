@@ -297,7 +297,7 @@ One session on one H100 SXM (4096 MiB buffer, `k=262144`, 16,384 lanes, tree fol
 `p=16`), with honest re-measured before every point. The cheat keeps a random fraction
 of blocks on the card, rebuilds the rest on 23 host threads, and gets 65,536 block
 computations per thread per challenge before it gives up. Full method and limits are in
-[partial-recompute](../investigations/partial-recompute/README.md).
+`partial-recompute`.
 
 | Kept | `t=1`: × honest, wrong answers | `t=2`: × honest, wrong answers |
 |---|---|---|

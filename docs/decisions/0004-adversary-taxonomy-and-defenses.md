@@ -60,7 +60,7 @@ specifically.
 - **prefetch** is a **strawman in the cached regime** (its `madvise`-storm overhead
   loses to a plain mmap read) and a **real ~4× attack when starved**; the defense
   removes the edge only where the attack exists. See
-  [prefetch-needs-pattern](../investigations/prefetch-needs-pattern/). The chain floor
+  `prefetch-needs-pattern`. The chain floor
   is a floor, not a cure (an attacker can still pipeline `k/lanes` probes across lanes),
   and chaining costs the honest prover ~3–4× (pointer-chasing kills MLP).
 - **precompute** needs the verifier to give it offline time; our tight benchmark loop
@@ -70,8 +70,8 @@ specifically.
   (`run_trials.py --gen/--chain/--nonce/--gap-us`), not only visible in the demo.
 
 ## Related
-Investigations: [disk-is-syscalls](../investigations/disk-is-syscalls/),
-[mmap-needs-ram](../investigations/mmap-needs-ram/),
-[prefetch-needs-pattern](../investigations/prefetch-needs-pattern/). The send-buffer
+Investigations: `disk-is-syscalls`,
+`mmap-needs-ram`,
+`prefetch-needs-pattern`. The send-buffer
 vs build-buffer rationale and the weight-bound goal are in the NEXT_STEPS roadmap
 ("Next — proving residency of the real workload").

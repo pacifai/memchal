@@ -2,8 +2,11 @@
 
 Short records of the decisions that bear directly on the PoC's logic and claims.
 Read these before changing the challenge math, the honest-baseline guarantee, or
-what the timing detector is said to establish. Each is backed by the
-[investigations](../investigations/).
+what the timing detector is said to establish.
+
+Names in backticks such as `disk-is-syscalls` identify the investigations behind a
+claim: the maintainers' private lab notes, each with its question, script, and raw
+results.
 
 (Tooling/environment choices — containerization, JSON output, Python aggregation —
 are documented in [`CLAUDE.md`](../../CLAUDE.md) and `README.md`, not here.)
