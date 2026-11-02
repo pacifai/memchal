@@ -115,12 +115,15 @@ def run_one(port: int, k: int, a, out_json: str) -> dict:
            "--n", str(a.n), "--warmup", str(a.warmup),
            "--gen", a.gen, "--nonce", a.nonce, "--gap-us", str(a.gap_us),
            "--csv", "/dev/null", "--json", out_json, "--label", a.label]
-    # floor is k=0 (no probes) so chaining is meaningless there; skip it to avoid
-    # the k/lanes>=16 chain-depth floor tripping on the floor mode.
-    if a.chain == "dependent" and k > 0:
-        cmd += ["--chain", "dependent"]
+    # floor is k=0 (no probes), so chaining is meaningless there. Pass the flag
+    # either way: the verifier defaults to dependent, and k=0 would trip its
+    # k/lanes>=16 chain-depth check.
+    cmd += ["--chain", a.chain if k > 0 else "independent"]
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-    return m.load_json(out_json)
+    d = m.load_json(out_json)
+    if d["result"]["samples"] != a.n:
+        sys.exit(f"verifier returned {d['result']['samples']} of {a.n} samples ({out_json})")
+    return d
 
 
 # ---------------------------------------------------------------------------

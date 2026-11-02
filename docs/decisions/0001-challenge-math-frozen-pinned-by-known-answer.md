@@ -3,7 +3,7 @@
 **Status:** accepted
 
 ## Context
-`common.hpp`'s `answer_lane_t` / `answer_challenge_t` (and `splitmix64`, `mix64`,
+`challenge.hpp`'s `answer_lane_t` / `answer_challenge_t` (and `splitmix64`, `mix64`,
 `map_index`, `fill_random`) are the single source of truth for the challenge:
 prover, cheating prover, and verifier all call the exact same code, so a *correct*
 answer is byte-identical regardless of where the bytes came from. That property is
@@ -11,7 +11,7 @@ what makes the design sound; a silent change to it would invalidate every publis
 number without any test failing.
 
 ## Decision
-Treat the challenge math in `common.hpp` as **frozen** for stabilization — no
+Treat the challenge math in `challenge.hpp` as **frozen** for stabilization — no
 changes to those functions. Pin them with a **known-answer test** (`tests/known_answer.cpp`)
 that asserts fixed `(seed, nonce, k, lanes)` vectors produce fixed hashes. The
 values are pure 64-bit integer arithmetic (no memory byte-order dependence), so

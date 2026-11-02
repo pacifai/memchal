@@ -1,12 +1,10 @@
 // net.hpp — the wire protocol and the host-only plumbing around it.
 //
-// Split out of common.hpp so that challenge.hpp (the math) can be included from
-// a CUDA translation unit. Everything here is host-only by nature: POSIX
+// Kept apart from challenge.hpp (the math) so the math can be included from a
+// CUDA translation unit. Everything here is host-only by nature: POSIX
 // sockets, the build-buffer recipe and the Argon2d generator behind it
 // (argon2d.hpp, which uses std::thread), and /proc readers that report what the
 // OS thinks this process is doing. None of it has a device analog.
-//
-// The challenge math lives in challenge.hpp. common.hpp includes both.
 #pragma once
 #include <cstdint>
 #include <cstddef>
@@ -68,6 +66,49 @@ static inline Recipe recipe_from_msg(const RecipeMsg& m) {
     r.m_kib = m.m_kib; r.t = m.t; r.p = m.p;
     return r;
 }
+// Limits on what a verifier may ask for, checked before a prover allocates
+// anything, so a malformed Hello can't wrap a size computation, exhaust memory,
+// or make a prover start unbounded threads.
+constexpr uint64_t kMaxBufferBytes = 1ULL << 40;   // 1 TiB
+constexpr uint32_t kMaxLanes       = 1u << 24;
+constexpr uint32_t kMaxBuildPasses = 255;          // argon2d_rebuild.hpp keys its memo on an 8-bit pass
+constexpr uint32_t kMaxBuildLanes  = 256;          // one host thread per build lane
+
+static inline bool hello_ok(const Hello& h, char* err, size_t n) {
+    if (h.magic != kMagic) { snprintf(err, n, "bad magic"); return false; }
+    if (h.version < 1 || h.version > kWireVersion) {
+        snprintf(err, n, "unsupported wire version %u (want 1 to %u)", h.version, kWireVersion);
+        return false;
+    }
+    if (h.buffer_bytes < 8 || h.buffer_bytes > kMaxBufferBytes) {
+        snprintf(err, n, "buffer size %llu is outside 8 bytes to %llu GiB",
+                 (unsigned long long)h.buffer_bytes, (unsigned long long)(kMaxBufferBytes >> 30));
+        return false;
+    }
+    if (h.flags & ~kFlagBuild) { snprintf(err, n, "unknown hello flags 0x%x", h.flags); return false; }
+    return true;
+}
+
+static inline bool recipe_ok(const Recipe& r, char* err, size_t n) {
+    if (r.t < 1 || r.t > kMaxBuildPasses) {
+        snprintf(err, n, "recipe passes t=%u is outside 1 to %u", r.t, kMaxBuildPasses);
+        return false;
+    }
+    if (r.p < 1 || r.p > kMaxBuildLanes) {
+        snprintf(err, n, "recipe lanes p=%u is outside 1 to %u", r.p, kMaxBuildLanes);
+        return false;
+    }
+    return true;
+}
+
+static inline bool challenge_ok(const Challenge& c, char* err, size_t n) {
+    if (c.lanes > kMaxLanes) {
+        snprintf(err, n, "challenge lanes %u is above %u", c.lanes, kMaxLanes);
+        return false;
+    }
+    return true;
+}
+
 static inline RecipeMsg msg_from_recipe(const Recipe& r) {
     RecipeMsg m{};
     memcpy(m.key, r.key, sizeof m.key);

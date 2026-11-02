@@ -78,18 +78,14 @@ curve.
 - `src/challenge.hpp` — the challenge math and nothing else, with no POSIX
   headers, so it can be included from a `.cu` translation unit. `mulhi64` is the
   one operation with two spellings: the 128-bit multiply on the host,
-  `__umul64hi` on the device, behind `MC_HOST_DEVICE`.
+  `__umul64hi` on the device, behind `MC_HOST_DEVICE`. The single source of
+  truth, called by the prover, the cheating prover, and the verifier. **Frozen**:
+  don't change it; a known-answer test pins it
+  ([ADR 0001](docs/decisions/0001-challenge-math-frozen-pinned-by-known-answer.md)).
 - `src/net.hpp` — the wire structs (including the build-buffer `RecipeMsg`, the
   `kFlagBuild` Hello flag, and `kWireVersion`), the socket helpers, the `Source`
   reader the CPU provers ingest through, and the `/proc` readers. It includes
   `argon2d.hpp`. Host only; none of it has a device analog.
-- `src/common.hpp` — a shim including both, so every host-side caller is
-  unchanged. Include `challenge.hpp` alone from CUDA. Historically this file held
-  both halves (`answer_lane_t`,
-  `answer_challenge_t`, `splitmix64`, `mix64`, `map_index`, `fill_buffer`). The
-  single source of truth, called by the prover, the cheating prover, and the
-  verifier. **Frozen** — don't change it; a known-answer test pins it
-  ([ADR 0001](docs/decisions/0001-challenge-math-frozen-pinned-by-known-answer.md)).
 - `src/chacha20.hpp` — a small vendored ChaCha20 (RFC 8439) for keyed-stream buffer
   generation.
 - `src/argon2d.hpp` — vendored Argon2d (RFC 9106) for the build-buffer design: the
@@ -191,10 +187,14 @@ core-affinity questions (see `NEXT_STEPS.md`).
   intended, add new test vectors and say so loudly.
 - **Keep the math free of POSIX.** `challenge.hpp` must stay includable from a
   `.cu` file, so sockets and `/proc` belong in `net.hpp`.
-- **Never fold lane hashes out of order.** The cross-lane fold is a sequential
-  chain, so a tree or warp-shuffle reduction silently changes every answer.
-  `fold_seed`, `lane_samples`, and `lane_fold_term` exist so there is one
-  definition of that order.
+- **Fold lane hashes only through the functions in `challenge.hpp`.** The
+  sequential fold is a chain in lane order, and the tree fold pairs lanes in a
+  fixed order. Any other reduction, such as a warp shuffle, silently changes
+  every answer. `fold_seed`, `lane_fold_term`, `tree_combine`, and `tree_pad`
+  are the one definition of each order.
+- **Keep each language in its own file.** Don't embed Python, JavaScript, or any
+  other language in a shell script, whether through a heredoc or `python3 -c`.
+  Put the code in its own file next to the script and call it.
 - **Compare within a session only.** Never present absolute microseconds as
   portable; use the harness's ratios or `honest − floor` with propagated error.
 - **Don't tune parameters to make results look better.** A cheat that isn't caught

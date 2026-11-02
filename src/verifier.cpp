@@ -5,11 +5,13 @@
 // The latency distribution is the actual result: an honest prover with the data
 // resident in fast memory shows a low, tight profile; a prover that dropped the
 // data, recomputes it, or let it swap to disk shows misses / a fat tail / errors.
-#include "common.hpp"
+#include "challenge.hpp"
+#include "net.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
+#include <cerrno>
 #include <vector>
 #include <algorithm>
 #include <cmath>
@@ -49,6 +51,7 @@ static size_t tail_count(double p, size_t n) {
 // JSON) rather than letting a single sample masquerade as a percentile.
 static constexpr size_t kMinTail = 10;
 
+enum class Gen { SPLITMIX64, CHACHA20 };
 enum class NonceMode { SEQUENTIAL, RANDOM };
 
 struct Args {
@@ -101,7 +104,6 @@ static bool g_gap_random = false;
 // boundaries so no block is shared. On one core a 4 GiB buffer took seconds
 // before the upload could start, which a live demo spent waiting.
 static void fill_chacha_parallel(uint64_t* buf, uint64_t num_words, const uint8_t key[32]) {
-    static const uint8_t zero_nonce[12] = {};
     size_t nbytes = (size_t)num_words * 8;
     size_t blocks = (nbytes + 63) / 64;
     unsigned t = std::thread::hardware_concurrency();
@@ -115,10 +117,35 @@ static void fill_chacha_parallel(uint64_t* buf, uint64_t num_words, const uint8_
         if (b0 >= blocks) break;
         size_t off = b0 * 64;
         size_t len = std::min(nbytes - off, per * 64);
-        pool.emplace_back([=] { chacha20_fill((uint8_t*)buf + off, len, key, zero_nonce, b0); });
+        pool.emplace_back([=] { chacha20_fill((uint8_t*)buf + off, len, key, b0); });
     }
     for (auto& th : pool) th.join();
 }
+
+// An unpredictable stream of 64-bit values: ChaCha20 keystream under a fresh
+// random key. The prover never sees the key, so it can't predict the next value.
+struct KeyStream {
+    uint8_t key[32];
+    uint8_t block[64];
+    uint32_t counter = 0;
+    unsigned used = 64;
+
+    KeyStream() {
+        std::random_device rd;
+        for (int i = 0; i < 8; ++i) {
+            uint32_t w = rd();
+            for (int b = 0; b < 4; ++b) key[i * 4 + b] = (uint8_t)(w >> (8 * b));
+        }
+    }
+    uint64_t next() {
+        static const uint8_t zero_nonce[12] = {};
+        if (used == 64) { chacha20_block(key, zero_nonce, counter++, block); used = 0; }
+        uint64_t v = 0;
+        for (int b = 0; b < 8; ++b) v |= (uint64_t)block[used + b] << (8 * b);
+        used += 8;
+        return v;
+    }
+};
 
 static void gap_sleep(uint32_t gap_us) {
     if (gap_us == 0) return;
@@ -167,66 +194,132 @@ struct Stream {
     bool wants_map(uint64_t idx) const { return f && map_every && (idx % map_every) == 0; }
 };
 
+static const char kUsage[] =
+    "usage: verifier [--flag value]...\n"
+    "  --host ADDR --port N          prover address (default 127.0.0.1:%u)\n"
+    "  --mb MIB                      buffer size\n"
+    "  --k N --lanes N               probes per challenge, and parallel lanes\n"
+    "  --n N --warmup N              measured and unmeasured challenges\n"
+    "  --gen chacha|splitmix64|argon2d   buffer generator (default chacha)\n"
+    "  --build-t T --build-p P       Argon2d passes and lanes (with --gen argon2d)\n"
+    "  --chain dependent|independent     offset chaining (default dependent)\n"
+    "  --fold sequential|tree        cross-lane fold (default sequential)\n"
+    "  --nonce random|sequential     nonce source (default random)\n"
+    "  --verify-every N              check a random 1 in N answers (default 1, all)\n"
+    "  --gap-us N --gap-dist fixed|exp   pause between challenges\n"
+    "  --csv PATH --json PATH --label TEXT --seed N\n"
+    "  --stream PATH|- --probe-map N live events for the demo\n";
+
+[[noreturn]] static void usage_error(const char* fmt, const char* a, const char* b = "") {
+    fprintf(stderr, "[verifier] ");
+    fprintf(stderr, fmt, a, b);
+    fprintf(stderr, "\n\n");
+    fprintf(stderr, kUsage, kDefaultPort);
+    exit(2);
+}
+
+static uint64_t parse_uint(const char* flag, const char* v) {
+    char* end = nullptr;
+    errno = 0;
+    unsigned long long x = strtoull(v, &end, 0);
+    if (errno || end == v || *end || v[0] == '-') usage_error("%s: not a number: %s", flag, v);
+    return x;
+}
+
+static uint32_t parse_u32(const char* flag, const char* v) {
+    uint64_t x = parse_uint(flag, v);
+    if (x > UINT32_MAX) usage_error("%s: out of range: %s", flag, v);
+    return (uint32_t)x;
+}
+
+// Picks one of `names` (nullptr-terminated) and returns its index. Rejecting
+// anything else matters: a typo must not quietly select a weaker setting.
+static int parse_choice(const char* flag, const char* v, const char* const* names) {
+    for (int i = 0; names[i]; ++i)
+        if (!strcmp(v, names[i])) return i;
+    usage_error("%s: unknown value: %s", flag, v);
+}
+
 static Args parse(int argc, char** argv) {
     Args a;
-    for (int i = 1; i < argc - 1; i += 2) {
-        const char* k = argv[i]; const char* v = argv[i + 1];
+    for (int i = 1; i < argc; i += 2) {
+        const char* k = argv[i];
+        if (!strcmp(k, "--help") || !strcmp(k, "-h")) {
+            printf(kUsage, kDefaultPort);
+            exit(0);
+        }
+        if (i + 1 >= argc) usage_error("%s: missing value", k);
+        const char* v = argv[i + 1];
         if      (!strcmp(k, "--host"))   a.host = v;
-        else if (!strcmp(k, "--port"))   a.port = (uint16_t)atoi(v);
-        else if (!strcmp(k, "--mb"))     a.mb = atof(v);
-        else if (!strcmp(k, "--k"))      a.k = (uint32_t)strtoul(v, nullptr, 10);
-        else if (!strcmp(k, "--lanes"))  a.lanes = (uint32_t)strtoul(v, nullptr, 10);
-        else if (!strcmp(k, "--n"))      a.n = (uint32_t)strtoul(v, nullptr, 10);
-        else if (!strcmp(k, "--warmup")) a.warmup = (uint32_t)strtoul(v, nullptr, 10);
+        else if (!strcmp(k, "--port")) {
+            uint64_t port = parse_uint(k, v);
+            if (port == 0 || port > 65535) usage_error("%s: out of range: %s", k, v);
+            a.port = (uint16_t)port;
+        }
+        else if (!strcmp(k, "--mb")) {
+            char* end = nullptr;
+            a.mb = strtod(v, &end);
+            if (end == v || *end || !(a.mb > 0)) usage_error("%s: not a positive number: %s", k, v);
+        }
+        else if (!strcmp(k, "--k"))      a.k = parse_u32(k, v);
+        else if (!strcmp(k, "--lanes"))  a.lanes = parse_u32(k, v);
+        else if (!strcmp(k, "--n"))      a.n = parse_u32(k, v);
+        else if (!strcmp(k, "--warmup")) a.warmup = parse_u32(k, v);
         else if (!strcmp(k, "--csv"))    a.csv = v;
         else if (!strcmp(k, "--json"))   a.json = v;
         else if (!strcmp(k, "--label"))  a.label = v;
-        else if (!strcmp(k, "--seed"))   a.seed = strtoull(v, nullptr, 0);
+        else if (!strcmp(k, "--seed"))   a.seed = parse_uint(k, v);
         else if (!strcmp(k, "--gen")) {
-            a.build = false;
-            if      (!strcmp(v, "argon2d")) { a.build = true; }
-            else if (!strcmp(v, "chacha20") || !strcmp(v, "chacha")) a.gen = Gen::CHACHA20;
-            else                                                      a.gen = Gen::SPLITMIX64;
+            static const char* const names[] = {"chacha", "chacha20", "splitmix64", "argon2d", nullptr};
+            int g = parse_choice(k, v, names);
+            a.build = (g == 3);
+            a.gen = (g == 2) ? Gen::SPLITMIX64 : Gen::CHACHA20;
         }
-        else if (!strcmp(k, "--build-t")) a.build_t = (uint32_t)strtoul(v, nullptr, 10);
-        else if (!strcmp(k, "--build-p")) a.build_p = (uint32_t)strtoul(v, nullptr, 10);
+        else if (!strcmp(k, "--build-t")) a.build_t = parse_u32(k, v);
+        else if (!strcmp(k, "--build-p")) a.build_p = parse_u32(k, v);
         else if (!strcmp(k, "--stream")) a.stream = v;
-        else if (!strcmp(k, "--probe-map")) a.probe_map_every = (uint32_t)strtoul(v, nullptr, 10);
+        else if (!strcmp(k, "--probe-map")) a.probe_map_every = parse_u32(k, v);
         else if (!strcmp(k, "--chain")) {
-            a.chained = (!strcmp(v, "dependent"));
+            static const char* const names[] = {"dependent", "independent", nullptr};
+            a.chained = (parse_choice(k, v, names) == 0);
         }
         else if (!strcmp(k, "--verify-every")) {
-            a.verify_every = (uint32_t)strtoul(v, nullptr, 10);
+            a.verify_every = parse_u32(k, v);
             if (a.verify_every == 0) a.verify_every = 1;
         }
         else if (!strcmp(k, "--fold")) {
             // The tree fold is a different protocol with different answers, so
             // it is opt-in and travels on the wire. Default stays sequential.
-            a.tree = (!strcmp(v, "tree"));
+            static const char* const names[] = {"sequential", "tree", nullptr};
+            a.tree = (parse_choice(k, v, names) == 1);
         }
         else if (!strcmp(k, "--nonce")) {
-            if (!strcmp(v, "random")) a.nonce_mode = NonceMode::RANDOM;
-            else                     a.nonce_mode = NonceMode::SEQUENTIAL;
+            static const char* const names[] = {"random", "sequential", nullptr};
+            a.nonce_mode = (parse_choice(k, v, names) == 0) ? NonceMode::RANDOM
+                                                             : NonceMode::SEQUENTIAL;
         }
-        else if (!strcmp(k, "--gap-us")) {
-            a.gap_us = (uint32_t)strtoul(v, nullptr, 10);
-        }
+        else if (!strcmp(k, "--gap-us"))   a.gap_us = parse_u32(k, v);
         else if (!strcmp(k, "--gap-dist")) {
-            a.gap_random = !strcmp(v, "exp");
+            static const char* const names[] = {"fixed", "exp", nullptr};
+            a.gap_random = (parse_choice(k, v, names) == 1);
         }
+        else usage_error("unknown flag: %s", k);
     }
     return a;
 }
 
 // Run `count` challenges at fixed k, return latencies (ns) and #errors.
+// Returns false if the connection fails partway, so a prover that crashes or
+// hangs up can't pass for one that answered every challenge.
 // `st` (optional) streams one event per challenge for the browser demo; `seq` is
 // the running challenge counter across warmup+run so map sampling is stable.
-// `chained` selects the data-dependent index path (see common.hpp; default on).
-// `nonce_mode` selects sequential or random/CSPRNG nonces (random is the default).
+// `chained` selects the data-dependent index path (see challenge.hpp; default on).
+// `nonces` draws random nonces; without it nonces are sequential from `nonce_base`.
+// `checks` picks which answers to check when verify_every > 1.
 // `gap_us` sleeps that many microseconds after recording each challenge latency
 // (simulates a periodic verifier; outside the timed window). With --gap-dist exp
 // it is the mean of an exponential draw instead; see gap_sleep().
-static void run_batch(int fd, const uint64_t* buf, uint64_t num_words,
+static bool run_batch(int fd, const uint64_t* buf, uint64_t num_words,
                       uint32_t k, uint32_t lanes, uint32_t count,
                       uint64_t nonce_base, std::vector<double>* out_ns, uint64_t* errors,
                       Stream* st = nullptr, const char* phase = "r", uint64_t* seq = nullptr,
@@ -234,33 +327,16 @@ static void run_batch(int fd, const uint64_t* buf, uint64_t num_words,
                       bool tree = false,
                       uint32_t verify_every = 1,
                       uint64_t* checked = nullptr,
-                      NonceMode nonce_mode = NonceMode::SEQUENTIAL,
-                      uint32_t gap_us = 0,
-                      uint8_t* cc20_key = nullptr,   // 32-byte key for random nonces
-                      uint32_t* cc20_ctr = nullptr)  // counter for random nonces
+                      KeyStream* nonces = nullptr,
+                      KeyStream* checks = nullptr,
+                      uint32_t gap_us = 0)
 {
     for (uint32_t i = 0; i < count; ++i) {
         Challenge ch{}; ch.k = k; ch.lanes = lanes;
         if (chained) ch.flags |= kFlagChained;
         if (tree)    ch.flags |= kFlagTreeFold;
 
-        // Nonce selection: sequential (original) or CSPRNG (unpredictable).
-        if (nonce_mode == NonceMode::RANDOM && cc20_key && cc20_ctr) {
-            // Draw 8 bytes of ChaCha20 keystream as the nonce.
-            static const uint8_t zero_nonce12[12] = {};
-            uint8_t block[64];
-            // Each 64-byte block gives 8 nonces; advance counter every 8 challenges.
-            uint32_t block_idx = *cc20_ctr / 8;
-            uint32_t word_in_block = *cc20_ctr % 8;
-            chacha20_block(cc20_key, zero_nonce12, block_idx, block);
-            uint64_t nonce_val = 0;
-            for (int b = 0; b < 8; ++b)
-                nonce_val |= ((uint64_t)block[word_in_block * 8 + b]) << (b * 8);
-            ch.nonce = nonce_val;
-            (*cc20_ctr)++;
-        } else {
-            ch.nonce = nonce_base + i;
-        }
+        ch.nonce = nonces ? nonces->next() : nonce_base + i;
         uint64_t idx = seq ? (*seq)++ : i;
         bool map = st && st->wants_map(idx);
 
@@ -269,10 +345,9 @@ static void run_batch(int fd, const uint64_t* buf, uint64_t num_words,
         // Sampling keeps the timing series dense while the check stays
         // affordable. It weakens the correctness detector in proportion: a
         // prover wrong on a fraction f of challenges is caught with probability
-        // 1-(1-f)^(checked). Against `fake`, which is wrong on every challenge,
-        // one check is enough. The real fix is opening a subset of lanes from
-        // the Merkle root, which is still owed.
-        bool do_check = (verify_every <= 1) || (i % verify_every == 0);
+        // 1-(1-f)^(checked). That holds only if the prover can't tell which
+        // answers get checked, so the choice is random, not every Nth.
+        bool do_check = (verify_every <= 1) || (checks->next() % verify_every == 0);
         if (map) do_check = true;   // a probe map is only meaningful if computed
 
         uint64_t expect = 0;
@@ -307,9 +382,9 @@ static void run_batch(int fd, const uint64_t* buf, uint64_t num_words,
         }
 
         auto t0 = Clock::now();
-        if (!send_all(fd, &ch, sizeof(ch))) { fprintf(stderr, "send fail\n"); return; }
+        if (!send_all(fd, &ch, sizeof(ch))) return false;
         Response r{};
-        if (!recv_all(fd, &r, sizeof(r))) { fprintf(stderr, "recv fail\n"); return; }
+        if (!recv_all(fd, &r, sizeof(r))) return false;
         auto t1 = Clock::now();
 
         bool ok = do_check ? (r.hash == expect) : true;
@@ -341,10 +416,16 @@ static void run_batch(int fd, const uint64_t* buf, uint64_t num_words,
         // This is strictly outside the timed window (measured above).
         gap_sleep(gap_us);
     }
+    return true;
 }
 
 int main(int argc, char** argv) {
     Args a = parse(argc, argv);
+    if (a.lanes > kMaxLanes) {
+        fprintf(stderr, "[verifier] ERROR: --lanes %u is above the provers' limit of %u\n",
+                a.lanes, kMaxLanes);
+        return 2;
+    }
 
     size_t bytes = (size_t)llround(a.mb * 1048576.0);
     bytes = (bytes + 7) & ~size_t(7);
@@ -357,6 +438,11 @@ int main(int argc, char** argv) {
         recipe.m_kib = (uint32_t)llround(a.mb * 1024.0);
         recipe.t = a.build_t;
         recipe.p = a.build_p;
+        char err[256];
+        if (!recipe_ok(recipe, err, sizeof err)) {
+            fprintf(stderr, "[verifier] ERROR: %s\n", err);
+            return 2;
+        }
         num_words = build_buffer_words(recipe);
         bytes = (size_t)num_words * 8;
         if (num_words == 0) {
@@ -401,21 +487,10 @@ int main(int argc, char** argv) {
            bytes / 1048576.0, a.k, a.lanes, a.n, a.warmup, a.host, a.port, gen_name, chain_name, a.tree ? "tree" : "sequential",
            nonce_name, a.gap_us, gap_dist, a.verify_every);
 
-    // For random nonce mode: derive a 32-byte CSPRNG key from std::random_device.
-    // The key is seeded fresh per run so the prover cannot predict future nonces
-    // by observing past ones.
-    uint8_t cc20_key[32] = {};
-    uint32_t cc20_ctr = 0;
-    if (a.nonce_mode == NonceMode::RANDOM) {
-        std::random_device rd;
-        for (int b = 0; b < 8; ++b) {
-            uint32_t w = rd();
-            cc20_key[b * 4 + 0] = (uint8_t)(w);
-            cc20_key[b * 4 + 1] = (uint8_t)(w >> 8);
-            cc20_key[b * 4 + 2] = (uint8_t)(w >> 16);
-            cc20_key[b * 4 + 3] = (uint8_t)(w >> 24);
-        }
-    }
+    // Fresh keys per run, so the prover can't predict nonces or which answers
+    // get checked from anything it has seen.
+    KeyStream nonce_stream, check_stream;
+    KeyStream* nonces = (a.nonce_mode == NonceMode::RANDOM) ? &nonce_stream : nullptr;
 
     // For --gen chacha: generate a full random 256-bit key from std::random_device.
     // This makes the capacity claim unconditional (not stretched from a 64-bit seed).
@@ -448,7 +523,7 @@ int main(int argc, char** argv) {
     } else if (a.gen == Gen::CHACHA20) {
         fill_chacha_parallel(buf, num_words, chacha_buf_key);
     } else {
-        fill_buffer(buf, num_words, a.seed, a.gen);
+        fill_random(buf, num_words, a.seed);
     }
     double gen_s = std::chrono::duration<double>(Clock::now() - gen0).count();
     if (a.build)
@@ -513,19 +588,23 @@ int main(int argc, char** argv) {
 
     // Warmup (fault in pages, warm caches/branch predictors) — not measured.
     uint64_t werr = 0;
-    run_batch(fd, buf, num_words, a.k, a.lanes, a.warmup, base, nullptr, &werr,
+    bool complete = run_batch(fd, buf, num_words, a.k, a.lanes, a.warmup, base, nullptr, &werr,
               stream.f ? &stream : nullptr, "w", &seq, a.chained, a.tree, a.verify_every, &checked,
-              a.nonce_mode, a.gap_us,
-              (a.nonce_mode == NonceMode::RANDOM) ? cc20_key : nullptr, &cc20_ctr);
+              nonces, &check_stream, a.gap_us);
     base += a.warmup;
 
     // Measured run.
     std::vector<double> lat; lat.reserve(a.n);
     uint64_t errors = 0;
-    run_batch(fd, buf, num_words, a.k, a.lanes, a.n, base, &lat, &errors,
-              stream.f ? &stream : nullptr, "r", &seq, a.chained, a.tree, a.verify_every, &checked,
-              a.nonce_mode, a.gap_us,
-              (a.nonce_mode == NonceMode::RANDOM) ? cc20_key : nullptr, &cc20_ctr);
+    if (complete)
+        complete = run_batch(fd, buf, num_words, a.k, a.lanes, a.n, base, &lat, &errors,
+                             stream.f ? &stream : nullptr, "r", &seq, a.chained, a.tree, a.verify_every, &checked,
+                             nonces, &check_stream, a.gap_us);
+    if (!complete) {
+        fprintf(stderr, "[verifier] ERROR: connection lost after %zu of %u measured challenges; "
+                        "no results written\n", lat.size(), a.n);
+        return 1;
+    }
 
     // Stats.
     std::vector<double> s = lat; std::sort(s.begin(), s.end());

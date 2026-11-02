@@ -1,6 +1,6 @@
 // prover.cpp — receives a large random buffer, pins it in RAM, and answers
 // memory challenges. The design keeps the answer path GPU-portable: a flat
-// word buffer plus the pure functions in common.hpp.
+// word buffer plus the pure functions in challenge.hpp.
 //
 // Memory pinning: we mmap an anonymous region, prefault every page, and mlock()
 // it so the kernel may never swap it out. We do not trust mlock()'s return value
@@ -12,7 +12,8 @@
 // GPU note: the on-GPU analog of mlock is simply cudaMalloc — VRAM is not
 // swappable. For host staging use cudaHostAlloc(cudaHostAllocDefault) pinned
 // memory so H2D copies are fast and non-pageable.
-#include "common.hpp"
+#include "challenge.hpp"
+#include "net.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -91,14 +92,9 @@ static void serve(int cfd) {
     set_low_latency(cfd);
 
     Hello hello{};
+    char err[256];
     if (!recv_all(cfd, &hello, sizeof(hello))) { fprintf(stderr, "[prover] no hello\n"); return; }
-    if (hello.magic != kMagic) { fprintf(stderr, "[prover] bad magic\n"); return; }
-
-    if (hello.version > kWireVersion) {
-        fprintf(stderr, "[prover] unsupported wire version %u (max %u)\n",
-                hello.version, kWireVersion);
-        return;
-    }
+    if (!hello_ok(hello, err, sizeof err)) { fprintf(stderr, "[prover] refusing: %s\n", err); return; }
     const bool build = (hello.flags & kFlagBuild) != 0;
 
     size_t bytes = (size_t)hello.buffer_bytes;
@@ -108,6 +104,9 @@ static void serve(int cfd) {
     RecipeMsg rmsg{};
     if (build && !recv_all(cfd, &rmsg, sizeof(rmsg))) {
         fprintf(stderr, "[prover] no recipe\n"); return;
+    }
+    if (build && !recipe_ok(recipe_from_msg(rmsg), err, sizeof err)) {
+        fprintf(stderr, "[prover] refusing: %s\n", err); return;
     }
     printf("[prover] %s %.2f MiB (%llu words)...\n",
            build ? "building" : "receiving", bytes / 1048576.0,
@@ -162,6 +161,7 @@ static void serve(int cfd) {
         Challenge ch{};
         if (!recv_all(cfd, &ch, sizeof(ch))) break;
         if (ch.flags & kFlagTerminate) break;
+        if (!challenge_ok(ch, err, sizeof err)) { fprintf(stderr, "[prover] refusing: %s\n", err); break; }
         bool chained = (ch.flags & kFlagChained) != 0;
         bool tree    = (ch.flags & kFlagTreeFold) != 0;
         uint64_t hash;

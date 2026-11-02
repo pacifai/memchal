@@ -17,7 +17,8 @@
 // handles every allocation kind (Device, Managed with its prefetch, HostMapped,
 // Split, and fake's discarded tail). So there is one ingestion loop.
 #pragma once
-#include "common.hpp"
+#include "challenge.hpp"
+#include "net.hpp"
 #include "gpu_answer.hpp"
 #include <chrono>
 #include <cstdlib>
@@ -48,6 +49,7 @@ static inline bool host_build_from_wire(int cfd, const Hello& hello, HostBuild& 
         return false;
     }
     hb.recipe = recipe_from_msg(rmsg);
+    if (!recipe_ok(hb.recipe, err, errlen)) return false;
     const uint64_t want = build_buffer_bytes(hb.recipe);
     if (hello.buffer_bytes != want) {
         snprintf(err, errlen, "refusing recipe: it builds %llu bytes (m=%u KiB t=%u p=%u) "

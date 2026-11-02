@@ -2,7 +2,7 @@
 //
 // Provides:
 //   chacha20_block()  — single 64-byte keystream block (counter-mode ARX).
-//   chacha20_fill()   — fills an arbitrary number of bytes by chaining blocks.
+//   chacha20_fill()   — any number of keystream bytes, with a 64-bit block counter.
 //
 // This is a table-free, pure-ARX implementation derived from the RFC 8439
 // reference description (§2.1 quarter round, §2.3 block function).  It has
@@ -102,66 +102,27 @@ static inline void chacha20_block(const uint8_t key[32], const uint8_t nonce[12]
 }
 
 // ---------------------------------------------------------------------------
-// chacha20_fill — concatenate ChaCha20 blocks to fill `nbytes` of output.
+// chacha20_fill — `nbytes` of keystream under `key`, starting at block
+// `start_block`.
 //
-// out[nbytes]   : destination
-// nbytes        : number of bytes to produce
-// key[32]       : 32-byte key
-// nonce[12]     : 12-byte nonce (see note below for the keyed-fill variant)
-// start_block   : 64-bit starting block index.
-//
-// 64-bit block addressing (beyond the 32-bit RFC counter limit):
-//   The RFC 8439 block function keeps word 12 as a 32-bit counter and
-//   words 13-15 as a 96-bit nonce.  To extend addressing to 2^64 blocks
-//   without altering chacha20_block's state layout, we split the 64-bit
-//   start_block as follows:
-//     word 12 (counter) = low 32 bits of start_block
-//     nonce bytes 0-3   = high 32 bits of start_block (little-endian)
-//     nonce bytes 4-11  = nonce[4..11] passed in (caller-controlled)
-//   This gives unique keystream for any of the 2^64 possible block indices.
-//   The existing RFC 8439 known-answer test uses start_block=1 with a nonce
-//   whose bytes 0-3 happen to be {0,0,0,9}, mapping to counter=1 and
-//   nonce[0..3]={0,0,0,9}
-//   — bit-identical to the RFC layout — so the known-answer test is unaffected.
+// RFC 8439's 32-bit block counter covers only 256 GiB, so this uses the
+// original ChaCha20 layout instead: a 64-bit block counter in state words
+// 12-13 and a zero 64-bit nonce in words 14-15. It reuses chacha20_block() by
+// passing the counter's high half as the first four nonce bytes.
 // ---------------------------------------------------------------------------
 static inline void chacha20_fill(uint8_t* out, size_t nbytes,
-                                 const uint8_t key[32], const uint8_t nonce[12],
-                                 uint64_t start_block) {
+                                 const uint8_t key[32], uint64_t start_block) {
     uint8_t block[64];
+    uint8_t nonce[12] = {};
     size_t written = 0;
-    uint64_t blk = start_block;
-
-    // Build the effective 12-byte nonce: high 32 bits of blk into bytes 0-3,
-    // then the caller's nonce[4..11] into bytes 4-11.
-    uint8_t eff_nonce[12];
-    uint32_t blk_hi = (uint32_t)(blk >> 32);
-    eff_nonce[0] = (uint8_t)(blk_hi);
-    eff_nonce[1] = (uint8_t)(blk_hi >> 8);
-    eff_nonce[2] = (uint8_t)(blk_hi >> 16);
-    eff_nonce[3] = (uint8_t)(blk_hi >> 24);
-    eff_nonce[4]  = nonce[4];  eff_nonce[5]  = nonce[5];
-    eff_nonce[6]  = nonce[6];  eff_nonce[7]  = nonce[7];
-    eff_nonce[8]  = nonce[8];  eff_nonce[9]  = nonce[9];
-    eff_nonce[10] = nonce[10]; eff_nonce[11] = nonce[11];
-
-    while (written < nbytes) {
-        uint32_t ctr_lo = (uint32_t)(blk & 0xFFFFFFFFULL);
-        // Update nonce bytes 0-3 when high word changes (blk increments by 1
-        // each iteration; the high word wraps every 2^32 blocks).
-        uint32_t new_hi = (uint32_t)(blk >> 32);
-        if (new_hi != blk_hi) {
-            blk_hi = new_hi;
-            eff_nonce[0] = (uint8_t)(blk_hi);
-            eff_nonce[1] = (uint8_t)(blk_hi >> 8);
-            eff_nonce[2] = (uint8_t)(blk_hi >> 16);
-            eff_nonce[3] = (uint8_t)(blk_hi >> 24);
-        }
-        chacha20_block(key, eff_nonce, ctr_lo, block);
+    for (uint64_t blk = start_block; written < nbytes; ++blk) {
+        uint32_t hi = (uint32_t)(blk >> 32);
+        for (int b = 0; b < 4; ++b) nonce[b] = (uint8_t)(hi >> (8 * b));
+        chacha20_block(key, nonce, (uint32_t)blk, block);
         size_t take = nbytes - written;
         if (take > 64) take = 64;
         memcpy(out + written, block, take);
         written += take;
-        ++blk;
     }
 }
 

@@ -2,9 +2,8 @@
 //
 // Deliberately free of CUDA types so it can be included by plain g++ code. The
 // implementation lives in gpu_answer.cu, which includes challenge.hpp and
-// cuda_runtime.h and nothing else — no POSIX, no sockets. That separation is
-// the reason common.hpp was split: the server half of the prover needs sockets,
-// the kernel half must not see them.
+// cuda_runtime.h and nothing else — no POSIX, no sockets. The server half of
+// the prover needs sockets; the kernel half must not see them.
 //
 // Every call that can fail takes an (err, errlen) pair and writes a human
 // readable reason, so the server can log why it is refusing to run.
@@ -66,17 +65,6 @@ struct Prover {
     void*     ev_start   = nullptr;   // cudaEvent_t, opaque here
     void*     ev_stop    = nullptr;
 
-    // prefetch cheat: answer in three passes instead of one. See answer().
-    bool      prefetch   = false;
-    uint64_t* d_pf_idx   = nullptr;   // the probe addresses the dry run listed
-    uint64_t* d_pf_val   = nullptr;   // the words fetched for them in one batch
-    uint32_t  pf_cap     = 0;
-
-    // swap cheat: a pinned host copy of the buffer, so the card copy can be
-    // freed between challenges and restored when one arrives.
-    void*     h_swap     = nullptr;
-    bool      swapped_out = false;
-
     // recompute cheat. d_buf holds the kept blocks, packed. d_slot maps each
     // block of the buffer to where its words are: >= 0 is a kept block in
     // d_buf, <= -2 is block (-2 - slot) of d_scratch, rebuilt this challenge,
@@ -99,23 +87,6 @@ struct Prover {
 // Words per Argon2d block. gpu_answer.cu cannot include argon2d.hpp, so the
 // caller checks this against a2::kBlockWords.
 static constexpr uint32_t kRecomputeBlockWords = 128;
-
-// The prefetch cheat. Turns on a three-pass answer: a dry run that lists the
-// probe addresses, one parallel batch that fetches those words, then the real
-// answer reading from the batch. Meant for a HostMapped buffer, where each
-// serial probe is a PCIe round trip and batching them is the whole gain. The
-// batch matches only when the addresses can be listed without reading the
-// data, which is what the dependent chain takes away; on a mismatch the answer
-// falls back to a direct read, so it stays correct either way.
-void enable_prefetch(Prover& p);
-
-// The swap cheat. Keeps a pinned host copy of the buffer, filled during the
-// upload, so swap_out() can free the card copy and swap_in() can restore it.
-// Call before the upload. Between the two calls the HBM is free for anything
-// else, which is the point of the cheat; answer() refuses while swapped out.
-bool enable_swap(Prover& p, char* err, size_t errlen);
-bool swap_out(Prover& p, char* err, size_t errlen);
-bool swap_in(Prover& p, double* ms, char* err, size_t errlen);
 
 // Pick a device and report what it is. Returns false if there is no usable GPU.
 bool select_device(int ordinal, char* name, size_t name_len, char* err, size_t errlen);
@@ -181,22 +152,17 @@ unsigned char* staging(Prover& p, size_t* cap);
 bool push(Prover& p, size_t bytes, char* err, size_t errlen);
 
 // Fill the buffer on-device from the splitmix64 generator instead of receiving
-// it. Used by the k=0 transport floor and by local self-tests, never as part of
-// an honest protocol run.
+// it. Only the GPU known-answer test uses it.
 bool fill_splitmix64(Prover& p, uint64_t seed, char* err, size_t errlen);
 
-// Answer one challenge. The lane kernel runs on the device; the fold across
-// lanes is a strict sequential chain in lane order, so it happens on the host
-// using the same functions the CPU reference uses.
+// Answer one challenge. The lane kernel runs on the device. `tree` selects the
+// fold across lanes, and must be whatever the verifier asked for on the wire,
+// because the two folds give different answers. The sequential fold copies the
+// lane hashes back and chains them on the host; the tree fold runs on the
+// device in log2(lanes) passes and copies back only the root.
 //
-// The three timings are reported separately because they are different physics:
-// kernel_ms is the memory-bound work, copy_ms is PCIe, fold_ms is host ALU.
-// Lumping them together is how a bandwidth number gets flattered.
-// `tree` selects the parallel Merkle fold over the sequential chain. The chain
-// runs on the host (the lane hashes come back over PCIe); the tree runs on the
-// device in log2(lanes) passes and only the root comes back. They are different
-// protocols with different answers — the caller must pass whatever the verifier
-// asked for on the wire.
+// The three timings are reported separately: kernel_ms is the memory-bound
+// work, copy_ms is PCIe, and fold_ms is the fold.
 bool answer(Prover& p, uint64_t nonce, uint32_t k, uint32_t lanes, bool chained,
             bool tree, uint64_t* out_hash, double* kernel_ms, double* copy_ms,
             double* fold_ms, char* err, size_t errlen);
