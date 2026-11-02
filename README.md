@@ -281,8 +281,8 @@ hand. It fails closed if the known-answer gate does not pass: a card that
 cannot reproduce the frozen constants must not produce measurements.
 `gpu_demo_down.sh` refuses to release a pod whose results it could not copy.
 
-Both need `RUNPOD_API_KEY` in your environment and an SSH key registered on
-that RunPod account (`~/.ssh/neta-pacifai-runpod`, or set `MEMCHAL_SSH_KEY`).
+Both need `RUNPOD_API_KEY` and `MEMCHAL_SSH_KEY`, the path to an SSH key registered
+on that RunPod account. Set them in your shell, or copy `.env.example` to `.env`.
 
 Once a box is up, the individual steps are:
 

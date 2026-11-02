@@ -10,10 +10,9 @@
 # It never reuses a pod it did not create. A pod you started by hand is yours
 # to manage.
 #
-# Requires: RUNPOD_API_KEY in the environment (get one from
-#   https://console.runpod.io/user/settings) and an SSH key registered on that
-#   account. Set the key in your shell or a .env you source; this script only
-#   ever reads it by name.
+# Requires: RUNPOD_API_KEY (get one from https://console.runpod.io/user/settings)
+#   and MEMCHAL_SSH_KEY, the path to an SSH private key registered on that
+#   account. Set them in your shell or in .env (see .env.example).
 #
 # Usage:
 #   bash runpod/gpu_demo_up.sh                      # H100 SXM, 60 GB disk
@@ -36,6 +35,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 STATE="$ROOT/.gpu_demo_state"
+. runpod/env.sh
 
 GPU="NVIDIA H100 80GB HBM3"
 DISK=60
@@ -45,7 +45,7 @@ IMAGE="nvidia/cuda:12.8.0-devel-ubuntu22.04"
 ASSUME_YES=0
 MAX_HOURS=6
 IDLE_MIN=90
-SSH_KEY="${MEMCHAL_SSH_KEY:-$HOME/.ssh/neta-pacifai-runpod}"
+SSH_KEY="${MEMCHAL_SSH_KEY:-}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -80,11 +80,12 @@ jget() { python3 runpod/runpod_json.py get "$1" 2>/dev/null; }
 
 # --- 0. prerequisites -------------------------------------------------------
 say "prerequisites"
-[ -n "${RUNPOD_API_KEY:-}" ] || die "RUNPOD_API_KEY is not set. Export it, or source the .env that holds it." 1
+[ -n "${RUNPOD_API_KEY:-}" ] || die "RUNPOD_API_KEY is not set. Export it or put it in .env (see .env.example)." 1
 command -v curl   >/dev/null || die "curl is not installed" 1
 command -v python3>/dev/null || die "python3 is not installed" 1
 command -v rsync  >/dev/null || die "rsync is not installed" 1
-[ -f "$SSH_KEY" ] || die "no SSH private key at $SSH_KEY (set MEMCHAL_SSH_KEY or pass --key)" 1
+[ -n "$SSH_KEY" ] || die "MEMCHAL_SSH_KEY is not set. Export it, put it in .env (see .env.example), or pass --key." 1
+[ -f "$SSH_KEY" ] || die "no SSH private key at $SSH_KEY" 1
 if [ -f "$STATE" ]; then
   # shellcheck disable=SC1090
   . "$STATE"
@@ -170,7 +171,7 @@ echo "ssh: root@$HOST -p $PORT"
 # --- 4. ship, build, gate ---------------------------------------------------
 say "shipping this working tree"
 rsync -az --delete \
-  --exclude .git --exclude results --exclude __pycache__ --exclude '*.o' \
+  --exclude .git --exclude .env --exclude results --exclude __pycache__ --exclude '*.o' \
   --exclude prover --exclude verifier --exclude cheating_prover \
   --exclude prover_cuda --exclude cheating_prover_cuda \
   -e "ssh -i $SSH_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $PORT" \

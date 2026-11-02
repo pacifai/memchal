@@ -90,8 +90,9 @@ On a machine with the CUDA toolkit, `make gpu` builds `prover_cuda`,
 `cheating_prover_cuda`, and `tests/known_answer_gpu`. Run
 `tests/known_answer_gpu` before trusting any GPU measurement.
 
-To rent a RunPod GPU instead, set `RUNPOD_API_KEY` and register an SSH key on the
-account, then run `bash runpod/gpu_demo_up.sh`. It prints the hourly price,
+To rent a RunPod GPU instead, register an SSH key on your RunPod account, copy
+`.env.example` to `.env`, and fill in `RUNPOD_API_KEY` and `MEMCHAL_SSH_KEY`. Then
+run `bash runpod/gpu_demo_up.sh`. It prints the hourly price,
 rents the card, copies this working tree, builds, runs the known-answer test, and
 opens the demo. `bash runpod/gpu_demo_down.sh` copies the results back and
 releases the card.

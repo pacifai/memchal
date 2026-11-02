@@ -22,3 +22,5 @@ __pycache__/
 /.gpu_demo_state
 # macOS Finder metadata
 .DS_Store
+# local secrets for the runpod/ scripts (see .env.example)
+.env
