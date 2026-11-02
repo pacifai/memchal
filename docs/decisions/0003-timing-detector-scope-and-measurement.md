@@ -7,20 +7,20 @@ The prototype presented timing as proof of memory residency ("`disk`/`partial` a
 10–19× slower because probes hit storage instead of RAM") and reported single-shot
 absolute latencies. Two investigations tested both the *meaning* of the signal and
 the *trustworthiness* of the numbers:
-[disk-is-syscalls](../investigations/disk-is-syscalls/),
-[latency-decomposition](../investigations/latency-decomposition/), and
-[session-variance](../investigations/session-variance/).
+`disk-is-syscalls`,
+`latency-decomposition`, and
+`session-variance`.
 
 ## What the measurements showed
 - **The gap is syscall overhead, not storage distance** (experiment 1,
-  [disk-is-syscalls](../investigations/disk-is-syscalls/)). The same 4096-`pread`/
+  `disk-is-syscalls`). The same 4096-`pread`/
   challenge loop over **tmpfs** (guaranteed RAM, `read_bytes = 0`) costs ~94–100%
   of the overlay-**disk** latency; the disk file is fetched from the block layer
   exactly once, then served from page cache. An **mmap adversary** (`mmapdisk`:
   data on disk, read via a memory-mapped view, no per-probe syscall) answers at
   **~honest speed** — but only because the page cache is holding its file.
 - **Timing tracks residency, not the device** (experiment 2,
-  [mmap-needs-ram](../investigations/mmap-needs-ram/)). The mmap adversary isn't
+  `mmap-needs-ram`). The mmap adversary isn't
   evading residency; it *is* resident, via the page cache instead of `mlock`. Give
   the same adversary a memory budget **smaller than the buffer it claims** and it
   collapses to **~840× honest** with ~52% of probes faulting to storage; a `pread`

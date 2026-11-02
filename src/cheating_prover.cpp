@@ -17,11 +17,11 @@
 //              RAM to cache the file* (the page cache is then holding the data, so
 //              it really is resident); with a memory budget smaller than the buffer
 //              it claims, probes fault through to storage and it is ~1000x honest.
-//              See docs/investigations/mmap-needs-ram/.
+//              See ADR 0003.
 //   recompute  hold nothing: recover the buffer's splitmix64 seed from one word and
 //              regenerate every probe in O(1). Correct AND fast against the default
 //              generator. Defeated by `--gen chacha` (seed unrecoverable -> wrong
-//              data -> correctness catches it). See docs/investigations/ + ADR 0004.
+//              data -> correctness catches it). See ADR 0004.
 //   prefetch   data on disk via mmap; enumerate the independent challenge's offsets
 //              up front and MADV_WILLNEED-batch the pages, dodging serial faults.
 //              Real only under memory pressure. Defeated by `--chain dependent`

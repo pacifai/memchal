@@ -53,25 +53,25 @@ curve.
 - **The GPU detector has no early warning.** The UVM cheat is indistinguishable
   from honest until free HBM drops below the buffer size, then costs ~4,600x.
   Nothing in between. See
-  [uvm-needs-hbm](docs/investigations/uvm-needs-hbm/README.md).
+  `uvm-needs-hbm`.
 - **The fold is fixed, and the fix is about scaling.** The sequential
   cross-lane fold was over half the response and linear in lanes. `--fold tree`
   makes it log2(lanes) device passes: 8x the lanes cost the old fold 8.1x and
   the tree fold 1.24x, for an 8.9x faster response at 131k lanes. It is now
   launch-bound rather than work-bound. See
-  [tree-fold-payoff](docs/investigations/tree-fold-payoff/README.md).
+  `tree-fold-payoff`.
 - **Two Argon2d passes defeat partial recompute.** A GPU prover that discards
   blocks and rebuilds them from the recipe answers wrong on every challenge at
   `t=2`, even discarding 0.1%, because each rebuild needs a first-pass value
   nobody kept. At `t=1` it answers correctly but slowly: 3.8x honest at 0.1%
   discarded, 34x at 10%. One H100 session. See
-  [partial-recompute](docs/investigations/partial-recompute/README.md).
+  `partial-recompute`.
 - **The detector's resolution is ~5% of the buffer.** A prover that holds every
   byte but keeps 5% off the card separates from honest; below that it hides in
   the noise. Unlike the UVM cliff this is a smooth gradient, which is what a
   decision rule needs. The floor is the width of the honest distribution on a
   card whose clocks cannot be locked, not physics. See
-  [partial-residency-resolution](docs/investigations/partial-residency-resolution/README.md).
+  `partial-residency-resolution`.
 
 ## Architecture
 
@@ -129,7 +129,7 @@ curve.
   the blocks on the card and rebuilds the rest on host threads when a lane reaches
   one. It always claims `locked=true`, because nothing stops a real one doing the
   same. `--hog` occupies HBM so a managed buffer cannot fit.
-- `scripts/gpu_pod_setup.sh` — the first command on a rented box: records the
+- `runpod/gpu_pod_setup.sh` — the first command on a rented box: records the
   machine, refuses boxes whose numbers would be meaningless, settles whether
   clocks can be locked and whether RDMA exists, then builds and runs the gate.
 - `scripts/gpu_adversaries.sh` — the honest baseline and all three GPU cheats,
@@ -204,8 +204,9 @@ core-affinity questions (see `NEXT_STEPS.md`).
   path.
 - **Stay buildable with g++, the standard library, and python3/matplotlib.** Ask
   before adding dependencies.
-- **Put investigations under `docs/investigations/`** (doc, script, results), not
-  mixed into `src/` or `scripts/`.
+- **Investigations stay local.** Each lives in its own folder under
+  `docs/investigations/` (question, script, results), which `.git/info/exclude`
+  keeps out of git. Tracked files cite one by its folder name in backticks.
 - **`NEXT_STEPS.md` holds only pending work.** When something ships, move its
   description to `README.md` or an ADR and delete it from `NEXT_STEPS.md` — the file
   must never accumulate already-implemented changes.
@@ -229,6 +230,10 @@ core-affinity questions (see `NEXT_STEPS.md`).
 - `NEXT_STEPS.md` — pending work, with rationale.
 - `docs/decisions/` — [ADRs](docs/decisions/README.md): why the design and claims
   are what they are.
-- `docs/investigations/` — [analyses](docs/investigations/README.md) (question,
-  script, result) that back the decisions.
-- `src/`, `scripts/`, `tests/` — the core of the project.
+- `docs/investigations/` — local only: the analyses (question, script, result)
+  that back the decisions.
+- `src/`, `tests/` — the core of the project.
+- `scripts/` — the trial harness, its statistics and plots, and the GPU adversary
+  sweep.
+- `runpod/` — renting a RunPod GPU, setting it up, running the demo bridge on it,
+  and releasing it.

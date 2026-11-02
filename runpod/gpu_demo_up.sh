@@ -16,11 +16,11 @@
 #   ever reads it by name.
 #
 # Usage:
-#   bash scripts/gpu_demo_up.sh                      # H100 SXM, 60 GB disk
-#   bash scripts/gpu_demo_up.sh --gpu "NVIDIA A40"   # a cheaper card
-#   bash scripts/gpu_demo_up.sh --port 8888          # a different local port
-#   bash scripts/gpu_demo_up.sh --yes                # skip the price prompt
-#   bash scripts/gpu_demo_up.sh --idle-min 30 --max-hours 3
+#   bash runpod/gpu_demo_up.sh                      # H100 SXM, 60 GB disk
+#   bash runpod/gpu_demo_up.sh --gpu "NVIDIA A40"   # a cheaper card
+#   bash runpod/gpu_demo_up.sh --port 8888          # a different local port
+#   bash runpod/gpu_demo_up.sh --yes                # skip the price prompt
+#   bash runpod/gpu_demo_up.sh --idle-min 30 --max-hours 3
 #
 # The pod guards its own bill, so a closed laptop cannot leave it running:
 #   --max-hours H  the pod terminates itself H hours after boot, whatever it is
@@ -28,7 +28,7 @@
 #                  other step, so it holds even if this script dies halfway.
 #   --idle-min M   the pod terminates itself after M minutes with no demo run
 #                  and no verifier running (default 90). An open tunnel does
-#                  not count as use. See scripts/gpu_watchdog.sh.
+#                  not count as use. See runpod/gpu_watchdog.sh.
 #
 # Exit: 0 the demo is up, 1 a prerequisite is missing, 2 renting failed,
 #       3 the box is unusable or the gate failed.
@@ -76,7 +76,7 @@ api()  { # api METHOD PATH [BODY]
     curl -sS -X "$m" "$API$p" -H "Authorization: Bearer $RUNPOD_API_KEY"
   fi
 }
-jget() { python3 scripts/runpod_json.py get "$1" 2>/dev/null; }
+jget() { python3 runpod/runpod_json.py get "$1" 2>/dev/null; }
 
 # --- 0. prerequisites -------------------------------------------------------
 say "prerequisites"
@@ -88,7 +88,7 @@ command -v rsync  >/dev/null || die "rsync is not installed" 1
 if [ -f "$STATE" ]; then
   # shellcheck disable=SC1090
   . "$STATE"
-  die "a demo is already up (pod ${POD_ID:-?}). Run scripts/gpu_demo_down.sh first." 1
+  die "a demo is already up (pod ${POD_ID:-?}). Run runpod/gpu_demo_down.sh first." 1
 fi
 if lsof -ti:"$LPORT" >/dev/null 2>&1; then
   die "local port $LPORT is already in use. Free it, or pass --port." 1
@@ -103,7 +103,7 @@ say "price"
 # that is not in the list is a typo in --gpu, and renting would fail anyway.
 CAT=$(curl -sS "$API/catalog/gpus?include=AVAILABILITY&product=POD" \
         -H "Authorization: Bearer $RUNPOD_API_KEY")
-INFO=$(printf '%s' "$CAT" | python3 scripts/runpod_json.py catalog "$GPU" "$CLOUD" 2>&1)
+INFO=$(printf '%s' "$CAT" | python3 runpod/runpod_json.py catalog "$GPU" "$CLOUD" 2>&1)
 case "$INFO" in ERR\|*) die "${INFO#ERR|}" 1 ;; esac
 IFS='|' read -r GPU_NAME PRICE STOCK <<< "$INFO"
 if [ -z "${PRICE:-}" ] || [ "$PRICE" = "?" ]; then
@@ -132,7 +132,7 @@ case "$IDLE_MIN"  in ''|*[!0-9]*) die "--idle-min takes a whole number of minute
 # calls are a fallback for an image where it is missing.
 CAP='(sleep '"$CAP_S"'; echo "hard cap reached" > /root/watchdog.cap; runpodctl pod delete $RUNPOD_POD_ID; for u in https://rest.runpod.io/v1/pods/$RUNPOD_POD_ID https://api.runpod.io/v2/pods/$RUNPOD_POD_ID; do curl -sS -o /dev/null -X DELETE "$u" -H "Authorization: Bearer $RUNPOD_API_KEY"; done) > /dev/null 2>&1 &'
 BOOT=$CAP' apt-get update -q >/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server rsync git python3 build-essential curl >/dev/null 2>&1; mkdir -p /run/sshd /root/.ssh; echo "$PUBLIC_KEY" > /root/.ssh/authorized_keys; chmod 700 /root/.ssh; chmod 600 /root/.ssh/authorized_keys; echo "export PATH=/usr/local/cuda/bin:\$PATH" >> /root/.bashrc; touch /root/.ssh_ready; /usr/sbin/sshd -D -p 22'
-BODY=$(python3 scripts/runpod_json.py pod-body "$IMAGE" "$GPU" "$DISK" "$CLOUD" "$BOOT")
+BODY=$(python3 runpod/runpod_json.py pod-body "$IMAGE" "$GPU" "$DISK" "$CLOUD" "$BOOT")
 RESP=$(api POST "/pods" "$BODY")
 POD_ID=$(printf '%s' "$RESP" | jget id)
 if [ -z "$POD_ID" ]; then
@@ -143,7 +143,7 @@ fi
 { echo "POD_ID=$POD_ID"; echo "LPORT=$LPORT"; echo "SSH_KEY=$SSH_KEY";
   echo "CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)"; } > "$STATE"
 echo "pod $POD_ID  (recorded in .gpu_demo_state)"
-trap 'echo; echo "Bring-up failed. The pod is still rented — run scripts/gpu_demo_down.sh"; ' ERR
+trap 'echo; echo "Bring-up failed. The pod is still rented — run runpod/gpu_demo_down.sh"; ' ERR
 
 # --- 3. wait for ssh --------------------------------------------------------
 say "waiting for ssh"
@@ -180,7 +180,7 @@ say "building and gating"
 # gpu_pod_setup.sh records the machine, refuses an unusable box, builds the GPU
 # targets, and runs the known-answer gate. `make` on its own builds the CPU
 # verifier, which the demo also needs.
-$SSH 'export PATH=/usr/local/cuda/bin:$PATH; cd /root/memchal && make -j8 >/dev/null 2>&1 && bash scripts/gpu_pod_setup.sh 2>&1 | tail -4'
+$SSH 'export PATH=/usr/local/cuda/bin:$PATH; cd /root/memchal && make -j8 >/dev/null 2>&1 && bash runpod/gpu_pod_setup.sh 2>&1 | tail -4'
 $SSH 'export PATH=/usr/local/cuda/bin:$PATH; cd /root/memchal && ./tests/known_answer_gpu 2>&1 | tail -1' | grep -q "all vectors PASS" \
   || die "the known-answer gate did not pass on this card — do not trust anything it measures" 3
 
@@ -188,13 +188,13 @@ $SSH 'export PATH=/usr/local/cuda/bin:$PATH; cd /root/memchal && ./tests/known_a
 say "starting the demo"
 # A script file, not a one-liner: see the header of gpu_bridge_start.sh for why
 # stopping and starting the bridge in one ssh command kills itself.
-$SSH 'bash /root/memchal/scripts/gpu_bridge_start.sh' || die "the bridge did not start" 3
+$SSH 'bash /root/memchal/runpod/gpu_bridge_start.sh' || die "the bridge did not start" 3
 
 say "arming the idle watchdog"
 # One ssh call, and setsid -f so the watchdog leaves this session at once.
 # Backgrounding it with `&` instead left a subshell holding the ssh channel,
 # and bring-up hung on this step.
-WD=$($SSH "cd /root/memchal && bash scripts/gpu_watchdog.sh --check && setsid -f bash scripts/gpu_watchdog.sh $IDLE_MIN > /root/watchdog.log 2>&1 < /dev/null" 2>/dev/null)
+WD=$($SSH "cd /root/memchal && bash runpod/gpu_watchdog.sh --check && setsid -f bash runpod/gpu_watchdog.sh $IDLE_MIN > /root/watchdog.log 2>&1 < /dev/null" 2>/dev/null)
 if [ $? -eq 0 ]; then
   echo "$WD; terminates after $IDLE_MIN idle minutes, or $MAX_HOURS h after boot"
 else
@@ -218,6 +218,6 @@ cat <<EOF
   http://127.0.0.1:$LPORT
 
   pod $POD_ID is billing until you run:
-      bash scripts/gpu_demo_down.sh
+      bash runpod/gpu_demo_down.sh
   or until it terminates itself: $IDLE_MIN idle minutes, or $MAX_HOURS h after boot.
 EOF

@@ -24,7 +24,7 @@ WHAT IS DIFFERENT from bridge.py, and why:
     temperature, and any active throttle reason next to every measurement. A
     timing result whose clock history you did not record is not a measurement.
 
-HOW TO RUN (on the pod, after scripts/gpu_pod_setup.sh passes):
+HOW TO RUN (on the pod, after runpod/gpu_pod_setup.sh passes):
     python3 demo/bridge_gpu.py          # then tunnel 8777 and open it
     PORT=9000 python3 demo/bridge_gpu.py
 

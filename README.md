@@ -120,9 +120,7 @@ effective: `--chain dependent`, for example, only helps if each lane runs a deep
 enough chain, so the verifier enforces `k / lanes ≥ 16` and refuses a shallower
 config. The full reasoning is in
 [ADR 0004](docs/decisions/0004-adversary-taxonomy-and-defenses.md) and
-[ADR 0005](docs/decisions/0005-per-lane-chaining-vs-gpu-parallelism.md); the
-measurements behind the `prefetch` and `mmapdisk` rows are in
-[docs/investigations/](docs/investigations/).
+[ADR 0005](docs/decisions/0005-per-lane-chaining-vs-gpu-parallelism.md).
 
 ## Verified memory pinning
 
@@ -161,14 +159,6 @@ in containers; nothing is simulated. Tracing happens after each timed round trip
 so it doesn't distort the measurement, but the headline numbers come from the
 terminal runs, not the demo.
 
-### Supporting investigations
-
-Two small experiments back the timing claim above. Each is a script plus a short
-writeup under `docs/investigations/`: `disk-is-syscalls/` shows the disk penalty is
-system-call overhead rather than storage distance, and `mmap-needs-ram/` shows the
-memory-mapped cheat collapses once it can't cache the buffer. Run them to reproduce
-[ADR 0003](docs/decisions/0003-timing-detector-scope-and-measurement.md).
-
 ## Results
 
 Measured on Docker Desktop on Apple Silicon: a linux/arm64 VM limited to 1 vCPU
@@ -203,7 +193,7 @@ What the table says:
   number.
 
 The fuller analysis — why `fake` is slightly faster, how latency scales with `k`,
-and the run-to-run variance — is in `docs/investigations/` and
+and the run-to-run variance — is in
 [ADR 0003](docs/decisions/0003-timing-detector-scope-and-measurement.md).
 
 ## The GPU version
@@ -255,7 +245,7 @@ to 208 us, while `uvm` (3.482 s to 3.489 s) and `zerocopy` (6.11 ms to 5.95 ms)
 barely moved. The fold was a fixed host-side cost every mode paid, so removing
 it shrinks the denominator and leaves the numerators alone — `uvm` 8674x to
 16786x, `zerocopy` 15.2x to 28.6x. Separation was not the reason for the change
-([tree-fold-payoff](docs/investigations/tree-fold-payoff/README.md) was about
+(`tree-fold-payoff` was about
 scaling); it is a side effect worth knowing about, because any other fixed
 overhead shared by honest and cheat is costing detector resolution the same way.
 
@@ -265,7 +255,7 @@ rather than a miss — the same shape as the CPU finding that a memory-mapped ch
 looks honest while the page cache holds its file. The cliff falls exactly where
 free HBM stops being able to hold the buffer, with nothing in between: the
 detector has no early warning. See
-[uvm-needs-hbm](docs/investigations/uvm-needs-hbm/README.md).
+`uvm-needs-hbm`.
 
 Two honest limitations from the same session. Over half the response time is the
 host-side lane fold (~312 us against the kernel's ~86 us at 16384 lanes), which
@@ -280,8 +270,8 @@ latency-bound rather than bandwidth-bound. Both are in
 From a laptop with no GPU, two commands do the whole thing:
 
 ```bash
-bash scripts/gpu_demo_up.sh        # rent a card, ship, build, gate, open the demo
-bash scripts/gpu_demo_down.sh      # pull results back, close it, release the card
+bash runpod/gpu_demo_up.sh        # rent a card, ship, build, gate, open the demo
+bash runpod/gpu_demo_down.sh      # pull results back, close it, release the card
 ```
 
 `gpu_demo_up.sh` prints the hourly price and waits for a yes before renting. It
@@ -297,10 +287,10 @@ that RunPod account (`~/.ssh/neta-pacifai-runpod`, or set `MEMCHAL_SSH_KEY`).
 Once a box is up, the individual steps are:
 
 ```bash
-bash scripts/gpu_pod_setup.sh      # machine record, refusals, build, then the gate
+bash runpod/gpu_pod_setup.sh      # machine record, refusals, build, then the gate
 bash scripts/gpu_adversaries.sh    # honest plus all three cheats, interleaved
 python3 demo/bridge_gpu.py         # the live demo, on the GPU box
-bash scripts/gpu_teardown.sh       # stop everything, check the card is idle, pack results
+bash runpod/gpu_teardown.sh       # stop everything, check the card is idle, pack results
 ```
 
 Run the teardown before you release the pod. It stops the bridge and any
@@ -325,6 +315,4 @@ active throttle reason next to every measurement.
   repo: goal, layout, and the rules that keep results trustworthy.
 - [Decision records](docs/decisions/) — why the challenge math is frozen, why the
   prover refuses to run unpinned, and what the timing signal does and doesn't show.
-- [Investigations](docs/investigations/) — the question-script-result writeups that
-  back those decisions.
 - [NEXT_STEPS.md](NEXT_STEPS.md) — what's still open, and why it matters.
