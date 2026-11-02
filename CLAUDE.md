@@ -192,6 +192,9 @@ core-affinity questions (see `NEXT_STEPS.md`).
   fixed order. Any other reduction, such as a warp shuffle, silently changes
   every answer. `fold_seed`, `lane_fold_term`, `tree_combine`, and `tree_pad`
   are the one definition of each order.
+- **Keep each language in its own file.** Don't embed Python, JavaScript, or any
+  other language in a shell script, whether through a heredoc or `python3 -c`.
+  Put the code in its own file next to the script and call it.
 - **Compare within a session only.** Never present absolute microseconds as
   portable; use the harness's ratios or `honest − floor` with propagated error.
 - **Don't tune parameters to make results look better.** A cheat that isn't caught
