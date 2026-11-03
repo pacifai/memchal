@@ -1,66 +1,21 @@
-// cheating_prover_cuda.cpp — the GPU adversaries.
+// cheating_prover_cuda.cpp — the GPU adversaries. Each claims locked=true,
+// because a verifier has no way to check the claim; the timing detector has to
+// catch them.
 //
-// Mirrors cheating_prover.cpp's role on the CPU side: every attack is a --mode,
-// so a defense is tested rather than asserted. Run the attack, watch what the
-// detector does, and report it either way.
+//   fake      — holds --frac of the buffer on the card and invents the rest.
+//   uvm       — cudaMallocManaged. Pages migrate between host and card on fault.
+//   partial   — keeps --offload of the buffer in pinned host memory, read over
+//               PCIe. At 1.0 the whole buffer is in host memory.
+//   recompute — build mode only. Keeps --keep of the Argon2d blocks on the
+//               card and rebuilds the rest on the host when a probe lands on
+//               one (ADR 0007).
 //
-// Unlike the honest prover, this one ALWAYS claims locked=true. That is not an
-// oversight, it is the threat model: nothing stops a prover saying it called
-// cudaMalloc when it called cudaMallocManaged, and no verifier can check from
-// outside. "Did you cudaMalloc?" is unanswerable remotely, which is precisely
-// why the timing detector has to carry the weight.
-//
-//   honest    — cudaMalloc. The baseline the others are measured against, so
-//               the same binary can produce it under the same conditions.
-//   fake      — holds --frac of the buffer and invents the rest. Fast and
-//               wrong: the correctness detector, not the timing one.
-//   uvm       — cudaMallocManaged. Pages migrate host<->device on fault, so the
-//               prover can "hold" more than the card has. The direct analog of
-//               the CPU mmapdisk cheat, and #1 in the GPU adversary list.
-//   zerocopy  — cudaHostAlloc(mapped). The buffer sits in pinned host DRAM and
-//               every probe crosses PCIe.
-//   partial   — --offload f keeps fraction f of the buffer in host memory and
-//               the rest on the card. This is the one that sets the detector's
-//               RESOLUTION. uvm and zerocopy ask "can you catch a prover that
-//               holds none of it"; this asks "how little can a prover offload
-//               before you stop seeing it", which is the number a decision rule
-//               needs and the thing the first GPU session could not measure.
-//   recompute — the partial-recompute cheat (ADR 0007), build mode only. Builds
-//               the Argon2d buffer, keeps a random --keep fraction of its 1 KiB
-//               blocks on the card, and discards the rest. A probe that lands on
-//               a discarded block pauses its lane while the host rebuilds the
-//               block from the recipe, recursing through whatever that block
-//               depends on (argon2d_rebuild.hpp). Correct, and slow by however
-//               much rebuilding costs: this is the attack the build-buffer
-//               design introduces, and the one its memory-hardness has to beat.
-//
-// Two assumptions favor the recompute cheat, so its measured cost is a lower
-// bound. The host rebuild reads kept blocks from a host copy rather than from
-// the card, so it never waits on PCIe for an ancestor; HBM is what this cheat
-// saves, and host RAM is not counted against it. And it keeps a random
-// fraction, where a real one would study the dependency graph and keep the
-// blocks that are costliest to rebuild.
-//
-// A note on uvm, because it is easy to misread the result. With a buffer that
-// fits in free HBM, UVM migrates everything to the card once and then answers
-// at honest speed — it really is resident, so that is a true negative, not a
-// failure of the detector. It is the same shape as the CPU finding that the
-// mmap cheat looks honest while the page cache holds its file. To see it
-// collapse you have to take the memory away: --hog <MiB> holds device memory so
-// the managed buffer cannot fit, which is the GPU analog of the CPU demo's
-// container RAM budget.
-//
-// --leave-free <MiB> is the same lever stated the way the experiment is: reserve
-// whatever it takes to leave that much free. The prover measures free memory
-// itself, at the moment it reserves, because nothing outside the process can
-// know it — the CUDA context and allocator already hold a few hundred MiB that
-// cudaMemGetInfo's total still counts. A caller that computes a reserve from the
-// card's total asks for memory that does not exist and the reserve fails.
+// --leave-free reserves device memory until that much is free, so a managed
+// buffer larger than what is left has to page.
 #include "challenge.hpp"
 #include "cli.hpp"
-#include "gpu_answer.hpp"
-#include "gpu_ingest.hpp"
-#include "server.hpp"
+#include "gpu_adversary.hpp"
+#include "gpu_server.hpp"
 #include <atomic>
 #include <condition_variable>
 #include <functional>
@@ -77,18 +32,16 @@ using namespace mc;
 static_assert(gpu::kRecomputeBlockWords == a2::kBlockWords,
               "the CUDA loader and Argon2d disagree on the block size");
 
-enum Mode { HONEST, FAKE, UVM, ZEROCOPY, PARTIAL, RECOMPUTE };
-static const char* const kModeNames[] = {
-    "honest", "fake", "uvm", "zerocopy", "partial", "recompute", nullptr };
+enum Mode { FAKE, UVM, PARTIAL, RECOMPUTE };
+static const char* const kModeNames[] = { "fake", "uvm", "partial", "recompute", nullptr };
 
 static const char kUsage[] =
     "usage: cheating_prover_cuda [--flag value]...\n"
     "  --port N              listen port (default %u)\n"
-    "  --mode MODE           honest, fake, uvm, zerocopy, partial, or recompute (default uvm)\n"
+    "  --mode MODE           fake, uvm, partial, or recompute (default uvm)\n"
     "  --frac F              fake: fraction held (default 0.5)\n"
     "  --offload F           partial: fraction kept in host memory (default 0.1)\n"
-    "  --hog MIB             device memory to hold unused\n"
-    "  --leave-free MIB      hold device memory until this much is free\n"
+    "  --leave-free MIB      reserve device memory until this much is free\n"
     "  --device N --lane-cap N --trace N   as for prover_cuda\n"
     "  --keep F              recompute: fraction of blocks kept (default 0.99)\n"
     "  --rebuild-budget N    recompute: block fills per thread per challenge (default 65536)\n"
@@ -96,22 +49,19 @@ static const char kUsage[] =
     "  --keep-seed N         recompute: which blocks to keep (default 1)\n";
 
 static Mode     g_mode        = UVM;
-static double   g_frac        = 0.5;    // fake: fraction actually held
-static double   g_offload     = 0.1;    // partial: fraction kept off the card
-static size_t   g_hog_mib     = 0;      // device memory to occupy
-static long long g_leave_free_mib = -1;  // if >= 0, reserve all but this much
+static double   g_frac        = 0.5;
+static double   g_offload     = 0.1;
+static long long g_leave_free_mib = -1;
 static int      g_device      = 0;
 static uint32_t g_lane_cap    = 1u << 17;
 static uint32_t g_trace_every = 0;
-static double   g_keep        = 0.99;   // recompute: fraction of blocks kept
-static uint64_t g_budget      = 1u << 16; // recompute: fill_block() calls per thread per challenge
-static uint32_t g_threads     = 0;      // recompute: rebuild threads, 0 = every core
-static uint64_t g_keep_seed   = 1;      // recompute: which blocks to keep
+static double   g_keep        = 0.99;
+static uint64_t g_budget      = 1u << 16;
+static uint32_t g_threads     = 0;
+static uint64_t g_keep_seed   = 1;
 
-// Workers that stay alive across rounds, so a round of rebuilds does not pay
-// for thread creation. run() hands out items one at a time to whichever worker
-// is free, the calling thread included as worker 0, and returns when all are
-// done.
+// Workers that live across rounds. run() hands items to whichever worker is
+// free, with the calling thread as worker 0, and returns when all are done.
 class Pool {
 public:
     explicit Pool(uint32_t workers) {
@@ -172,10 +122,8 @@ private:
     bool stop_ = false;
 };
 
-// What the recompute cheat keeps between challenges: the kept blocks in host
-// memory for the rebuild to read, and one Rebuilder per worker, each with its
-// own memo. Separate memos can rebuild the same ancestor twice; sharing one
-// would need a lock on every lookup.
+// The recompute cheat's state between challenges: a host copy of the kept
+// blocks, and one Rebuilder with its own memo per worker.
 struct RecomputeCtx {
     MatrixShape shape;
     std::vector<int32_t>  slot;
@@ -189,8 +137,6 @@ static bool rebuild_blocks(void* vctx, const uint32_t* ids, uint32_t n, uint64_t
     RecomputeCtx& c = *(RecomputeCtx*)vctx;
     c.pool->run(n, [&](uint32_t w, uint32_t i) {
         uint64_t* dst = out + (size_t)i * a2::kBlockWords;
-        // Out of budget: hand back zeros. The answer will be wrong, which is
-        // what a cheat that ran out of time would send.
         if (!c.rb[w]->rebuild(ids[i], dst)) memset(dst, 0, a2::kBlockBytes);
     });
     return true;
@@ -222,8 +168,6 @@ static bool recompute_setup(RecomputeCtx& c, const Setup& s, const uint64_t* bui
             memcpy(c.kept.data() + (size_t)c.slot[b] * a2::kBlockWords,
                    built + (size_t)b * a2::kBlockWords, a2::kBlockBytes);
 
-    // Default to the CPUs this process may run on, which in a container can be
-    // far fewer than hardware_concurrency() reports.
     uint32_t threads = g_threads;
     if (threads == 0) {
         cpu_set_t set;
@@ -239,29 +183,18 @@ static bool recompute_setup(RecomputeCtx& c, const Setup& s, const uint64_t* bui
     return true;
 }
 
-static gpu::Alloc alloc_for(Mode m) {
-    switch (m) {
-        case UVM:      return gpu::Alloc::Managed;
-        case ZEROCOPY: return gpu::Alloc::HostMapped;
-        case PARTIAL:  return gpu::Alloc::Split;
-        default:       return gpu::Alloc::Device;   // honest and fake
-    }
-}
-
 // The recompute cheat's challenge loop. Prints one '@' line per challenge,
 // after the response is sent, and a summary when the verifier hangs up.
-static void serve_recompute(int cfd, gpu::Prover& p, RecomputeCtx& rc) {
+static void serve_recompute(int cfd, gpu::Adversary& p, RecomputeCtx& rc) {
     char err[512] = {0};
     uint64_t rebuilt_total = 0, rounds_total = 0, gave_up_challenges = 0;
     double rebuild_ms_total = 0, kernel_ms_total = 0;
-    double kms = 0, cms = 0, fms = 0;
+    gpu::Timing t;
     gpu::RecomputeStats st;
     const uint64_t served = answer_challenges(cfd, "cheat",
         [&](const Challenge& ch, uint64_t* hash) {
-            st = gpu::RecomputeStats{};
             if (gpu::answer_recompute(p, ch.nonce, ch.k, ch.lanes, is_chained(ch), is_tree(ch),
-                                      rebuild_blocks, &rc, hash, &kms, &cms, &fms, &st,
-                                      err, sizeof err))
+                                      rebuild_blocks, &rc, hash, &t, &st, err, sizeof err))
                 return true;
             fprintf(stderr, "[cheat] FATAL: %s\n", err);
             return false;
@@ -275,14 +208,14 @@ static void serve_recompute(int cfd, gpu::Prover& p, RecomputeCtx& rc) {
                    (unsigned long long)n, ch.k, ch.lanes, st.rounds, st.rebuilt,
                    (unsigned long long)(fills - rc.fills_before),
                    (unsigned long long)(gave_up - rc.gave_up_before),
-                   st.rebuild_ms, kms, cms, fms);
+                   st.rebuild_ms, t.kernel_ms, t.copy_ms, t.fold_ms);
             if (gave_up > rc.gave_up_before) ++gave_up_challenges;
             rc.fills_before = fills;
             rc.gave_up_before = gave_up;
             rebuilt_total += st.rebuilt;
             rounds_total += st.rounds;
             rebuild_ms_total += st.rebuild_ms;
-            kernel_ms_total += kms;
+            kernel_ms_total += t.kernel_ms;
             for (auto& r : rc.rb) r->begin_challenge();
             if (gpu::recompute_forget(p, err, sizeof err)) return true;
             fprintf(stderr, "[cheat] FATAL: %s\n", err);
@@ -317,7 +250,7 @@ static void serve_recompute_mode(int cfd, const Setup& s) {
         return;
     }
     free_built(src);
-    gpu::Prover p;
+    gpu::Adversary p;
     const uint32_t n_kept = (uint32_t)(rc.kept.size() / a2::kBlockWords);
     if (!gpu::create_recompute(p, rc.shape.blocks, rc.slot.data(), rc.kept.data(), n_kept,
                                g_lane_cap, err, sizeof err)) {
@@ -341,14 +274,22 @@ static void serve_recompute_mode(int cfd, const Setup& s) {
     gpu::destroy(p);
 }
 
-// Every other mode: one allocation kind from gpu_answer.cu, filled the same
-// way the honest prover fills its buffer.
-static void serve_alloc_mode(int cfd, const Setup& s) {
+static bool create_for_mode(gpu::Adversary& p, uint64_t num_words, char* err, size_t errlen) {
+    switch (g_mode) {
+        case FAKE:    return gpu::create_fake(p, num_words, g_frac, g_lane_cap, err, errlen);
+        case UVM:     return gpu::create_managed(p, num_words, g_lane_cap, err, errlen);
+        case PARTIAL: return gpu::create_partial(p, num_words, g_offload, g_lane_cap, err, errlen);
+        case RECOMPUTE: break;
+    }
+    snprintf(err, errlen, "recompute has its own setup");
+    return false;
+}
+
+// fake, uvm, and partial: fills the buffer the way the honest prover does.
+static void serve_upload_mode(int cfd, const Setup& s) {
     char err[512] = {0};
-    const double held = (g_mode == FAKE) ? g_frac : 1.0;
-    const double offload = (g_mode == PARTIAL) ? g_offload : 0.0;
-    gpu::Prover p;
-    if (!gpu::create(p, s.num_words, alloc_for(g_mode), g_lane_cap, held, offload, err, sizeof err)) {
+    gpu::Adversary p;
+    if (!create_for_mode(p, s.num_words, err, sizeof err)) {
         fprintf(stderr, "[cheat] FATAL: %s\n", err);
         return;
     }
@@ -365,9 +306,9 @@ static void serve_alloc_mode(int cfd, const Setup& s) {
         return;
     }
 
-    const char* backing = "?";
     bool is_device = false;
-    gpu::residency(p, &backing, &is_device);
+    const char* backing = gpu::residency(p, &is_device);
+    const double resident = gpu::resident_fraction(p);
     size_t hf = 0, ht = 0;
     gpu::mem_info(&hf, &ht);
     printf("[cheat] backing = %s (claiming locked=true regardless)\n", backing);
@@ -377,39 +318,26 @@ static void serve_alloc_mode(int cfd, const Setup& s) {
     json_str(stdout, kModeNames[g_mode]);
     printf(",\"backing\":");
     json_str(stdout, backing);
-    printf(",\"device_backed\":%s,\"held_frac\":%.4f,\"hog_mib\":%llu,"
-           "\"offload\":%.4f,\"hbm_used\":%llu,\"hbm_total\":%llu,"
+    printf(",\"device_backed\":%s,\"resident_frac\":%.4f,\"hbm_used\":%llu,\"hbm_total\":%llu,"
            "\"build\":%s,\"build_s\":%.4f}\n",
-           is_device ? "true" : "false", held,
-           (unsigned long long)g_hog_mib, offload,
+           is_device ? "true" : "false", resident,
            (unsigned long long)(ht - hf), (unsigned long long)ht,
            s.build ? "true" : "false", src.build_s);
 
     if (!send_ready(cfd, true)) { gpu::destroy(p); return; }
 
-    double kms = 0, cms = 0, fms = 0;
+    gpu::Timing t;
     const uint64_t served = answer_challenges(cfd, "cheat",
         [&](const Challenge& ch, uint64_t* hash) {
             if (gpu::answer(p, ch.nonce, ch.k, ch.lanes, is_chained(ch), is_tree(ch),
-                            hash, &kms, &cms, &fms, err, sizeof err))
+                            hash, &t, err, sizeof err))
                 return true;
             fprintf(stderr, "[cheat] FATAL: %s\n", err);
             return false;
         },
         [&](const Challenge& ch, uint64_t n) {
-            if (!g_trace_every || n % g_trace_every) return true;
-            gpu::mem_info(&hf, &ht);
-            printf("@{\"t\":\"g\",\"served\":%llu,\"k\":%u,\"lanes\":%u,"
-                   "\"chained\":%s,\"tree\":%s,\"kernel_ms\":%.4f,\"copy_ms\":%.4f,"
-                   "\"fold_ms\":%.4f,\"probe_gbps\":%.3f,\"hbm_used\":%llu,"
-                   "\"hbm_total\":%llu,\"resident_frac\":%.4f,\"device\":%s,\"mode\":",
-                   (unsigned long long)n, ch.k, ch.lanes,
-                   is_chained(ch) ? "true" : "false", is_tree(ch) ? "true" : "false",
-                   kms, cms, fms, gpu::probe_gbps(ch.k, kms),
-                   (unsigned long long)(ht - hf), (unsigned long long)ht,
-                   gpu::resident_fraction(p), is_device ? "true" : "false");
-            json_str(stdout, kModeNames[g_mode]);
-            printf("}\n");
+            if (g_trace_every && n % g_trace_every == 0)
+                print_trace(kModeNames[g_mode], ch, n, t, resident, is_device);
             return true;
         });
     printf("[cheat] served %llu challenges; releasing\n", (unsigned long long)served);
@@ -431,22 +359,18 @@ static void serve(int cfd) {
     if (g_leave_free_mib >= 0) {
         size_t free_b = 0, total_b = 0;
         gpu::mem_info(&free_b, &total_b);
-        size_t free_mib = free_b / 1048576ull;
-        size_t leave = (size_t)g_leave_free_mib;
-        g_hog_mib = free_mib > leave ? free_mib - leave : 0;
+        const size_t free_mib = free_b / 1048576ull, leave = (size_t)g_leave_free_mib;
+        const size_t reserve_mib = free_mib > leave ? free_mib - leave : 0;
         printf("[cheat] %zu MiB free on the card; reserving %zu MiB to leave %zu MiB free\n",
-               free_mib, g_hog_mib, free_mib - g_hog_mib);
-    }
-    if (g_hog_mib) {
-        if (!gpu::hog(g_hog_mib * 1048576ull, err, sizeof err)) {
-            fprintf(stderr, "[cheat] FATAL: could not reserve %zu MiB: %s\n", g_hog_mib, err);
+               free_mib, reserve_mib, free_mib - reserve_mib);
+        if (!gpu::reserve_hbm(reserve_mib * 1048576ull, err, sizeof err)) {
+            fprintf(stderr, "[cheat] FATAL: could not reserve %zu MiB: %s\n", reserve_mib, err);
             return;
         }
-        printf("[cheat] reserving %zu MiB of device memory\n", g_hog_mib);
     }
     if (g_mode == RECOMPUTE) serve_recompute_mode(cfd, s);
-    else                     serve_alloc_mode(cfd, s);
-    gpu::unhog();
+    else                     serve_upload_mode(cfd, s);
+    gpu::release_hbm();
 }
 
 int main(int argc, char** argv) {
@@ -461,7 +385,6 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--mode"))            g_mode = (Mode)cli.choice(a, v, kModeNames);
         else if (!strcmp(a, "--frac"))            g_frac = cli.number(a, v, 0.0, 1.0);
         else if (!strcmp(a, "--offload"))         g_offload = cli.number(a, v, 0.0, 1.0);
-        else if (!strcmp(a, "--hog"))             g_hog_mib = cli.uint(a, v);
         else if (!strcmp(a, "--leave-free"))      g_leave_free_mib = (long long)cli.uint(a, v);
         else if (!strcmp(a, "--device"))          g_device = (int)cli.u32(a, v);
         else if (!strcmp(a, "--lane-cap"))        g_lane_cap = cli.u32(a, v);
@@ -479,8 +402,6 @@ int main(int argc, char** argv) {
         return 1;
     }
     printf("[cheat] device %d: %s; mode=%s\n", g_device, name, kModeNames[g_mode]);
-    printf("@{\"t\":\"gpuinfo\",\"device\":%d,\"name\":", g_device);
-    json_str(stdout, name);
-    printf("}\n");
+    print_gpuinfo(g_device, name);
     return serve_forever("cheat", port, serve);
 }

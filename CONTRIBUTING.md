@@ -37,16 +37,19 @@ limits of the test environment, and the rules that keep results trustworthy.
 - `src/prover_cuda.cpp` — the honest GPU prover. It allocates with `cudaMalloc`
   and confirms the allocation type with `cudaPointerGetAttributes`
   ([ADR 0008](docs/decisions/0008-gpu-residency-check-substitutes-for-mlock.md)).
-- `src/cheating_prover_cuda.cpp` — the GPU adversaries: `honest`, `fake`, `uvm`,
-  `zerocopy`, `partial`, and `recompute`.
-- `src/gpu_answer.cu`, `src/gpu_answer.hpp` — the CUDA answer path, one thread per
-  lane. The `.cu` file is the only one `nvcc` compiles. The header uses no CUDA
-  types, so its callers build with `g++`.
+- `src/cheating_prover_cuda.cpp` — the GPU adversaries: `fake`, `uvm`, `partial`,
+  and `recompute`.
+- `src/gpu_answer.cu`, `src/gpu_answer.hpp` — the honest GPU prover's buffer and
+  the answer path, one thread per lane. `src/gpu_adversary.cu` and
+  `src/gpu_adversary.hpp` hold the adversaries' buffers, and `src/gpu_kernels.cuh`
+  is what the two `.cu` files share. Only the `.cu` files go through `nvcc`. The
+  headers use no CUDA types, so their callers build with `g++`.
 - `src/server.hpp` — what every prover shares: the listener, reading the
   verifier's opening messages, receiving or building the buffer, and the
   challenge loop. `src/cli.hpp` is the strict flag parsing every program uses,
   and `src/pinned.hpp` is the locked memory the CPU provers hold the buffer in.
-- `src/gpu_ingest.hpp` — copies the buffer to the card through pinned staging.
+- `src/gpu_server.hpp` — what both GPU provers share: copying the buffer to the
+  card through pinned staging, and the events they print.
 - `src/argon2d_rebuild.hpp` — the partial-recompute adversary's engine. It rebuilds
   one Argon2d block from a partial copy of the matrix.
 - `src/bench_build.cpp` — measures what one 1 KiB Argon2d block costs to build.

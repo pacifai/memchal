@@ -57,18 +57,26 @@ tests: tests/known_answer tests/known_answer_argon2d tests/differential_argon2d 
 # --- GPU targets -------------------------------------------------------------
 gpu: prover_cuda cheating_prover_cuda tests/known_answer_gpu
 
-# Only this object needs nvcc. It includes challenge.hpp and the CUDA runtime
-# and nothing else — no POSIX headers reach the device compiler.
-gpu_answer.o: src/gpu_answer.cu src/gpu_answer.hpp src/challenge.hpp src/chacha20.hpp
+# Only the .cu files need nvcc. They include challenge.hpp and the CUDA runtime,
+# and no POSIX headers.
+GPU_CU_DEPS = src/gpu_kernels.cuh src/gpu_answer.hpp src/challenge.hpp src/chacha20.hpp
+
+gpu_answer.o: src/gpu_answer.cu $(GPU_CU_DEPS)
 	$(NVCC) $(NVCCFLAGS) -c src/gpu_answer.cu -o $@
 
-# These two are ordinary C++: they include gpu_answer.hpp, which is free of CUDA
-# types, so they compile with g++ and only need libcudart at link time.
-prover_cuda: src/prover_cuda.cpp src/challenge.hpp src/net.hpp src/argon2d.hpp src/cli.hpp src/server.hpp src/gpu_answer.hpp src/gpu_ingest.hpp gpu_answer.o
+gpu_adversary.o: src/gpu_adversary.cu src/gpu_adversary.hpp $(GPU_CU_DEPS)
+	$(NVCC) $(NVCCFLAGS) -c src/gpu_adversary.cu -o $@
+
+# The provers are ordinary C++: the GPU headers use no CUDA types, so g++
+# compiles them and they need libcudart only at link time.
+GPU_SERVER_DEPS = src/challenge.hpp src/net.hpp src/argon2d.hpp src/cli.hpp src/server.hpp \
+                  src/gpu_answer.hpp src/gpu_server.hpp
+
+prover_cuda: src/prover_cuda.cpp $(GPU_SERVER_DEPS) gpu_answer.o
 	$(CXX) $(CXXFLAGS) -Isrc -o $@ src/prover_cuda.cpp gpu_answer.o $(CUDA_LIBS)
 
-cheating_prover_cuda: src/cheating_prover_cuda.cpp src/challenge.hpp src/net.hpp src/argon2d.hpp src/cli.hpp src/server.hpp src/argon2d_rebuild.hpp src/gpu_answer.hpp src/gpu_ingest.hpp gpu_answer.o
-	$(CXX) $(CXXFLAGS) -Isrc -o $@ src/cheating_prover_cuda.cpp gpu_answer.o $(CUDA_LIBS)
+cheating_prover_cuda: src/cheating_prover_cuda.cpp $(GPU_SERVER_DEPS) src/gpu_adversary.hpp src/argon2d_rebuild.hpp gpu_answer.o gpu_adversary.o
+	$(CXX) $(CXXFLAGS) -Isrc -o $@ src/cheating_prover_cuda.cpp gpu_answer.o gpu_adversary.o $(CUDA_LIBS)
 
 tests/known_answer_gpu: tests/known_answer_gpu.cpp src/challenge.hpp src/gpu_answer.hpp gpu_answer.o
 	$(CXX) $(CXXFLAGS) -Isrc -o $@ tests/known_answer_gpu.cpp gpu_answer.o $(CUDA_LIBS)
@@ -86,6 +94,6 @@ clean:
 	rm -f prover verifier cheating_prover bench_build \
 	      tests/known_answer tests/known_answer_argon2d tests/differential_argon2d \
 	      tests/rebuild_argon2d \
-	      prover_cuda cheating_prover_cuda tests/known_answer_gpu gpu_answer.o
+	      prover_cuda cheating_prover_cuda tests/known_answer_gpu gpu_answer.o gpu_adversary.o
 
 .PHONY: all tests gpu gpu-check clean

@@ -1,14 +1,8 @@
 // prover_cuda.cpp — the honest GPU prover. It holds the buffer in cudaMalloc
-// memory and refuses to run if the driver reports any other backing, the GPU
-// counterpart of prover.cpp's lock check (ADR 0002).
-//
-// The kernel lives in gpu_answer.cu. This file has no CUDA headers, and that
-// one has no POSIX ones.
+// memory and refuses to run if the driver reports any other backing (ADR 0008).
 #include "challenge.hpp"
 #include "cli.hpp"
-#include "gpu_answer.hpp"
-#include "gpu_ingest.hpp"
-#include "server.hpp"
+#include "gpu_server.hpp"
 
 using namespace mc;
 
@@ -41,10 +35,8 @@ static void serve(int cfd) {
     printf("[gpu] %s %.2f MiB (%llu words)\n", s.build ? "building" : "receiving",
            s.bytes / 1048576.0, (unsigned long long)s.num_words);
 
-    // The device buffer comes first, so a card that cannot hold it fails
-    // before a long build.
     gpu::Prover p;
-    if (!gpu::create(p, s.num_words, gpu::Alloc::Device, g_lane_cap, 1.0, 0.0, err, sizeof err)) {
+    if (!gpu::create(p, s.num_words, g_lane_cap, err, sizeof err)) {
         fprintf(stderr, "[gpu] FATAL: %s\n", err);
         return;
     }
@@ -61,9 +53,8 @@ static void serve(int cfd) {
         return;
     }
 
-    const char* backing = "unknown";
     bool is_device = false;
-    gpu::residency(p, &backing, &is_device);
+    const char* backing = gpu::residency(p, &is_device);
     printf("[gpu] buffer %s; backing = %s\n", s.build ? "built and copied" : "uploaded", backing);
     report_hbm("after upload");
     {
@@ -88,28 +79,18 @@ static void serve(int cfd) {
     }
     if (!send_ready(cfd, is_device)) { gpu::destroy(p); return; }
 
-    double kms = 0, cms = 0, fms = 0;
+    gpu::Timing t;
     const uint64_t served = answer_challenges(cfd, "gpu",
         [&](const Challenge& ch, uint64_t* hash) {
             if (gpu::answer(p, ch.nonce, ch.k, ch.lanes, is_chained(ch), is_tree(ch),
-                            hash, &kms, &cms, &fms, err, sizeof err))
+                            hash, &t, err, sizeof err))
                 return true;
             fprintf(stderr, "[gpu] FATAL: %s\n", err);
             return false;
         },
         [&](const Challenge& ch, uint64_t n) {
-            if (!g_trace_every || n % g_trace_every) return true;
-            size_t hf = 0, ht = 0;
-            gpu::mem_info(&hf, &ht);
-            printf("@{\"t\":\"g\",\"served\":%llu,\"k\":%u,\"lanes\":%u,"
-                   "\"chained\":%s,\"tree\":%s,\"kernel_ms\":%.4f,\"copy_ms\":%.4f,"
-                   "\"fold_ms\":%.4f,\"probe_gbps\":%.3f,\"hbm_used\":%llu,"
-                   "\"hbm_total\":%llu,\"resident_frac\":%.4f,\"device\":%s}\n",
-                   (unsigned long long)n, ch.k, ch.lanes,
-                   is_chained(ch) ? "true" : "false", is_tree(ch) ? "true" : "false",
-                   kms, cms, fms, gpu::probe_gbps(ch.k, kms),
-                   (unsigned long long)(ht - hf), (unsigned long long)ht,
-                   gpu::resident_fraction(p), is_device ? "true" : "false");
+            if (g_trace_every && n % g_trace_every == 0)
+                print_trace("honest", ch, n, t, 1.0, is_device);
             return true;
         });
     printf("[gpu] served %llu challenges; releasing buffer\n", (unsigned long long)served);
@@ -139,13 +120,6 @@ int main(int argc, char** argv) {
     }
     printf("[gpu] device %d: %s; lane cap %u\n", g_device, name, g_lane_cap);
     report_hbm("at start");
-    {
-        size_t hf = 0, ht = 0;
-        gpu::mem_info(&hf, &ht);
-        printf("@{\"t\":\"gpuinfo\",\"device\":%d,\"name\":", g_device);
-        json_str(stdout, name);
-        printf(",\"hbm_free\":%llu,\"hbm_total\":%llu}\n",
-               (unsigned long long)hf, (unsigned long long)ht);
-    }
+    print_gpuinfo(g_device, name);
     return serve_forever("gpu", port, serve);
 }

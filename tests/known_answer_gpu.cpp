@@ -75,10 +75,9 @@ static int run_vectors(mc::gpu::Prover& p, const char* how) {
         const char* fold = tree ? "tree " : "";
         for (int i = 0; i < 3; ++i) {
             uint64_t got = 0;
-            double kms = 0, cms = 0, fms = 0;
+            mc::gpu::Timing t;
             if (!mc::gpu::answer(p, kVecs[i].nonce, kVecs[i].k, kVecs[i].lanes,
-                                 chained != 0, tree != 0, &got, &kms, &cms, &fms,
-                                 err, sizeof err)) {
+                                 chained != 0, tree != 0, &got, &t, err, sizeof err)) {
                 fprintf(stderr, "GPU KAT (%s) %s%svector %d: ERROR %s\n",
                         how, fold, chained ? "chained " : "", i + 1, err);
                 ++failed;
@@ -122,9 +121,9 @@ static int run_wide(mc::gpu::Prover& p, const uint64_t* host_buf, uint64_t num_w
                                         wv[i].k, wv[i].lanes, wv[i].chained);
         }
         uint64_t got = 0;
-        double kms = 0, cms = 0, fms = 0;
+        mc::gpu::Timing t;
         if (!mc::gpu::answer(p, wv[i].nonce, wv[i].k, wv[i].lanes, wv[i].chained,
-                             tree != 0, &got, &kms, &cms, &fms, err, sizeof err)) {
+                             tree != 0, &got, &t, err, sizeof err)) {
             fprintf(stderr, "GPU KAT wide %d%s: ERROR %s\n", i + 1, tree ? " tree" : "", err);
             ++failed;
             continue;
@@ -136,7 +135,7 @@ static int run_wide(mc::gpu::Prover& p, const uint64_t* host_buf, uint64_t num_w
                wv[i].k, wv[i].lanes, wv[i].chained ? " chained" : "", tree ? " tree" : "",
                pass ? "PASS" : "FAIL",
                (unsigned long long)got, (unsigned long long)want,
-               kms, fms, mc::gpu::probe_gbps(wv[i].k, kms));
+               t.kernel_ms, t.fold_ms, mc::gpu::probe_gbps(wv[i].k, t.kernel_ms));
     }
     return failed;
 }
@@ -162,22 +161,20 @@ int main(int argc, char** argv) {
     {
         mc::gpu::Prover p;
         // Start with a small lane cap on purpose so run_wide has to grow it.
-        if (!mc::gpu::create(p, kNumWords, mc::gpu::Alloc::Device, 64, 1.0, 0.0, err, sizeof err)) {
+        if (!mc::gpu::create(p, kNumWords, 64, err, sizeof err)) {
             fprintf(stderr, "GPU KAT: create failed — %s\n", err);
             return 1;
         }
-        const char* backing = "?"; bool is_dev = false;
-        mc::gpu::residency(p, &backing, &is_dev);
+        bool is_dev = false;
+        const char* backing = mc::gpu::residency(p, &is_dev);
         printf("GPU KAT: backing = %s\n", backing);
         if (!is_dev) { fprintf(stderr, "GPU KAT: buffer is not device-resident\n"); ++failed; }
 
-        size_t cap = 0;
-        unsigned char* stage = mc::gpu::staging(p, &cap);
         const unsigned char* src = (const unsigned char*)host.data();
         size_t left = kBytes;
         while (left) {
-            size_t chunk = left < cap ? left : cap;
-            memcpy(stage, src, chunk);
+            size_t chunk = left < p.stage.cap ? left : p.stage.cap;
+            memcpy(p.stage.h, src, chunk);
             if (!mc::gpu::push(p, chunk, err, sizeof err)) {
                 fprintf(stderr, "GPU KAT: push failed — %s\n", err);
                 return 1;
@@ -196,7 +193,7 @@ int main(int argc, char** argv) {
     // Also proves k_fill is bit-identical to fill_random(): same constants.
     {
         mc::gpu::Prover p;
-        if (!mc::gpu::create(p, kNumWords, mc::gpu::Alloc::Device, 64, 1.0, 0.0, err, sizeof err)) {
+        if (!mc::gpu::create(p, kNumWords, 64, err, sizeof err)) {
             fprintf(stderr, "GPU KAT: create failed — %s\n", err);
             return 1;
         }
