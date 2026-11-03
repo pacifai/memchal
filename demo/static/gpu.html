@@ -45,7 +45,6 @@
           <option value="honest" selected>honest — cudaMalloc, verified</option>
           <option value="partial">partial — slice served from host memory</option>
           <option value="uvm">uvm — cudaMallocManaged, pages migrate</option>
-          <option value="zerocopy">zerocopy — whole buffer in host memory</option>
           <option value="fake">fake — fabricates the withheld part</option>
         </select>
       </label>
@@ -53,11 +52,11 @@
 
       <div class="knob" id="offloadKnob">
         <span class="lab">host-resident fraction <b class="num" id="offloadLabel">10%</b></span>
-        <input type="range" id="offload" min="0" max="50" step="1" value="10">
+        <input type="range" id="offload" min="0" max="100" step="1" value="10">
       </div>
-      <div class="knob" id="hogKnob">
-        <span class="lab">free hbm after reserve <b class="num" id="hogLabel">all</b></span>
-        <input type="range" id="hog" min="0" max="16" step="1" value="0">
+      <div class="knob" id="freeKnob">
+        <span class="lab">free hbm after reserve <b class="num" id="freeLabel">all</b></span>
+        <input type="range" id="free" min="0" max="16" step="1" value="0">
       </div>
       <div class="knob" id="fracKnob">
         <span class="lab">fraction held <b class="num" id="fracLabel">50%</b></span>

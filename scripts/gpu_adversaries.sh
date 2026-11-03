@@ -2,34 +2,26 @@
 # gpu_adversaries.sh — run the honest GPU prover and each GPU cheat against the
 # same verifier settings, in one session, and print the p50 ratios.
 #
-# Why one script rather than four commands: the only trustworthy comparison is
-# within a single session on a single card. Absolute microseconds here do not
-# transfer to another box, another rental of the same box, or another day —
-# clock locking is normally denied on a container provider, so the card's own
-# clock wanders. Ratios measured minutes apart on one card are what mean
-# something.
-#
-# Modes are interleaved rather than run in blocks for the same reason: thermal
-# drift over a long session would otherwise look like a treatment effect.
-#
-# The verifier's --fold defaults to sequential, because the tree fold changes
-# the answers and so has to be opted into. This script therefore has to name it:
-# without --fold the sweep measures a fold the project no longer ships, and its
-# p50s are roughly twice what the shipped one produces at the same geometry.
+# Absolute times do not transfer between cards or sessions, so compare ratios
+# within one run. Modes are interleaved so thermal drift spreads across all of
+# them. uvm runs with --leave-free MiB of HBM free, and partial runs with
+# --offload of the buffer in host memory.
 #
 # Usage: bash scripts/gpu_adversaries.sh [--mb 4096] [--k 262144] [--lanes 16384]
-#                                        [--n 50] [--hog 41000] [--cycles 2]
-#                                        [--fold tree|sequential]
+#                                        [--n 50] [--leave-free 2048] [--offload 1.0]
+#                                        [--cycles 2] [--fold tree|sequential]
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-MB=4096; K=262144; LANES=16384; N=50; WARMUP=10; HOG=41000; CYCLES=2; PORT=9099
+MB=4096; K=262144; LANES=16384; N=50; WARMUP=10; LEAVE_FREE=2048; OFFLOAD=1.0
+CYCLES=2; PORT=9099
 FOLD=tree
 while [ $# -gt 0 ]; do
   case "$1" in
     --mb) MB="$2"; shift 2 ;; --k) K="$2"; shift 2 ;;
     --lanes) LANES="$2"; shift 2 ;; --n) N="$2"; shift 2 ;;
-    --warmup) WARMUP="$2"; shift 2 ;; --hog) HOG="$2"; shift 2 ;;
+    --warmup) WARMUP="$2"; shift 2 ;; --leave-free) LEAVE_FREE="$2"; shift 2 ;;
+    --offload) OFFLOAD="$2"; shift 2 ;;
     --cycles) CYCLES="$2"; shift 2 ;; --port) PORT="$2"; shift 2 ;;
     --fold) FOLD="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 1 ;;
@@ -67,12 +59,14 @@ run_one() {
     nohup ./prover_cuda --port "$PORT" --trace 10 --lane-cap "$LANES" \
       > "$OUT/prover-$tag.log" 2>&1 &
   else
-    local hog=0
-    # Only the migrating and host-mapped cheats care about HBM pressure; fake
-    # allocates device memory outright and holds less of it by design.
-    [ "$mode" = "uvm" ] && hog="$HOG"
-    nohup ./cheating_prover_cuda --port "$PORT" --mode "$mode" --frac 0.5 \
-      --hog "$hog" --trace 10 --lane-cap "$LANES" \
+    local extra=()
+    case "$mode" in
+      fake)    extra=(--frac 0.5) ;;
+      uvm)     extra=(--leave-free "$LEAVE_FREE") ;;
+      partial) extra=(--offload "$OFFLOAD") ;;
+    esac
+    nohup ./cheating_prover_cuda --port "$PORT" --mode "$mode" "${extra[@]}" \
+      --trace 10 --lane-cap "$LANES" \
       > "$OUT/prover-$tag.log" 2>&1 &
   fi
 
@@ -81,8 +75,6 @@ run_one() {
     return 1
   fi
 
-  # The card's clock wanders and cannot be locked here, so record it beside the
-  # trial rather than pretending it was constant.
   nvidia-smi --query-gpu=clocks.sm,clocks.mem,temperature.gpu,clocks_throttle_reasons.active \
              --format=csv,noheader > "$OUT/clocks-$tag.txt" 2>/dev/null
 
@@ -94,19 +86,20 @@ run_one() {
   local rc=$?
   kill_provers
   if [ "$rc" -ne 0 ]; then
-    echo "  $tag: verifier exited $rc (900s timeout is a result, not a crash — see the log)"
+    echo "  $tag: verifier exited $rc (a 900 s timeout counts as a result; see the log)"
     return 1
   fi
   return 0
 }
 
 echo "geometry: ${MB} MiB buffer, k=$K, lanes=$LANES, depth=$((K / LANES)), n=$N, fold=$FOLD"
+echo "uvm leaves ${LEAVE_FREE} MiB free; partial offloads ${OFFLOAD}"
 echo "output:   $OUT"
 echo
 
 for c in $(seq 1 "$CYCLES"); do
   echo "--- cycle $c of $CYCLES ---"
-  for m in honest fake uvm zerocopy; do
+  for m in honest fake uvm partial; do
     printf '  %-9s ' "$m"
     if run_one "$m" "$c"; then
       read -r p50 err < <(python3 scripts/gpu_adversaries.py p50 "$OUT/$m-c$c.json" 2>/dev/null)

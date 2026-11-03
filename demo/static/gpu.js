@@ -9,7 +9,7 @@
 const $ = (id) => document.getElementById(id);
 const el = {};
 ['led','statusText','deviceText','themeBtn','runBtn','stopBtn','mode','modeHint',
- 'offload','offloadLabel','offloadKnob','hog','hogLabel','hogKnob','frac','fracLabel','fracKnob',
+ 'offload','offloadLabel','offloadKnob','free','freeLabel','freeKnob','frac','fracLabel','fracKnob',
  'mb','k','lanes','n','warmup','gap','verify','geomHint','gen','chain','nonce','fold',
  'residency','resLegend','resBadges','timesplit','timeLegend','detect','latency','latLegend',
  'cSm','cTemp','cGbps','cErr','cardBadges','log','synthetic',
@@ -18,13 +18,12 @@ const el = {};
 
 const MODE_HINTS = {
   honest:   'cudaMalloc, then cudaPointerGetAttributes must report device memory. If it reports anything else the prover exits at startup, before serving any challenge.',
-  partial:  'Every byte held, every answer correct. A tail of the buffer sits in pinned host memory and the kernel reads it over PCIe, so its cost lands in kernel time, not in readback.',
+  partial:  'Every byte held, every answer correct. A tail of the buffer sits in pinned host memory and the kernel reads it over PCIe, so its cost lands in kernel time. At 100% the whole buffer is in host memory.',
   uvm:      'cudaMallocManaged. Pages migrate between host and card on fault and the driver will not report how many are where. Indistinguishable from honest while the buffer fits in free HBM.',
-  zerocopy: 'cudaHostAlloc, mapped. No bytes on the card; every probe crosses PCIe.',
   fake:     'Holds a fraction and derives the rest from a constant. Fast and wrong — caught by the answer, not the clock.',
 };
 
-const HOG_STEPS = 16;
+const FREE_STEPS = 16;
 const STORE_KEY = 'memchal.gpu.v1';
 const state = {
   phase: 'idle', cfg: null, challenges: [], gpu: [], smi: null, end: null,
@@ -147,7 +146,7 @@ function drawResidency() {
   const p = P();
   const mode = state.cfg ? state.cfg.mode : 'honest';
   let onCard = state.residentFrac;
-  if (onCard == null) onCard = mode === 'zerocopy' ? 0 : 1;
+  if (onCard == null) onCard = mode === 'partial' && state.cfg ? 1 - state.cfg.offload : 1;
   const absent = (mode === 'fake' && state.cfg) ? 1 - (state.cfg.frac ?? 0.5) : 0;
   const card = Math.max(0, onCard - absent);
   const host = Math.max(0, 1 - card - absent);
@@ -462,26 +461,18 @@ function renderHistory() {
 }
 
 // ── controls ────────────────────────────────────────────────────────────────
-// The reserve slider used to take a fraction of the CARD (up to 90% of total),
-// which cannot reach the cliff for a small buffer: 90% of an 80 GiB card still
-// leaves 8 GiB free, so a 1 GiB managed buffer always fits and uvm always looks
-// honest. The experiment is about free HBM relative to the BUFFER, so the
-// slider now sets that ratio directly, geometrically from 8x down to 0.25x.
-// The crossover (1x) then sits near 60% of the travel at any buffer size.
+// The reserve slider sets free HBM as a multiple of the buffer size,
+// geometrically from 8x down to 0.25x.
 const FREE_HI = 8, FREE_LO = 0.25;
-// The smallest free space the page will ask for. 256 MiB free under a 1 GiB
-// managed buffer with 131072 lanes took ~90 s per challenge, then the kernel
-// died with an illegal memory access and wedged the driver until the pod was
-// released. 4096 MiB with ~2.5 GiB free and 16384 lanes ran cleanly at ~3.5 s
-// per challenge. The floor sits near that known-good point; where between the
-// two the failure starts is unmeasured.
+// 256 MiB free under a 1 GiB managed buffer with 131072 lanes wedged the
+// driver; 4096 MiB with ~2.5 GiB free and 16384 lanes ran cleanly.
 const FREE_FLOOR_MIB = 1024;
 // Lanes above this, on a starved buffer, is the configuration that crashed.
 const STARVED_LANES_MAX = 16384;
 function freeRatio() {
-  const pos = Number(el.hog.value) || 0;
+  const pos = Number(el.free.value) || 0;
   if (!pos) return null;                       // 0 = reserve nothing
-  return FREE_HI * Math.pow(FREE_LO / FREE_HI, pos / HOG_STEPS);
+  return FREE_HI * Math.pow(FREE_LO / FREE_HI, pos / FREE_STEPS);
 }
 // MiB the prover should leave free. The prover measures what is free and
 // reserves the rest itself; computing a reserve here from the card's total
@@ -497,17 +488,17 @@ function syncControls() {
   const mode = el.mode.value;
   el.modeHint.textContent = MODE_HINTS[mode] || '';
   el.offloadKnob.style.display = mode === 'partial' ? '' : 'none';
-  el.hogKnob.style.display = (mode === 'uvm' || mode === 'zerocopy') ? '' : 'none';
+  el.freeKnob.style.display = mode === 'uvm' ? '' : 'none';
   el.fracKnob.style.display = mode === 'fake' ? '' : 'none';
   el.offloadLabel.textContent = `${el.offload.value}%`;
   el.fracLabel.textContent = `${el.frac.value}%`;
   const r = freeRatio();
   if (r == null) {
-    el.hogLabel.textContent = 'all';
+    el.freeLabel.textContent = 'all';
   } else {
     const f = freeMib();
     const mb = Number(el.mb.value) || 1;
-    el.hogLabel.textContent = `${(f / 1024).toFixed(2)} GiB · ${(f / mb).toFixed(2)}x buffer`;
+    el.freeLabel.textContent = `${(f / 1024).toFixed(2)} GiB · ${(f / mb).toFixed(2)}x buffer`;
   }
 
   const k = Number(el.k.value) || 1, lanes = Number(el.lanes.value) || 1;
@@ -568,7 +559,7 @@ function syncControls() {
 // session), so it says what to look for, not what this run must produce.
 const SWEEP = { mb: 4096, k: 262144, lanes: 16384, warmup: 10, gap: 0, verify: 10,
                 gen: 'argon2d', chain: 'dependent', nonce: 'random', fold: 'tree',
-                offload: 10, hog: 0, frac: 50, n: 200 };
+                offload: 10, free: 0, frac: 50, n: 200 };
 const PRESETS = [
   { id: 'honest', name: 'honest', by: 'baseline', set: { mode: 'honest' },
     hint: 'The whole buffer in HBM, allocated with cudaMalloc and verified. Run it first: it is the baseline every other preset is compared against.',
@@ -576,13 +567,13 @@ const PRESETS = [
   { id: 'fake', name: 'fake', by: 'correctness', set: { mode: 'fake', frac: 50 },
     hint: 'Holds half the buffer in HBM and makes up the other half. Fast, but its answers are wrong.',
     expect: [['answers', '100% wrong'], ['speed', '~0.8× honest']] },
-  { id: 'uvm-fits', name: 'uvm, fits', by: 'not caught', set: { mode: 'uvm', hog: 0 },
+  { id: 'uvm-fits', name: 'uvm, fits', by: 'not caught', set: { mode: 'uvm', free: 0 },
     hint: 'Managed memory with all of HBM free. The driver moves the whole buffer onto the card, so the data really is resident and passing is the correct result.',
     expect: [['answers', 'all correct'], ['speed', '~0.85× honest']] },
-  { id: 'uvm-starved', name: 'uvm, starved', by: 'timing', set: { mode: 'uvm', hog: 12, n: 20, warmup: 2 },
+  { id: 'uvm-starved', name: 'uvm, starved', by: 'timing', set: { mode: 'uvm', free: 12, n: 20, warmup: 2 },
     hint: 'Managed memory with about 2.4 GiB of HBM left free under a 4 GiB buffer. Pages move back and forth on every challenge. About 3.5 s per challenge, so it runs 20.',
     expect: [['answers', 'all correct'], ['speed', '~16,800× honest']] },
-  { id: 'zerocopy', name: 'zerocopy', by: 'timing', set: { mode: 'zerocopy', hog: 0 },
+  { id: 'host', name: 'partial, 100%', by: 'timing', set: { mode: 'partial', offload: 100 },
     hint: 'The whole buffer in host RAM. Every read crosses PCIe.',
     expect: [['answers', 'all correct'], ['speed', '~29× honest']] },
   { id: 'partial-10', name: 'partial, 10%', by: 'timing', set: { mode: 'partial', offload: 10 },
@@ -596,7 +587,7 @@ const PRESETS = [
     expect: [['answers', 'all correct'], ['speed', '~1.1× honest, within noise']] },
 ];
 const PRESET_IDS = ['mode', 'mb', 'k', 'lanes', 'n', 'warmup', 'gap', 'verify',
-                    'gen', 'chain', 'nonce', 'fold', 'offload', 'hog', 'frac'];
+                    'gen', 'chain', 'nonce', 'fold', 'offload', 'free', 'frac'];
 let activePreset = null;
 const presetValues = (pr) => ({ ...SWEEP, ...pr.set });
 
@@ -666,6 +657,7 @@ function handle(e) {
       break;
     case 'cheatinfo':
       state.backing = e.backing;
+      if (e.resident_frac != null) state.residentFrac = e.resident_frac;
       if (e.hbm_total) { state.hbmTotal = e.hbm_total; state.hbmUsed = e.hbm_used; }
       log(`${e.mode}: driver says "${e.backing}"`, 'prover');
       if (e.build) log(`prover built the buffer on the host in ${Number(e.build_s).toFixed(1)}s`, 'prover');
@@ -755,7 +747,7 @@ el.runBtn.addEventListener('click', async () => {
     mb: +el.mb.value, k: +el.k.value, lanes: +el.lanes.value,
     n: +el.n.value, warmup: +el.warmup.value, gap: +el.gap.value,
     verify: +el.verify.value,
-    hog: 0, free: freeMib(), trace: 1,
+    free: freeMib(), trace: 1,
     frac: (+el.frac.value) / 100, offload: (+el.offload.value) / 100,
   };
   try {
@@ -776,7 +768,7 @@ el.clearHistBtn.addEventListener('click', () => {
   state.history = []; save(); renderHistory();
 });
 ['input', 'change'].forEach(ev => {
-  ['mode', 'offload', 'hog', 'frac', 'k', 'lanes', 'mb', 'chain', 'gen']
+  ['mode', 'offload', 'free', 'frac', 'k', 'lanes', 'mb', 'chain', 'gen']
     .forEach(id => el[id].addEventListener(ev, () => { syncControls(); renderBaseline(); }));
   PRESET_IDS.forEach(id => el[id].addEventListener(ev, renderPresets));
 });
