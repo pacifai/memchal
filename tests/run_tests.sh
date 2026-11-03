@@ -166,7 +166,7 @@ run_invariant() {
 # --- Case 1: honest prover — errors must be 0 ---
 run_invariant "honest" 9101 \
     correct \
-    ./prover 9101
+    ./prover --port 9101
 
 # --- Case 2: cheating_prover disk mode — correct answers, errors must be 0 ---
 run_invariant "disk" 9102 \
@@ -194,7 +194,7 @@ _SAVE_ARGS="$VERIFIER_ARGS"; VERIFIER_ARGS="$VERIFIER_ARGS --gen argon2d"
 
 run_invariant "build_honest" 9121 \
     correct \
-    ./prover 9121
+    ./prover --port 9121
 
 run_invariant "build_cheat_honest" 9122 \
     correct \
@@ -239,7 +239,7 @@ VERIFIER_EXTRA="--gen chacha" run_invariant "recompute_vs_chacha20" 9108 \
 # handshake between the new fill_buffer_chacha path and the prover's answer.
 VERIFIER_EXTRA="--gen chacha" run_invariant "honest_vs_chacha" 9112 \
     correct \
-    ./prover 9112
+    ./prover --port 9112
 
 # --- Case 9: precompute vs sequential nonces — attack SUCCEEDS, 0 errors ---
 # The precompute adversary caches answers from predicted nonces; against
@@ -274,7 +274,7 @@ VERIFIER_ARGS="$VERIFIER_ARGS --chain dependent"
 
 run_invariant "chain_dep_honest" 9201 \
     correct \
-    ./prover 9201
+    ./prover --port 9201
 
 run_invariant "chain_dep_disk" 9202 \
     correct \
@@ -293,6 +293,25 @@ run_invariant "chain_dep_fake" 9205 \
     ./cheating_prover --port 9205 --mode fake --frac 0.5 --datafile /tmp/memchal_test_dep_fake.bin
 
 VERIFIER_ARGS="$_SAVE_VERIFIER_ARGS"
+
+# ---------------------------------------------------------------------------
+# Step 3c: INVARIANT tests under --fold tree. The tree fold gives a different
+# answer, so every prover has to implement it, not only the GPU ones.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== INVARIANT TESTS (--fold tree) ==="
+
+VERIFIER_EXTRA="--fold tree" run_invariant "tree_honest" 9301 \
+    correct \
+    ./prover --port 9301
+
+VERIFIER_EXTRA="--fold tree" run_invariant "tree_disk" 9302 \
+    correct \
+    ./cheating_prover --port 9302 --mode disk --datafile /tmp/memchal_test_tree_disk.bin
+
+VERIFIER_EXTRA="--fold tree" run_invariant "tree_fake" 9303 \
+    all_wrong \
+    ./cheating_prover --port 9303 --mode fake --frac 0.5 --datafile /tmp/memchal_test_tree_fake.bin
 
 # ---------------------------------------------------------------------------
 # Step 4: live demo instrumentation. The browser demo draws its page map from two
