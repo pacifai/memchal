@@ -12,9 +12,9 @@ the numbers live in the investigations, the deeper framing in
 [NEXT_STEPS](../../NEXT_STEPS.md) and [ADR 0003](0003-timing-detector-scope-and-measurement.md).
 
 All of this is the **send-buffer** design (the prover receives the bytes; the
-verifier keeps the seed). The **build-buffer** design (the verifier ships a seed,
-which needs a *memory-hard* generator) is out of scope and remains an open research
-problem.
+verifier keeps the seed). The **build-buffer** design, where the verifier ships a
+recipe and both sides build the buffer with a memory-hard generator, is
+[ADR 0007](0007-buffer-generator-memory-hard-function.md).
 
 ## The three escape hatches and their defenses
 
@@ -72,6 +72,5 @@ specifically.
 ## Related
 Investigations: `disk-is-syscalls`,
 `mmap-needs-ram`,
-`prefetch-needs-pattern`. The send-buffer
-vs build-buffer rationale and the weight-bound goal are in the NEXT_STEPS roadmap
-("Next — proving residency of the real workload").
+`prefetch-needs-pattern`. The build-buffer design is
+[ADR 0007](0007-buffer-generator-memory-hard-function.md).

@@ -29,6 +29,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 STATE="$ROOT/.gpu_demo_state"
+. runpod/env.sh
 
 ACTION=terminate
 FORCE=0
@@ -56,6 +57,7 @@ fi
 # shellcheck disable=SC1090
 . "$STATE"
 : "${POD_ID:?state file has no POD_ID}"
+SSH_KEY="${SSH_KEY:-${MEMCHAL_SSH_KEY:-}}"
 echo "pod:        $POD_ID"
 echo "created:    ${CREATED:-unknown}"
 echo "local port: ${LPORT:-8777}"
@@ -79,7 +81,7 @@ fi
 
 SSH=""
 if [ -n "${SSH_HOST:-}" ] && [ -n "${SSH_PORT:-}" ]; then
-  SSH="ssh -i ${SSH_KEY:-$HOME/.ssh/neta-pacifai-runpod} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -p $SSH_PORT root@$SSH_HOST"
+  SSH="ssh -i $SSH_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -p $SSH_PORT root@$SSH_HOST"
 fi
 
 # --- 1 and 2. quiet the card, then rescue the measurements ------------------
@@ -98,7 +100,7 @@ if [ -n "$SSH" ] && deadline 30 $SSH true 2>/dev/null; then
   ARCHIVE=$(deadline 30 $SSH 'ls -t /root/memchal-results-*.tar.gz 2>/dev/null | head -1' 2>/dev/null | tr -d '\r')
   if [ -n "$ARCHIVE" ]; then
     mkdir -p "$ROOT/results"
-    if deadline 300 scp -q -i "${SSH_KEY:-$HOME/.ssh/neta-pacifai-runpod}" -o IdentitiesOnly=yes \
+    if deadline 300 scp -q -i "$SSH_KEY" -o IdentitiesOnly=yes \
            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
            -P "$SSH_PORT" "root@$SSH_HOST:$ARCHIVE" "$ROOT/results/"; then
       LOCAL="$ROOT/results/$(basename "$ARCHIVE")"
@@ -119,7 +121,7 @@ if [ -n "$SSH" ] && deadline 30 $SSH true 2>/dev/null; then
     echo "  no results archive on the pod — copying results/ directly"
     DEST="$ROOT/results/pod-$POD_ID"
     mkdir -p "$DEST"
-    if deadline 300 rsync -az -e "ssh -i ${SSH_KEY:-$HOME/.ssh/neta-pacifai-runpod} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p $SSH_PORT" \
+    if deadline 300 rsync -az -e "ssh -i $SSH_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p $SSH_PORT" \
          "root@$SSH_HOST:/root/memchal/results/" "$DEST/" 2>/dev/null; then
       echo "  saved: results/pod-$POD_ID/  ($(find "$DEST" -type f | wc -l | tr -d ' ') files)"
     else
