@@ -181,7 +181,7 @@ if ./tests/known_answer_gpu --device "$DEVICE"; then
   echo
   echo "Next: start the prover and point the verifier at it."
   echo
-  echo "  ./prover_cuda 9099 --trace &"
+  echo "  ./prover_cuda --port 9099 --trace 10 &"
   echo "  ./verifier --port 9099 --mb 4096 --k 262144 --lanes 16384 \\"
   echo "             --n 200 --warmup 20 --json results/gpu_trial.json"
   echo

@@ -42,8 +42,11 @@ limits of the test environment, and the rules that keep results trustworthy.
 - `src/gpu_answer.cu`, `src/gpu_answer.hpp` — the CUDA answer path, one thread per
   lane. The `.cu` file is the only one `nvcc` compiles. The header uses no CUDA
   types, so its callers build with `g++`.
-- `src/gpu_ingest.hpp` — how the GPU provers receive the buffer: uploaded bytes,
-  or a recipe they build on the host, copied to the card through pinned staging.
+- `src/server.hpp` — what every prover shares: the listener, reading the
+  verifier's opening messages, receiving or building the buffer, and the
+  challenge loop. `src/cli.hpp` is the strict flag parsing every program uses,
+  and `src/pinned.hpp` is the locked memory the CPU provers hold the buffer in.
+- `src/gpu_ingest.hpp` — copies the buffer to the card through pinned staging.
 - `src/argon2d_rebuild.hpp` — the partial-recompute adversary's engine. It rebuilds
   one Argon2d block from a partial copy of the matrix.
 - `src/bench_build.cpp` — measures what one 1 KiB Argon2d block costs to build.

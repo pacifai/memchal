@@ -21,13 +21,13 @@ CUDA_LIBS ?= -L$(CUDA_HOME)/lib64 -lcudart
 
 all: prover verifier cheating_prover bench_build
 
-prover: src/prover.cpp src/challenge.hpp src/net.hpp src/argon2d.hpp
+prover: src/prover.cpp src/challenge.hpp src/net.hpp src/argon2d.hpp src/cli.hpp src/server.hpp src/pinned.hpp
 	$(CXX) $(CXXFLAGS) -o $@ src/prover.cpp
 
-verifier: src/verifier.cpp src/challenge.hpp src/net.hpp src/argon2d.hpp
+verifier: src/verifier.cpp src/challenge.hpp src/net.hpp src/argon2d.hpp src/cli.hpp
 	$(CXX) $(CXXFLAGS) -o $@ src/verifier.cpp
 
-cheating_prover: src/cheating_prover.cpp src/challenge.hpp src/net.hpp src/argon2d.hpp
+cheating_prover: src/cheating_prover.cpp src/challenge.hpp src/net.hpp src/argon2d.hpp src/cli.hpp src/server.hpp src/pinned.hpp
 	$(CXX) $(CXXFLAGS) -o $@ src/cheating_prover.cpp
 
 # Build-cost benchmark for the memory-hard buffer generator (ADR 0007).
@@ -64,10 +64,10 @@ gpu_answer.o: src/gpu_answer.cu src/gpu_answer.hpp src/challenge.hpp src/chacha2
 
 # These two are ordinary C++: they include gpu_answer.hpp, which is free of CUDA
 # types, so they compile with g++ and only need libcudart at link time.
-prover_cuda: src/prover_cuda.cpp src/challenge.hpp src/net.hpp src/argon2d.hpp src/gpu_answer.hpp src/gpu_ingest.hpp gpu_answer.o
+prover_cuda: src/prover_cuda.cpp src/challenge.hpp src/net.hpp src/argon2d.hpp src/cli.hpp src/server.hpp src/gpu_answer.hpp src/gpu_ingest.hpp gpu_answer.o
 	$(CXX) $(CXXFLAGS) -Isrc -o $@ src/prover_cuda.cpp gpu_answer.o $(CUDA_LIBS)
 
-cheating_prover_cuda: src/cheating_prover_cuda.cpp src/challenge.hpp src/net.hpp src/argon2d.hpp src/argon2d_rebuild.hpp src/gpu_answer.hpp src/gpu_ingest.hpp gpu_answer.o
+cheating_prover_cuda: src/cheating_prover_cuda.cpp src/challenge.hpp src/net.hpp src/argon2d.hpp src/cli.hpp src/server.hpp src/argon2d_rebuild.hpp src/gpu_answer.hpp src/gpu_ingest.hpp gpu_answer.o
 	$(CXX) $(CXXFLAGS) -Isrc -o $@ src/cheating_prover_cuda.cpp gpu_answer.o $(CUDA_LIBS)
 
 tests/known_answer_gpu: tests/known_answer_gpu.cpp src/challenge.hpp src/gpu_answer.hpp gpu_answer.o
