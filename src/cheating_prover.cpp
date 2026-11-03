@@ -418,8 +418,8 @@ static void serve(int cfd) {
     if (!read_setup(cfd, s, err, sizeof err)) { fprintf(stderr, "[cheat] refusing: %s\n", err); return; }
     if (g_opt.mode == HONEST) { serve_honest(cfd, s); return; }
 
-    Source src;
-    if (!open_source(src, cfd, s, err, sizeof err)) { fprintf(stderr, "[cheat] %s\n", err); return; }
+    Source src{cfd};
+    if (s.build && !build_on_host(src, s, err, sizeof err)) { fprintf(stderr, "[cheat] %s\n", err); return; }
     switch (g_opt.mode) {
         case RECOMPUTE:  serve_recompute(cfd, s, src); break;
         case DISK:

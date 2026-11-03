@@ -309,9 +309,9 @@ static void serve_recompute(int cfd, gpu::Prover& p, RecomputeCtx& rc) {
 // Builds the matrix, keeps --keep of its blocks on the card, and answers.
 static void serve_recompute_mode(int cfd, const Setup& s) {
     char err[512] = {0};
-    Source src;
+    Source src{cfd};
     RecomputeCtx rc;
-    if (!open_source(src, cfd, s, err, sizeof err) || !recompute_setup(rc, s, src.built, err, sizeof err)) {
+    if (!build_on_host(src, s, err, sizeof err) || !recompute_setup(rc, s, src.built, err, sizeof err)) {
         fprintf(stderr, "[cheat] FATAL: %s\n", err);
         free_built(src);
         return;
@@ -352,8 +352,8 @@ static void serve_alloc_mode(int cfd, const Setup& s) {
         fprintf(stderr, "[cheat] FATAL: %s\n", err);
         return;
     }
-    Source src;
-    bool ok = open_source(src, cfd, s, err, sizeof err);
+    Source src{cfd};
+    bool ok = !s.build || build_on_host(src, s, err, sizeof err);
     if (ok && s.build)
         printf("[cheat] built on the host in %.3f s (m=%u KiB t=%u p=%u); copying to the card\n",
                src.build_s, s.recipe.m_kib, s.recipe.t, s.recipe.p);

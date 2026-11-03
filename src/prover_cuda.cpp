@@ -48,8 +48,8 @@ static void serve(int cfd) {
         fprintf(stderr, "[gpu] FATAL: %s\n", err);
         return;
     }
-    Source src;
-    bool ok = open_source(src, cfd, s, err, sizeof err);
+    Source src{cfd};
+    bool ok = !s.build || build_on_host(src, s, err, sizeof err);
     if (ok && s.build)
         printf("[gpu] built on the host in %.3f s (m=%u KiB t=%u p=%u); copying to the card\n",
                src.build_s, s.recipe.m_kib, s.recipe.t, s.recipe.p);

@@ -69,9 +69,8 @@ static inline bool read_setup(int cfd, Setup& s, char* err, size_t n) {
     return true;
 }
 
-// The buffer's bytes in order: from the socket, or in build mode from a copy
-// built in host memory. Argon2d cannot build part of a buffer, so even a
-// prover that keeps none of it holds all of it once.
+// Where a prover reads the buffer's bytes from, in order: the socket, or a
+// copy that build_on_host() made.
 struct Source {
     int       fd      = -1;
     uint64_t* built   = nullptr;
@@ -84,10 +83,10 @@ static inline void free_built(Source& src) {
     src.built = nullptr;
 }
 
-static inline bool open_source(Source& src, int cfd, const Setup& s, char* err, size_t n) {
-    src = Source{};
-    src.fd = cfd;
-    if (!s.build) return true;
+// Builds the whole buffer from the recipe into host memory, so src_read()
+// returns it in place of the socket. Argon2d cannot build part of a buffer, so
+// even a prover that keeps none of it holds all of it here.
+static inline bool build_on_host(Source& src, const Setup& s, char* err, size_t n) {
     src.built = (uint64_t*)malloc(s.bytes);
     if (!src.built) {
         snprintf(err, n, "cannot allocate %.1f MiB of host memory to build in", s.bytes / 1048576.0);
