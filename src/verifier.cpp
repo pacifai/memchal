@@ -7,11 +7,11 @@
 // data, recomputes it, or let it swap to disk shows misses / a fat tail / errors.
 #include "challenge.hpp"
 #include "net.hpp"
+#include "cli.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
-#include <cerrno>
 #include <vector>
 #include <algorithm>
 #include <cmath>
@@ -210,100 +210,64 @@ static const char kUsage[] =
     "  --csv PATH --json PATH --label TEXT --seed N\n"
     "  --stream PATH|- --probe-map N live events for the demo\n";
 
-[[noreturn]] static void usage_error(const char* fmt, const char* a, const char* b = "") {
-    fprintf(stderr, "[verifier] ");
-    fprintf(stderr, fmt, a, b);
-    fprintf(stderr, "\n\n");
-    fprintf(stderr, kUsage, kDefaultPort);
-    exit(2);
-}
-
-static uint64_t parse_uint(const char* flag, const char* v) {
-    char* end = nullptr;
-    errno = 0;
-    unsigned long long x = strtoull(v, &end, 0);
-    if (errno || end == v || *end || v[0] == '-') usage_error("%s: not a number: %s", flag, v);
-    return x;
-}
-
-static uint32_t parse_u32(const char* flag, const char* v) {
-    uint64_t x = parse_uint(flag, v);
-    if (x > UINT32_MAX) usage_error("%s: out of range: %s", flag, v);
-    return (uint32_t)x;
-}
-
-// Picks one of `names` (nullptr-terminated) and returns its index. Rejecting
-// anything else matters: a typo must not quietly select a weaker setting.
-static int parse_choice(const char* flag, const char* v, const char* const* names) {
-    for (int i = 0; names[i]; ++i)
-        if (!strcmp(v, names[i])) return i;
-    usage_error("%s: unknown value: %s", flag, v);
-}
+static const Cli kCli{"verifier", kUsage, kDefaultPort};
 
 static Args parse(int argc, char** argv) {
     Args a;
-    for (int i = 1; i < argc; i += 2) {
+    for (int i = 1; i < argc; ++i) {
         const char* k = argv[i];
-        if (!strcmp(k, "--help") || !strcmp(k, "-h")) {
-            printf(kUsage, kDefaultPort);
-            exit(0);
-        }
-        if (i + 1 >= argc) usage_error("%s: missing value", k);
-        const char* v = argv[i + 1];
+        if (!strcmp(k, "--help") || !strcmp(k, "-h")) kCli.help();
+        const char* v = kCli.value(argc, argv, &i);
         if      (!strcmp(k, "--host"))   a.host = v;
-        else if (!strcmp(k, "--port")) {
-            uint64_t port = parse_uint(k, v);
-            if (port == 0 || port > 65535) usage_error("%s: out of range: %s", k, v);
-            a.port = (uint16_t)port;
-        }
+        else if (!strcmp(k, "--port"))   a.port = kCli.port(k, v);
         else if (!strcmp(k, "--mb")) {
             char* end = nullptr;
             a.mb = strtod(v, &end);
-            if (end == v || *end || !(a.mb > 0)) usage_error("%s: not a positive number: %s", k, v);
+            if (end == v || *end || !(a.mb > 0)) kCli.error("%s: not a positive number: %s", k, v);
         }
-        else if (!strcmp(k, "--k"))      a.k = parse_u32(k, v);
-        else if (!strcmp(k, "--lanes"))  a.lanes = parse_u32(k, v);
-        else if (!strcmp(k, "--n"))      a.n = parse_u32(k, v);
-        else if (!strcmp(k, "--warmup")) a.warmup = parse_u32(k, v);
+        else if (!strcmp(k, "--k"))      a.k = kCli.u32(k, v);
+        else if (!strcmp(k, "--lanes"))  a.lanes = kCli.u32(k, v);
+        else if (!strcmp(k, "--n"))      a.n = kCli.u32(k, v);
+        else if (!strcmp(k, "--warmup")) a.warmup = kCli.u32(k, v);
         else if (!strcmp(k, "--csv"))    a.csv = v;
         else if (!strcmp(k, "--json"))   a.json = v;
         else if (!strcmp(k, "--label"))  a.label = v;
-        else if (!strcmp(k, "--seed"))   a.seed = parse_uint(k, v);
+        else if (!strcmp(k, "--seed"))   a.seed = kCli.uint(k, v);
         else if (!strcmp(k, "--gen")) {
             static const char* const names[] = {"chacha", "chacha20", "splitmix64", "argon2d", nullptr};
-            int g = parse_choice(k, v, names);
+            int g = kCli.choice(k, v, names);
             a.build = (g == 3);
             a.gen = (g == 2) ? Gen::SPLITMIX64 : Gen::CHACHA20;
         }
-        else if (!strcmp(k, "--build-t")) a.build_t = parse_u32(k, v);
-        else if (!strcmp(k, "--build-p")) a.build_p = parse_u32(k, v);
+        else if (!strcmp(k, "--build-t")) a.build_t = kCli.u32(k, v);
+        else if (!strcmp(k, "--build-p")) a.build_p = kCli.u32(k, v);
         else if (!strcmp(k, "--stream")) a.stream = v;
-        else if (!strcmp(k, "--probe-map")) a.probe_map_every = parse_u32(k, v);
+        else if (!strcmp(k, "--probe-map")) a.probe_map_every = kCli.u32(k, v);
         else if (!strcmp(k, "--chain")) {
             static const char* const names[] = {"dependent", "independent", nullptr};
-            a.chained = (parse_choice(k, v, names) == 0);
+            a.chained = (kCli.choice(k, v, names) == 0);
         }
         else if (!strcmp(k, "--verify-every")) {
-            a.verify_every = parse_u32(k, v);
+            a.verify_every = kCli.u32(k, v);
             if (a.verify_every == 0) a.verify_every = 1;
         }
         else if (!strcmp(k, "--fold")) {
             // The tree fold is a different protocol with different answers, so
             // it is opt-in and travels on the wire. Default stays sequential.
             static const char* const names[] = {"sequential", "tree", nullptr};
-            a.tree = (parse_choice(k, v, names) == 1);
+            a.tree = (kCli.choice(k, v, names) == 1);
         }
         else if (!strcmp(k, "--nonce")) {
             static const char* const names[] = {"random", "sequential", nullptr};
-            a.nonce_mode = (parse_choice(k, v, names) == 0) ? NonceMode::RANDOM
+            a.nonce_mode = (kCli.choice(k, v, names) == 0) ? NonceMode::RANDOM
                                                              : NonceMode::SEQUENTIAL;
         }
-        else if (!strcmp(k, "--gap-us"))   a.gap_us = parse_u32(k, v);
+        else if (!strcmp(k, "--gap-us"))   a.gap_us = kCli.u32(k, v);
         else if (!strcmp(k, "--gap-dist")) {
             static const char* const names[] = {"fixed", "exp", nullptr};
-            a.gap_random = (parse_choice(k, v, names) == 1);
+            a.gap_random = (kCli.choice(k, v, names) == 1);
         }
-        else usage_error("unknown flag: %s", k);
+        else kCli.error("unknown flag: %s", k);
     }
     return a;
 }
