@@ -346,21 +346,28 @@ struct BufLoad {
     MC_HOST_DEVICE uint64_t operator()(uint64_t idx) const { return buf[idx]; }
 };
 
-// Raw-buffer wrapper — the honest prover and the verifier use it.
+// The answer over a plain word buffer, as the verifier computes it.
 static inline uint64_t answer_challenge(const uint64_t* buf, uint64_t num_words,
                                         uint64_t nonce, uint32_t k, uint32_t lanes,
                                         bool chained = false) {
     return answer_challenge_t(BufLoad{buf}, num_words, nonce, k, lanes, chained);
 }
 
-// The tree-fold answer over a raw buffer. `scratch` must hold `lanes` entries
-// and is destroyed; the caller owns it because this header does not allocate.
+// The tree-fold answer. `scratch` must hold `lanes` entries and is destroyed;
+// the caller owns it because this header does not allocate.
+template <typename Load>
+static inline uint64_t answer_challenge_tree_t(Load&& load, uint64_t num_words,
+                                               uint64_t nonce, uint32_t k, uint32_t lanes,
+                                               bool chained, uint64_t* scratch) {
+    if (lanes == 0) lanes = 1;
+    answer_lanes_t(load, num_words, nonce, k, lanes, chained, scratch);
+    return tree_fold(scratch, lanes, nonce, k);
+}
+
 static inline uint64_t answer_challenge_tree(const uint64_t* buf, uint64_t num_words,
                                              uint64_t nonce, uint32_t k, uint32_t lanes,
                                              bool chained, uint64_t* scratch) {
-    if (lanes == 0) lanes = 1;
-    answer_lanes_t(BufLoad{buf}, num_words, nonce, k, lanes, chained, scratch);
-    return tree_fold(scratch, lanes, nonce, k);
+    return answer_challenge_tree_t(BufLoad{buf}, num_words, nonce, k, lanes, chained, scratch);
 }
 
 } // namespace mc

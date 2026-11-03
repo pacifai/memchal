@@ -64,7 +64,7 @@ run_one() {
   kill_provers
 
   if [ "$mode" = "honest" ]; then
-    nohup ./prover_cuda "$PORT" --trace 10 --lane-cap "$LANES" \
+    nohup ./prover_cuda --port "$PORT" --trace 10 --lane-cap "$LANES" \
       > "$OUT/prover-$tag.log" 2>&1 &
   else
     local hog=0

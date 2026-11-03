@@ -139,24 +139,6 @@ static inline bool recv_all(int fd, void* p, size_t n) {
     }
     return true;
 }
-// Where a prover's buffer bytes come from. Every mode ingests the buffer through
-// src_read(), so the send-buffer and build-buffer paths differ in one place
-// rather than in each mode's setup.
-//
-// Build mode materializes the whole matrix up front, because Argon2 cannot
-// produce part of it: a prover that intends to spill to disk still needs
-// buffer-sized RAM for the duration of the build.
-struct Source {
-    int             fd    = -1;       // socket, when receiving
-    const uint64_t* built = nullptr;  // whole built buffer, when building
-    size_t          off   = 0;        // read cursor into `built`
-};
-static inline bool src_read(Source& s, void* dst, size_t n) {
-    if (!s.built) return recv_all(s.fd, dst, n);
-    memcpy(dst, (const uint8_t*)s.built + s.off, n);
-    s.off += n;
-    return true;
-}
 
 static inline void set_low_latency(int fd) {
     int one = 1;

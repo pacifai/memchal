@@ -100,7 +100,7 @@ def build_server_cmd(mode: str, port: int, args) -> list[str]:
     """Build the subprocess command to launch the server for a given mode."""
     cfg = MODE_MAP[mode]
     if cfg["server"] == "prover":
-        return ["./prover", str(port)]
+        return ["./prover", "--port", str(port)]
     else:
         cmd = ["./cheating_prover", "--port", str(port), "--mode", cfg["cheat_mode"]]
         if cfg["cheat_mode"] in ("partial", "fake"):
@@ -203,7 +203,7 @@ def main():
 
     def start_servers():
         if need_prover:
-            cmd = ["./prover", str(args.port)]
+            cmd = ["./prover", "--port", str(args.port)]
             print(f"  starting prover on port {args.port}: {cmd}")
             procs["prover"] = subprocess.Popen(
                 cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
