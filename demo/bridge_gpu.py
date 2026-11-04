@@ -17,8 +17,8 @@ WHAT IS DIFFERENT from bridge.py, and why:
     what. The honest replacement is HBM occupancy from cudaMemGetInfo plus the
     driver's own word on what backs the pointer.
   - An HBM budget instead of a RAM budget. The CPU demo starves a prover with a
-    container memory limit. Here --hog holds device memory so a managed (UVM)
-    buffer cannot fit. Same experiment, different lever.
+    container memory limit. Here --leave-free reserves device memory so a
+    managed (UVM) buffer cannot fit.
   - Clocks are recorded, not assumed. A container provider will almost
     certainly refuse to let you lock clocks, so the page shows SM clock,
     temperature, and any active throttle reason next to every measurement. A
@@ -53,7 +53,7 @@ DEVICE = os.environ.get("DEVICE", "0")
 SMI_INTERVAL = float(os.environ.get("SMI_INTERVAL", "1.0"))
 
 # ── what the browser may ask for ─────────────────────────────────────────────
-MODES = ("honest", "fake", "uvm", "zerocopy", "partial")
+MODES = ("honest", "fake", "uvm", "partial")
 GENS = ("argon2d", "chacha", "splitmix64")
 CHAINS = ("independent", "dependent")
 NONCES = ("sequential", "random")
@@ -64,11 +64,7 @@ LIMITS = {                    # field: (min, max, default)
     "lanes":  (1, 1 << 18, 16384),
     "n":      (1, 20000, 200),
     "warmup": (0, 20000, 20),
-    "hog":    (0, 262144, 0),         # MiB of device memory to reserve outright
-    "free":   (0, 262144, 0),         # MiB to leave free; the prover reserves
-                                      # the rest itself. 0 = no reserve. Wins
-                                      # over hog, because only the prover can
-                                      # see how much is actually allocatable.
+    "free":   (0, 262144, 0),         # MiB of HBM to leave free; 0 reserves nothing
     "trace":  (0, 10000, 1),
     "frac":   (0, 1, 0.5),
     "offload": (0, 1, 0.1),   # partial: fraction kept off the card
@@ -91,13 +87,7 @@ DEFAULTS = {"mode": "honest", "gen": "argon2d", "chain": "dependent",
 
 
 def clamp(name, value):
-    """Coerce one field to the type of its own default.
-
-    This used to hardcode which field was a float, which silently turned an
-    offload of 0.25 into int(0.25) == 0 — the knob appeared to work and did
-    nothing. Deriving the type from the default means a new fractional knob
-    cannot repeat it.
-    """
+    """Coerce one field to the type of its default and clamp it to its range."""
     lo, hi, default = LIMITS[name]
     cast = float if isinstance(default, float) else int
     try:
@@ -355,8 +345,7 @@ class Run:
             return [str(ROOT / "prover_cuda"), "--port", str(PROVER_PORT),
                     "--device", DEVICE, "--trace", str(c["trace"]),
                     "--lane-cap", str(max(1, c["lanes"]))]
-        reserve = (["--leave-free", str(c["free"])] if c["free"] > 0
-                   else ["--hog", str(c["hog"])])
+        reserve = ["--leave-free", str(c["free"])] if c["free"] > 0 else []
         return [str(ROOT / "cheating_prover_cuda"), "--port", str(PROVER_PORT),
                 "--device", DEVICE, "--mode", c["mode"], "--frac", str(c["frac"]),
                 *reserve, "--offload", str(c["offload"]),

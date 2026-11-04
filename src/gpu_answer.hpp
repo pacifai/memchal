@@ -1,201 +1,70 @@
-// gpu_answer.hpp — host-callable surface of the CUDA answer path.
+// gpu_answer.hpp — the honest GPU prover: a cudaMalloc buffer and the answer
+// path, one thread per lane. The header uses no CUDA types, so g++ callers can
+// include it. gpu_answer.cu implements it.
 //
-// Deliberately free of CUDA types so it can be included by plain g++ code. The
-// implementation lives in gpu_answer.cu, which includes challenge.hpp and
-// cuda_runtime.h and nothing else — no POSIX, no sockets. The server half of
-// the prover needs sockets; the kernel half must not see them.
-//
-// Every call that can fail takes an (err, errlen) pair and writes a human
-// readable reason, so the server can log why it is refusing to run.
+// Every call that can fail writes the reason to (err, errlen).
 #pragma once
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 
 namespace mc {
 namespace gpu {
 
-// How the challenge buffer is backed. Only Device is honest.
-//
-//   Device     — cudaMalloc. Resident in HBM, not pageable, not migratable.
-//   Managed    — cudaMallocManaged. The UVM adversary: pages migrate between
-//                host and device on fault, so a prover can "hold" more than the
-//                card has and still answer correctly. The GPU analog of the
-//                mmapdisk cheat, and the reason "did you cudaMalloc?" cannot be
-//                settled from outside.
-//   HostMapped — cudaHostAlloc(cudaHostAllocMapped). The buffer sits in pinned
-//                host DRAM and every probe crosses PCIe.
-//   Split      — part of the buffer in device memory and the rest in pinned
-//                host memory, in a fixed ratio. This is the partial-residency
-//                adversary, and it is the one that sets the detector's
-//                RESOLUTION: uvm and zerocopy answer "can you catch a prover
-//                holding none of it", this one answers "how little can a prover
-//                offload before you stop seeing it".
-//   Recompute  — the partial-recompute adversary (ADR 0007). Only some of the
-//                Argon2d blocks are on the card; a probe that lands on a missing
-//                one pauses its lane while the host rebuilds the block from the
-//                recipe. See create_recompute() and answer_recompute().
-enum class Alloc { Device, Managed, HostMapped, Split, Recompute };
+// Per-lane scratch and the events that time the lane kernel.
+struct Lanes {
+    uint64_t* d_hash   = nullptr;   // one hash per lane
+    uint64_t* d_hash2  = nullptr;   // the tree fold's other level
+    uint64_t* h_hash   = nullptr;   // pinned copy for the sequential fold
+    uint32_t  cap      = 0;
+    void*     ev_start = nullptr;   // cudaEvent_t
+    void*     ev_stop  = nullptr;
+};
 
-const char* alloc_name(Alloc a);
+// Pinned host memory the server receives the buffer into before push().
+struct Staging {
+    unsigned char* h      = nullptr;
+    size_t         cap    = 0;
+    uint64_t       cursor = 0;      // bytes pushed so far
+};
+
+struct Timing {
+    double kernel_ms = 0;   // the lane kernel
+    double copy_ms   = 0;   // device to host: the lane hashes, or the tree's root
+    double fold_ms   = 0;   // the fold across lanes
+};
 
 struct Prover {
-    uint64_t* d_buf      = nullptr; // device-visible words (the resident part
-                                    // when alloc == Split)
-    uint64_t* d_off      = nullptr; // Split: device pointer to the offloaded
-                                    // tail, which lives in pinned host memory
-    void*     h_off      = nullptr; // Split: the host allocation to free
-    uint64_t  split_words = 0;      // Split: words [0, split) are on the card
-    uint64_t  num_words  = 0;       // buffer size the verifier believes in
-    uint64_t  held_words = 0;       // words actually allocated (< num_words == fake)
-    bool      fabricate  = false;   // fabricate anything past held_words
-    Alloc     alloc      = Alloc::Device;
-
-    uint64_t* d_lane     = nullptr; // scratch: one hash per lane
-    uint64_t* d_lane2    = nullptr; // second buffer: a tree level cannot reduce
-                                    // in place, because thread i writes v[i]
-                                    // while thread i/2 is still reading it
-    uint64_t* h_lane     = nullptr; // pinned host copy of the above
-    uint32_t  lane_cap   = 0;
-
-    void*     h_mapped   = nullptr; // HostMapped: the host allocation to free
-    unsigned char* h_stage = nullptr; // pinned upload staging
-    size_t    stage_cap  = 0;
-    uint64_t  cursor     = 0;         // bytes pushed to the device so far
-
-    void*     ev_start   = nullptr;   // cudaEvent_t, opaque here
-    void*     ev_stop    = nullptr;
-
-    // recompute cheat. d_buf holds the kept blocks, packed. d_slot maps each
-    // block of the buffer to where its words are: >= 0 is a kept block in
-    // d_buf, <= -2 is block (-2 - slot) of d_scratch, rebuilt this challenge,
-    // and -1 is missing.
-    int32_t*  d_slot       = nullptr;
-    uint32_t  n_blocks     = 0;
-    uint32_t  n_kept       = 0;
-    uint64_t* d_scratch    = nullptr; // blocks rebuilt for the current challenge
-    uint32_t* d_scratch_id = nullptr; // which block each scratch entry is
-    uint32_t  scratch_cap  = 0;       // in blocks
-    uint32_t  scratch_used = 0;
-    uint32_t* d_need       = nullptr; // blocks the paused lanes asked for
-    uint32_t* d_nneed      = nullptr;
-    uint8_t*  d_done       = nullptr; // per lane: finished this challenge
-    uint32_t* h_need       = nullptr; // pinned copy of d_need
-    uint64_t* h_rebuilt    = nullptr; // pinned: the host's rebuilt blocks
-    uint32_t  rebuilt_cap  = 0;       // in blocks, for h_rebuilt and h_need
+    uint64_t* d_buf     = nullptr;
+    uint64_t  num_words = 0;
+    Lanes     lanes;
+    Staging   stage;
 };
 
-// Words per Argon2d block. gpu_answer.cu cannot include argon2d.hpp, so the
-// caller checks this against a2::kBlockWords.
-static constexpr uint32_t kRecomputeBlockWords = 128;
-
-// Pick a device and report what it is. Returns false if there is no usable GPU.
+// Picks a device and describes it in name.
 bool select_device(int ordinal, char* name, size_t name_len, char* err, size_t errlen);
-
-// Allocate the challenge buffer and the per-lane scratch.
-//
-// held_fraction < 1.0 allocates only that fraction of the buffer and turns on
-// fabrication for the rest — the `fake` adversary, which saves real memory and
-// is caught by correctness rather than timing.
-// Two independent knobs, easy to confuse:
-//   held_fraction  < 1.0  — the `fake` cheat. Allocate only this much and
-//                           fabricate the rest. Saves memory, answers wrong.
-//   offload_fraction > 0  — the `partial` cheat (Alloc::Split). Hold all the
-//                           data, but keep this fraction off the card. Answers
-//                           correctly, and slowly in proportion.
-bool create(Prover& p, uint64_t num_words, Alloc alloc, uint32_t lane_cap,
-            double held_fraction, double offload_fraction, char* err, size_t errlen);
-
-void destroy(Prover& p);
-
-// The recompute cheat's buffer. slot has n_blocks entries: the position of each
-// block in kept_words, or -1 if the cheat discarded it. kept_words holds n_kept
-// blocks of kRecomputeBlockWords words, already built. Only these go to the
-// card; the HBM the cheat saves is the discarded blocks.
-bool create_recompute(Prover& p, uint32_t n_blocks, const int32_t* slot,
-                      const uint64_t* kept_words, uint32_t n_kept, uint32_t lane_cap,
-                      char* err, size_t errlen);
-
-// Rebuilds blocks[0..n) into out, kRecomputeBlockWords words each. The cheat
-// supplies it, so the Argon2d code stays out of the .cu file. Returning false
-// aborts the answer; a block it could not rebuild in budget should be filled
-// with anything and the answer left to be wrong.
-using RebuildFn = bool (*)(void* ctx, const uint32_t* blocks, uint32_t n, uint64_t* out);
-
-struct RecomputeStats {
-    uint32_t rounds     = 0;   // kernel launches; each one ends with every lane done or paused
-    uint32_t rebuilt    = 0;   // distinct blocks rebuilt this challenge
-    double   rebuild_ms = 0;   // host time inside RebuildFn
-};
-
-// Answer one challenge with the recompute cheat. Each round runs every lane
-// not yet done until it finishes or reaches a missing block. The host rebuilds
-// the blocks the paused lanes asked for and puts them on the card, then the
-// next round re-runs those lanes from the start, now able to read further.
-// Re-running rather than resuming reuses answer_lane_t() unchanged, at the cost
-// of repeating each paused lane's earlier probes. kernel_ms covers all rounds,
-// host rebuilds included, because together they are what replaces the one
-// honest pass.
-bool answer_recompute(Prover& p, uint64_t nonce, uint32_t k, uint32_t lanes, bool chained,
-                      bool tree, RebuildFn rebuild, void* ctx, uint64_t* out_hash,
-                      double* kernel_ms, double* copy_ms, double* fold_ms,
-                      RecomputeStats* st, char* err, size_t errlen);
-
-// Marks the blocks rebuilt for the last challenge missing again, so the next
-// challenge cannot read them for free. Call after the response is sent: it is
-// housekeeping, not part of answering.
-bool recompute_forget(Prover& p, char* err, size_t errlen);
-
-// Pinned staging for the upload. The server recv()s straight into this, then
-// calls push() to move it onto the device, so a multi-GB buffer never needs a
-// second host copy.
-unsigned char* staging(Prover& p, size_t* cap);
-bool push(Prover& p, size_t bytes, char* err, size_t errlen);
-
-// Fill the buffer on-device from the splitmix64 generator instead of receiving
-// it. Only the GPU known-answer test uses it.
-bool fill_splitmix64(Prover& p, uint64_t seed, char* err, size_t errlen);
-
-// Answer one challenge. The lane kernel runs on the device. `tree` selects the
-// fold across lanes, and must be whatever the verifier asked for on the wire,
-// because the two folds give different answers. The sequential fold copies the
-// lane hashes back and chains them on the host; the tree fold runs on the
-// device in log2(lanes) passes and copies back only the root.
-//
-// The three timings are reported separately: kernel_ms is the memory-bound
-// work, copy_ms is PCIe, and fold_ms is the fold.
-bool answer(Prover& p, uint64_t nonce, uint32_t k, uint32_t lanes, bool chained,
-            bool tree, uint64_t* out_hash, double* kernel_ms, double* copy_ms,
-            double* fold_ms, char* err, size_t errlen);
-
-// The cudaMalloc analog of prover.cpp's VmLck check (ADR 0002). Reports what
-// the driver says backs the pointer. A managed or host pointer means the buffer
-// is NOT unconditionally resident in HBM.
-//
-// Like VmLck this is self-reported — it stops the prover fooling itself, not a
-// remote verifier. Proving it to a verifier is what the timing detector is for.
-bool residency(const Prover& p, const char** backing, bool* is_device);
-
-// cudaMemGetInfo, for the demo's HBM occupancy readout.
 void mem_info(size_t* free_bytes, size_t* total_bytes);
 
-// Hold `bytes` of device memory and do nothing with it, shrinking the HBM left
-// for the buffer. This is the GPU analog of the CPU demo's container RAM
-// budget: it is what forces a managed (UVM) buffer to actually page instead of
-// quietly migrating everything to the card and looking honest. Pass 0 to
-// release.
-bool hog(size_t bytes, char* err, size_t errlen);
-void unhog();
-
-// Achieved read bandwidth in GB/s for a challenge that probed k words of 8
-// bytes in kernel_ms. This is the honest-side number the GPU port hinges on.
+// Useful bytes per second for k probes of 8 bytes. An 8-byte probe moves at
+// least a 32-byte sector, so DRAM traffic is several times higher.
 double probe_gbps(uint32_t k, double kernel_ms);
 
-// Fraction of the buffer this prover actually holds in device memory, as it
-// understands itself. 1.0 for an honest cudaMalloc, 0.0 for host-mapped, the
-// split ratio for a partial cheat, the held fraction for a fake one. Managed
-// memory reports 1.0 because the driver will not say how much has migrated —
-// which is the whole reason that cheat is hard, and the page says so.
-double resident_fraction(const Prover& p);
+bool create(Prover& p, uint64_t num_words, uint32_t lane_cap, char* err, size_t errlen);
+void destroy(Prover& p);
+
+// Copies the next `bytes` from p.stage.h to the device.
+bool push(Prover& p, size_t bytes, char* err, size_t errlen);
+
+// Fills the buffer on the device with fill_random()'s words. The GPU
+// known-answer test uses it.
+bool fill_splitmix64(Prover& p, uint64_t seed, char* err, size_t errlen);
+
+// Answers one challenge. `tree` picks the fold, and has to match the verifier's.
+bool answer(Prover& p, uint64_t nonce, uint32_t k, uint32_t lanes, bool chained, bool tree,
+            uint64_t* out_hash, Timing* t, char* err, size_t errlen);
+
+// What the driver says backs the buffer (ADR 0008). is_device is true only for
+// cudaMalloc memory.
+const char* residency(const Prover& p, bool* is_device);
 
 } // namespace gpu
 } // namespace mc

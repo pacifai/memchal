@@ -231,7 +231,7 @@ The ratios are meaningful; the absolute microseconds do not travel.
 | `fake` | 175 us | 0.84x | **100/100** | correctness |
 | `uvm`, buffer fits in free HBM | 653 us | 1.04x | 0 | **nothing — and correctly so** |
 | `uvm`, no free HBM left | 3.49 s | **16786x** | 0 | timing |
-| `zerocopy` (host DRAM over PCIe) | 5.95 ms | **28.6x** | 0 | timing |
+| `partial --offload 1.0` (host DRAM over PCIe) | 5.95 ms | **28.6x** | 0 | timing |
 
 4096 MiB buffer, k=262144, lanes=16384, chain depth 16, tree fold, defenses on,
 n=50 per trial over two interleaved cycles. The `uvm`-fits row is the A40
@@ -241,10 +241,10 @@ steeper than the A40's 4643x.
 
 **The tree fold roughly doubled the timing detector's separation, for free.**
 Running the same sweep with each fold on the same card: honest went from 401 us
-to 208 us, while `uvm` (3.482 s to 3.489 s) and `zerocopy` (6.11 ms to 5.95 ms)
+to 208 us, while `uvm` (3.482 s to 3.489 s) and `partial --offload 1.0` (6.11 ms to 5.95 ms)
 barely moved. The fold was a fixed host-side cost every mode paid, so removing
 it shrinks the denominator and leaves the numerators alone — `uvm` 8674x to
-16786x, `zerocopy` 15.2x to 28.6x. Separation was not the reason for the change
+16786x, `partial --offload 1.0` 15.2x to 28.6x. Separation was not the reason for the change
 (`tree-fold-payoff` was about
 scaling); it is a side effect worth knowing about, because any other fixed
 overhead shared by honest and cheat is costing detector resolution the same way.

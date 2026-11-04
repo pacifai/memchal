@@ -34,7 +34,7 @@ def summary(out):
 
     base = statistics.median(by["honest"]["p50"]) if "honest" in by else None
     print(f"{'mode':<10} {'p50 us':>10} {'x honest':>10} {'errors':>8}")
-    for m in ("honest", "fake", "uvm", "zerocopy"):
+    for m in ("honest", "fake", "uvm", "partial"):
         if m not in by:
             print(f"{m:<10} {'did not run':>10}")
             continue
@@ -43,7 +43,7 @@ def summary(out):
         print(f"{m:<10} {p:>10.1f} {r:>10} {by[m]['err']:>8}")
     print()
     print("fake is meant to be FAST and WRONG: judge it by the error column, not p50.")
-    print("uvm with HBM taken away, and zerocopy, are meant to be SLOW and RIGHT.")
+    print("uvm with HBM taken away, and partial, are meant to be SLOW and RIGHT.")
 
 
 if __name__ == "__main__":
