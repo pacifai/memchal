@@ -15,7 +15,7 @@ AI-compute governance: proving a datacenter's memory really holds the workload i
 bills for.
 
 The prover and the verifier share one definition of the challenge
-(`src/challenge.hpp`). The prover answers; the verifier recomputes the same answer
+(`src/shared/challenge.hpp`). The prover answers; the verifier recomputes the same answer
 locally and compares. Because both run the same code, a correct answer is
 identical no matter where the prover's bytes came from — so only a wrong answer or
 a slow one reveals a cheat.
@@ -23,7 +23,7 @@ a slow one reveals a cheat.
 ## What it proves, and what it doesn't
 
 - **Correctness detection is solid.** A prover that fabricates any withheld data is
-  caught with probability `1 − (1−m)^k` (for `m=0.001, k=4096`, about 0.98). Tests
+  caught with probability `1 − (1−m)^s` over `s` samples (for `m=0.001, s=4096`, about 0.98). Tests
   confirm it: the `fake` prover fails every challenge; honest and disk-backed
   provers never do.
 - **Timing tracks residency, not the storage device.** The buffer being "on disk"
@@ -50,7 +50,7 @@ a slow one reveals a cheat.
 
 ## How a challenge works
 
-A challenge is `(nonce, k, lanes)`. Seeded by the nonce, the prover draws `k`
+A challenge is `(nonce, samples, lanes)`. Seeded by the nonce, the prover draws `samples`
 pseudo-random offsets spread across the whole buffer, reads each word, and folds
 them into a chained hash. Three properties make this bind to memory:
 
@@ -59,18 +59,18 @@ them into a chained hash. Three properties make this bind to memory:
 - **Every read counts.** Because the hash is chained, changing or skipping any one
   word changes the final result. There's no shortcut that reads only part of the
   buffer.
-- **The work is dominated by random-access reads.** `k` scattered reads across a
+- **The work is dominated by random-access reads.** Scattered reads across a
   large buffer. On this hardware about half the per-probe cost is the memory stall
   and half is the hashing itself.
 
-`answer_lane_t` and `answer_challenge_t` in `src/challenge.hpp` are the single
+`answer_lane`, `answer_sequential`, and `answer_tree` in `src/shared/challenge.hpp` are the single
 definition of this math, called by the prover, the cheating prover, and the
 verifier alike.
 
 ## Attacks and defenses
 
 A cheating prover has several ways to look like it's holding the data without
-actually holding it. `src/cheating_prover.cpp` implements each one as a mode, so the
+actually holding it. `src/cpu/cheating_prover.cpp` implements each one as a mode, so the
 defense is tested rather than asserted — run the attack, watch it win, turn the
 defense on, watch it lose. The first group is caught by the two built-in signals
 (a wrong answer, or a slow one). The last three are shortcuts that beat both signals
@@ -117,14 +117,14 @@ the box. To reproduce an attack winning, name the weak setting explicitly as a
 benchmark opt-out: `--gen splitmix64 --chain independent --nonce sequential` (or
 just the one you want to defeat). Selecting a defense isn't the same as it being
 effective: `--chain dependent`, for example, only helps if each lane runs a deep
-enough chain, so the verifier enforces `k / lanes ≥ 16` and refuses a shallower
+enough chain, so the verifier enforces `samples / lanes ≥ 16` and refuses a shallower
 config. The full reasoning is in
 [ADR 0004](docs/decisions/0004-adversary-taxonomy-and-defenses.md) and
 [ADR 0005](docs/decisions/0005-per-lane-chaining-vs-gpu-parallelism.md).
 
 ## Verified memory pinning
 
-The honest prover in `src/prover.cpp` maps an anonymous region, touches every
+The honest prover in `src/cpu/prover.cpp` maps an anonymous region, touches every
 page, and locks it into RAM with `mlock`. It does not trust the return value of
 `mlock`: it reads `VmLck` from `/proc/self/status` to confirm the lock took
 effect. If the buffer isn't genuinely pinned, the prover refuses to run, because
@@ -135,15 +135,15 @@ unpinned baseline.
 ## Build and run
 
 Everything builds and runs inside a linux/arm64 container (native on Apple
-Silicon — emulation would ruin the timing). `run.sh` grants the memory-lock
-privilege the honest prover needs and mounts `results/` back to the host.
+Silicon — emulation would ruin the timing). `docker/run.sh` grants the memory-lock
+privilege the honest prover needs and mounts the repository at `/work`.
 
 ```bash
-./run.sh                              # build, then a smoke test
-./run.sh bash tests/run_tests.sh      # known-answer test + invariants
+docker/run.sh                              # build, then a smoke test
+docker/run.sh bash tests/run_tests.sh      # known-answer test + invariants
 # repeat trials, then plot:
-./run.sh bash -c 'make && \
-  python3 scripts/run_trials.py --repeats 10 --n 3000 --k 4096 --mb 64 \
+docker/run.sh bash -c 'make && \
+  python3 scripts/run_trials.py --repeats 10 --challenges 3000 --samples 4096 --mb 64 \
       --modes floor,honest,disk,partial,fake,mmapdisk --out results/trials.json && \
   python3 scripts/plot.py results/trials.json'
 ```
@@ -162,7 +162,7 @@ terminal runs, not the demo.
 ## Results
 
 Measured on Docker Desktop on Apple Silicon: a linux/arm64 VM limited to 1 vCPU
-and 2 GiB, with a 64 MiB buffer, `k=4096`, and `lanes=32`. Absolute times are not
+and 2 GiB, with a 64 MiB buffer, 4096 samples, and 32 lanes. Absolute times are not
 comparable across sessions — the VM pins each container to performance or
 efficiency cores for its whole life, which swings absolute latency by about 1.6×.
 Only within-session ratios are trustworthy, and every output file is stamped with
@@ -173,7 +173,7 @@ only):
 
 | mode | p50 (µs) | ratio to honest | verify errors |
 |------|---------:|----------------:|--------------:|
-| transport floor (`k=0`) | ~47 | ~0.4× | 0 |
+| transport floor (0 samples) | ~47 | ~0.4× | 0 |
 | honest (RAM, lock verified) | ~114 | 1× | 0 |
 | disk (a read syscall per probe) | ~1850 | ~15× | 0 |
 | fake (misses fabricated) | ~108 | ~0.95× | every challenge |
@@ -188,11 +188,11 @@ What the table says:
   correctness is what catches fabrication.
 - The memory-mapped adversary matches honest while it can cache the buffer, and
   blows up to about 840× once it can't. That gap is the residency signal.
-- About 40% of the honest response time is TCP transport (the `k=0` floor), so
+- About 40% of the honest response time is TCP transport (the 0-sample floor), so
   memory time is reported as `honest − floor` with propagated error, never as a raw
   number.
 
-The fuller analysis — why `fake` is slightly faster, how latency scales with `k`,
+The fuller analysis — why `fake` is slightly faster, how latency scales with the sample count,
 and the run-to-run variance — is in
 [ADR 0003](docs/decisions/0003-timing-detector-scope-and-measurement.md).
 
@@ -202,13 +202,13 @@ The GPU port **runs, and the correctness gate passes.** On an NVIDIA A40 the CUD
 kernel reproduced all six constants pinned before any CUDA existed — twice, once
 over an uploaded buffer and once over one the GPU generated itself.
 
-The answer path ported cleanly, as intended. `answer_lane_t` is now the
+The answer path ported cleanly, as intended. `answer_lane` is now the
 per-thread kernel body, and the only non-portable line was the 128-bit multiply
 in `map_index`, which became `mulhi64()`. Three things were less obvious:
 
 - **`common.hpp` had to be split first.** It mixed the challenge math with
   `<sys/socket.h>` and `/proc` readers, so it could not be included from a `.cu`
-  file at all. The math now lives in `src/challenge.hpp`.
+  file at all. The math now lives in `src/shared/challenge.hpp`.
 - **The cross-lane fold cannot be a tree reduction.** It is a sequential chain,
   so a warp-shuffle reduction would produce a different hash while looking
   perfectly reasonable.
@@ -233,8 +233,8 @@ The ratios are meaningful; the absolute microseconds do not travel.
 | `uvm`, no free HBM left | 3.49 s | **16786x** | 0 | timing |
 | `partial --offload 1.0` (host DRAM over PCIe) | 5.95 ms | **28.6x** | 0 | timing |
 
-4096 MiB buffer, k=262144, lanes=16384, chain depth 16, tree fold, defenses on,
-n=50 per trial over two interleaved cycles. The `uvm`-fits row is the A40
+4096 MiB buffer, 262144 samples, 16384 lanes, chain depth 16, tree fold, defenses on,
+50 challenges per trial over two interleaved cycles. The `uvm`-fits row is the A40
 figure; the rest are from the H100 session, where the reserve took free HBM to
 zero rather than to just under the buffer size, which is why that row is
 steeper than the A40's 4643x.

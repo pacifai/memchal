@@ -21,7 +21,7 @@ recipe and both sides build the buffer with a memory-hard generator, is
 | Attack (`--mode`) | How it answers without retaining | Defeated by (verifier flag) | Why |
 |---|---|---|---|
 | **recompute** | Recovers the buffer's PRNG seed from one word (`splitmix64` is invertible) and regenerates every probe in O(1); holds nothing. | `--gen chacha` | ChaCha20 keyed by a **random 256-bit key** is not invertible → the seed can't be recovered → regenerated data is wrong → correctness catches it. (Capacity-hardness.) |
-| **prefetch** | Data on disk; enumerates the independent challenge's offsets up front and `MADV_WILLNEED`-batches the pages, dodging serial faults. Real **only under memory pressure**. | `--chain dependent` | Each next index depends on the last-read word (pointer-chasing) → offsets can't be enumerated/prefetched. Strength = chain depth = k/lanes; floor `k/lanes ≥ 16` enforced. (Latency-hardness.) |
+| **prefetch** | Data on disk; enumerates the independent challenge's offsets up front and `MADV_WILLNEED`-batches the pages, dodging serial faults. Real **only under memory pressure**. | `--chain dependent` | Each next index depends on the last-read word (pointer-chasing) → offsets can't be enumerated/prefetched. Strength = chain depth = samples/lanes; floor `samples/lanes ≥ 16` enforced. (Latency-hardness.) |
 | **precompute** | Nonces are predictable (`nonce_base+i`); a background thread precomputes answers for future nonces from on-disk data and serves from cache — instant, zero residency. Chaining/ChaCha don't help (done offline). | `--nonce random` | Each nonce is drawn from a ChaCha20 CSPRNG (`random_device`-keyed) → unpredictable → nothing to precompute → must read during the timed window. |
 
 The **correctness detector** (`fake` always fails) is unaffected by all three and
@@ -29,7 +29,7 @@ remains the one claim that survives regardless.
 
 ## Safety: the defaults are the *secure* settings
 The verifier ships with all three defenses on: `--gen chacha`, `--chain dependent`,
-and `--nonce random` are the defaults, so a bare `./verifier` is secure out of the box.
+and `--nonce random` are the defaults, so a bare `build/verifier` is secure out of the box.
 The **benchmark opt-out** is to name the weak setting explicitly — `--gen splitmix64
 --chain independent --nonce sequential` — which reproduces the byte-identical
 independent/splitmix64/sequential path the known-answer test and the headline measurements are pinned
@@ -45,9 +45,9 @@ default only changes what an *unflagged* run does.
 > are now secure; the weak path is one explicit flag away.
 
 Selecting a defense is still not the same as it being effective: a config can look
-defended while being toothless (e.g. `dependent` with `k = lanes` gives chain depth 1).
-The verifier rejects `k/lanes < 16` and, because `dependent` is now the default, an
-unflagged small-`k` run is refused rather than silently toothless. The demo/UI can
+defended while being toothless (e.g. `dependent` with `samples = lanes` gives chain depth 1).
+The verifier rejects `samples/lanes < 16` and, because `dependent` is now the default, an
+unflagged small-`samples` run is refused rather than silently toothless. The demo/UI can
 still *present* "dependent" as on without the depth to back it, so treat "a defense is
 selected" and "a defense is effective" as separate facts. See
 [ADR 0005](0005-per-lane-chaining-vs-gpu-parallelism.md) for the chain-depth caveat
@@ -61,7 +61,7 @@ specifically.
   loses to a plain mmap read) and a **real ~4× attack when starved**; the defense
   removes the edge only where the attack exists. See
   `prefetch-needs-pattern`. The chain floor
-  is a floor, not a cure (an attacker can still pipeline `k/lanes` probes across lanes),
+  is a floor, not a cure (an attacker can still pipeline `samples/lanes` probes across lanes),
   and chaining costs the honest prover ~3–4× (pointer-chasing kills MLP).
 - **precompute** needs the verifier to give it offline time; our tight benchmark loop
   masks it, so `--gap-us` exists to model a realistic periodic verifier. Unpredictable

@@ -53,7 +53,7 @@ worth being blunt about, because it is easy to oversell in either direction.
 
 `VmLck` was always self-reported. The CPU prover reads its own `/proc` entry and
 tells the verifier what it found. A dishonest prover could always have sent
-`locked=true` while holding nothing — and `cheating_prover.cpp` does precisely
+`locked=true` while holding nothing — and `cpu/cheating_prover.cpp` does precisely
 that. The check never proved residency to the verifier; it stopped the *honest*
 prover from publishing a baseline that was quietly unpinned. That is a real and
 useful property, and it is the one that carries over.
@@ -71,10 +71,10 @@ survives a lying prover.
 
 ## Consequences
 
-- `prover_cuda` refuses to serve on managed or host-mapped memory by default and
+- `build/gpu/prover` refuses to serve on managed or host-mapped memory by default and
   reports `Ready.locked` from the driver's answer, so the existing verifier and
   harness need no change to benefit.
-- `cheating_prover_cuda` claims `locked=true` regardless of backing. That is
+- `build/gpu/cheating_prover` claims `locked=true` regardless of backing. That is
   deliberate and documented in the source, so nobody reads it as a bug.
 - Every honest GPU trial should record the driver's reported backing alongside
   its timings, the same way CPU trials record `locked`.

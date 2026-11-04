@@ -1,15 +1,4 @@
-# CPU tests in the same container ./run.sh uses, plus a compile-only check of
-# the CUDA targets. Nothing here needs a GPU or any secret.
-#
-# Pull requests from forks run with a read-only token and no secrets, and the
-# repository setting "Require approval for all external contributors" holds
-# them until a maintainer approves the run. Never switch this workflow to
-# pull_request_target: that runs fork code with write access.
-#
-# Each action is pinned to a full commit hash, with its release tag in a
-# comment. A tag like v4 can be moved to new code by whoever controls the
-# action's repository; a commit hash can't. To update, look up the hash of
-# the new release tag and replace both.
+# Never switch this workflow to pull_request_target: it runs fork code with write access.
 name: tests
 
 on:
@@ -27,7 +16,6 @@ concurrency:
 jobs:
   cpu:
     name: CPU tests
-    # arm64, to match the linux/arm64 image the measurements are taken in.
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
@@ -35,12 +23,8 @@ jobs:
         with:
           persist-credentials: false
       - name: Build and test in the toolchain container
-        run: ./run.sh bash tests/run_tests.sh
+        run: docker/run.sh bash tests/run_tests.sh
 
-  # GitHub's standard runners have no GPU, so this job only proves the CUDA
-  # code compiles and links. The GPU known-answer test and the adversaries run
-  # by hand on a rented card. A self-hosted GPU runner would let any pull
-  # request run code on that machine, so it isn't used here.
   gpu-build:
     name: GPU build (compile only)
     runs-on: ubuntu-24.04
