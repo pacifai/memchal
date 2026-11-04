@@ -44,7 +44,7 @@ the *trustworthiness* of the numbers:
    The mmap adversary is *not* a defeat — it is resident via page cache, and dies
    (~840×) once denied the RAM. The **correctness detector remains robust**.
 2. **Measurement discipline.** Measure every mode in ONE session, **interleaved** in
-   randomized (logged) order, with the `k=0` transport **floor as a mode in the
+   randomized (logged) order, with the `samples=0` transport **floor as a mode in the
    rotation**. Report **within-session ratios** and **paired differences**
    (`honest − floor`) **with propagated error**; withhold percentiles the sample
    size can't support; flag within-session drift. Never present absolute µs as
@@ -69,15 +69,15 @@ the *trustworthiness* of the numbers:
 
 The dependent (`--chain dependent`) access path implements pointer-chasing: each
 sample index depends on the word read by the previous probe.  The latency-hardness
-it provides equals the **chain depth = k / lanes**, not k, because each lane's
+it provides equals the **chain depth = samples / lanes**, not samples, because each lane's
 *first* index is derived from a predictable seed (`mix64(nonce ^ GOLDEN*(lane+1))`)
 — computed before any memory read and therefore prefetchable.  An attacker can
-pipeline across lanes, achieving roughly 1/(k/lanes) of what a fully serial chain
+pipeline across lanes, achieving roughly 1/(samples/lanes) of what a fully serial chain
 would cost.
 
-**Practical consequence:** at `lanes = k` the chain depth is 1 and the dependent
+**Practical consequence:** at `lanes = samples` the chain depth is 1 and the dependent
 mode offers no defense over independent access (every index is independently
-predictable).  The verifier now enforces `k / lanes ≥ 16` (constant
+predictable).  The verifier now enforces `samples / lanes ≥ 16` (constant
 `kMinChainDepth`) and exits with an error if this floor is violated.  This is a
 floor on minimum defensiveness, not a cure — a determined attacker can still
 pipeline `chain_depth` probes per lane across `lanes` lanes.

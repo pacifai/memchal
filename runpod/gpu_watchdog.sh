@@ -1,31 +1,13 @@
 #!/usr/bin/env bash
-# gpu_watchdog.sh — terminate this pod when nobody is using it.
-#
-# Runs ON the pod, detached, and needs nothing from the laptop that rented it.
-# A pod left up with its tunnel open once billed for 27 hours with no runs, so
-# an open SSH session is deliberately not counted as use.
-#
-# The pod counts as busy while either is true:
-#   - a verifier process is running (a demo run or a sweep), or
-#   - a file under results/ changed in the last IDLE_MIN minutes.
-# After IDLE_MIN minutes with neither, it terminates the pod. Anything still on
-# the pod is lost with it; by then the last run is at least IDLE_MIN old.
-#
-# It uses the pod-scoped API key RunPod puts in every pod's environment. SSH
-# sessions do not inherit that environment, so it is read from PID 1. The key
-# is never printed.
-#
-# The hard cap (MAX_HOURS from boot) is enforced separately by the pod's boot
-# command, so it holds even if this script never starts.
-#
+# Terminates this pod after IDLE_MIN minutes (default 90) with no verifier running and no change under results/.
 # Usage: setsid bash runpod/gpu_watchdog.sh [IDLE_MIN] > /root/watchdog.log 2>&1 &
-#   --check   confirm the key and pod id are present, then exit (0 ok, 1 not)
+#        bash runpod/gpu_watchdog.sh --check   (exit 0 if the pod id and pod-scoped key are present)
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-envof() { tr '\0' '\n' < /proc/1/environ 2>/dev/null | sed -n "s/^$1=//p" | head -1; }
-POD_ID=$(envof RUNPOD_POD_ID)
-KEY=$(envof RUNPOD_API_KEY)
+pid1_env() { tr '\0' '\n' < /proc/1/environ 2>/dev/null | sed -n "s/^$1=//p" | head -1; }
+POD_ID=$(pid1_env RUNPOD_POD_ID)
+KEY=$(pid1_env RUNPOD_API_KEY)
 
 if [ "${1:-}" = "--check" ]; then
   [ -n "$POD_ID" ] || { echo "no RUNPOD_POD_ID in the pod environment"; exit 1; }
@@ -37,9 +19,7 @@ fi
 IDLE_MIN="${1:-90}"
 STATUS=/root/watchdog.status
 
-# Try every way RunPod offers, because which one a pod-scoped key may use has
-# not been confirmed. Success means the pod is going away, so the loop below
-# just keeps retrying until it does.
+# Asks RunPod to delete this pod through each API it offers.
 terminate() {
   echo "$(date -u +%FT%TZ) terminating $POD_ID: $1"
   if command -v runpodctl >/dev/null; then

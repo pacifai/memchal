@@ -5,65 +5,64 @@ limits of the test environment, and the rules that keep results trustworthy.
 
 ## Repository layout
 
-### Challenge and protocol
+`src/` holds the C++ and CUDA sources, one folder per part. Every program
+includes headers by their path under `src/`, for example `"shared/challenge.hpp"`.
 
-- `src/challenge.hpp` — the challenge math: offset derivation, the per-lane hash,
+### `src/shared/`: the challenge and the protocol
+
+- `challenge.hpp` — the challenge math: offset derivation, the per-lane hash,
   and both cross-lane folds. It compiles for host and device, so it includes no
-  POSIX headers. `mulhi64` is the one operation with two spellings: a 128-bit
-  multiply on the host and `__umul64hi` on the device. Frozen, and pinned by a
-  known-answer test
+  POSIX headers. Frozen, and pinned by a known-answer test
   ([ADR 0001](docs/decisions/0001-challenge-math-frozen-pinned-by-known-answer.md)).
-- `src/net.hpp` — the wire messages, the limits a prover enforces on them, socket
-  helpers, and the `/proc` readers. Host only.
-- `src/chacha20.hpp` — ChaCha20 (RFC 8439), used to generate an uploaded buffer
-  from a random key.
-- `src/argon2d.hpp` — Argon2d (RFC 9106), the memory-hard generator for the
-  build-buffer design: the verifier sends a short recipe and both sides build the
-  buffer. `mc::build_buffer()` returns the Argon2d matrix itself as the buffer.
-  Frozen like the challenge math, and pinned against RFC test vectors
+- `chacha20.hpp` — ChaCha20 (RFC 8439), used to generate an uploaded buffer from
+  a random key.
+- `argon2d.hpp` — Argon2d (RFC 9106), the memory-hard generator for build mode:
+  the verifier sends a short recipe and both sides build the buffer. Frozen like
+  the challenge math, and pinned against RFC test vectors
   ([ADR 0007](docs/decisions/0007-buffer-generator-memory-hard-function.md)).
+- `argon2d_rebuild.hpp` — rebuilds one Argon2d block from a partial copy of the
+  matrix, for the recompute adversary.
+- `protocol.hpp` — the wire messages, the limits a prover enforces on them, and
+  how a prover answers a challenge message.
+- `socket.hpp`, `server.hpp` — blocking socket I/O, and the parts every prover
+  shares: the listener, the opening exchange, receiving or building the buffer,
+  and the challenge loop.
+- `cli.hpp`, `json.hpp`, `random.hpp`, `thread_pool.hpp` — small utilities.
 
 ### Programs
 
-- `src/verifier.cpp` — the client. It generates the buffer and uploads it
-  (`--gen chacha` or `--gen splitmix64`), or sends a recipe (`--gen argon2d`). It
-  then times challenges, checks answers, and writes JSON and CSV. The defenses are
-  on by default; `--help` lists the flags.
-- `src/prover.cpp` — the honest CPU prover. It maps, prefaults, and locks the
-  buffer with `mlock`, confirms the lock through `VmLck`, and refuses to run
-  unlocked ([ADR 0002](docs/decisions/0002-verify-and-refuse-on-mlock.md)).
-- `src/cheating_prover.cpp` — the CPU adversaries: `honest`, `disk`, `partial`,
-  `fake`, `mmapdisk`, `recompute`, `prefetch`, and `precompute`.
-- `src/prover_cuda.cpp` — the honest GPU prover. It allocates with `cudaMalloc`
-  and confirms the allocation type with `cudaPointerGetAttributes`
+- `src/verifier/` — the verifier. `main.cpp` runs a session; `args.hpp` parses
+  flags, `reference.hpp` generates the buffer, `session.hpp` issues and checks
+  challenges, and `report.hpp` writes the latency profile, CSV, and JSON.
+- `src/cpu/` — `prover.cpp` is the honest CPU prover: it locks the buffer in RAM,
+  confirms the lock through `VmLck`, and refuses to run unlocked
+  ([ADR 0002](docs/decisions/0002-verify-and-refuse-on-mlock.md)).
+  `cheating_prover.cpp` holds the CPU adversaries: `disk`, `partial`, `fake`,
+  `mmapdisk`, `recompute`, `prefetch`, and `precompute`.
+- `src/gpu/` — `prover.cpp` is the honest GPU prover: it allocates with
+  `cudaMalloc` and confirms the allocation type with `cudaPointerGetAttributes`
   ([ADR 0008](docs/decisions/0008-gpu-residency-check-substitutes-for-mlock.md)).
-- `src/cheating_prover_cuda.cpp` — the GPU adversaries: `fake`, `uvm`, `partial`,
-  and `recompute`.
-- `src/gpu_answer.cu`, `src/gpu_answer.hpp` — the honest GPU prover's buffer and
-  the answer path, one thread per lane. `src/gpu_adversary.cu` and
-  `src/gpu_adversary.hpp` hold the adversaries' buffers, and `src/gpu_kernels.cuh`
-  is what the two `.cu` files share. Only the `.cu` files go through `nvcc`. The
-  headers use no CUDA types, so their callers build with `g++`.
-- `src/server.hpp` — what every prover shares: the listener, reading the
-  verifier's opening messages, receiving or building the buffer, and the
-  challenge loop. `src/cli.hpp` is the strict flag parsing every program uses,
-  and `src/pinned.hpp` is the locked memory the CPU provers hold the buffer in.
-- `src/gpu_server.hpp` — what both GPU provers share: copying the buffer to the
-  card through pinned staging, and the events they print.
-- `src/argon2d_rebuild.hpp` — the partial-recompute adversary's engine. It rebuilds
-  one Argon2d block from a partial copy of the matrix.
-- `src/bench_build.cpp` — measures what one 1 KiB Argon2d block costs to build.
+  `cheating_prover.cpp` holds the GPU adversaries: `fake`, `uvm`, `partial`, and
+  `recompute`. Only the `.cu` files go through `nvcc`; the headers use no CUDA
+  types, so the programs build with `g++`.
+- `src/demo/` — the `@`-prefixed JSON events the browser demo reads. Nothing
+  else depends on them.
+- `src/bench/build_cost.cpp` — measures what one 1 KiB Argon2d block costs to
+  build.
 
 ### Everything else
 
-- `tests/` — the test programs and `run_tests.sh`, described below.
+- `tests/` — the tests, in folders that mirror `src/`, and `run_tests.sh`.
 - `scripts/` — the trial harness (`run_trials.py`), its statistics (`mc_stats.py`)
   and plots (`plot.py`), and the GPU adversary sweep (`gpu_adversaries.sh`).
-- `runpod/` — renting a RunPod GPU, setting it up and running the known-answer
-  test on it, running the demo bridge there, and releasing it.
 - `demo/` — the live demo. `bridge.py` drives the CPU provers in Docker;
   `bridge_gpu.py` runs on a GPU machine and starts the provers directly.
+- `docker/` — the toolchain image and `run.sh`, which runs a command in it.
+- `runpod/` — renting a RunPod GPU, setting it up, running the demo there, and
+  releasing it.
 - `docs/decisions/` — the decision records behind the design and its claims.
+
+`make` writes every binary and object under `build/`.
 
 ## Build and test
 
@@ -72,29 +71,29 @@ limits of the test environment, and the rules that keep results trustworthy.
 Everything on the CPU side builds and runs in a container:
 
 ```bash
-./run.sh                           # build and run a one-challenge smoke test
-./run.sh bash tests/run_tests.sh   # the full CPU test suite
+docker/run.sh                           # build and run a one-challenge smoke test
+docker/run.sh bash tests/run_tests.sh   # the full CPU test suite
 ```
 
-`run.sh` builds a `linux/arm64` image and runs it with memory locking allowed, a
-RAM-backed filesystem at `/ram`, fixed CPU and memory limits, and `results/`
-mounted from the host. To use another platform, set `PLATFORM`, for example
-`PLATFORM=linux/amd64`.
+`docker/run.sh` builds a `linux/arm64` image and runs it with memory locking
+allowed, a RAM-backed filesystem at `/ram`, fixed CPU and memory limits, and the
+repository mounted at `/work`. To use another platform, set `PLATFORM`, for
+example `PLATFORM=linux/amd64`.
 
 To run the trial harness and plot its result:
 
 ```bash
-./run.sh bash -c 'make && \
-  python3 scripts/run_trials.py --repeats 10 --n 3000 --k 4096 --mb 64 \
+docker/run.sh bash -c 'make && \
+  python3 scripts/run_trials.py --repeats 10 --challenges 3000 --samples 4096 --mb 64 \
      --modes floor,honest,disk,partial,fake,mmapdisk --out results/trials.json && \
   python3 scripts/plot.py results/trials.json'
 ```
 
 ### GPU
 
-On a machine with the CUDA toolkit, `make gpu` builds `prover_cuda`,
-`cheating_prover_cuda`, and `tests/known_answer_gpu`. Run
-`tests/known_answer_gpu` before trusting any GPU measurement.
+On a machine with the CUDA toolkit, `make gpu` builds `build/gpu/prover`,
+`build/gpu/cheating_prover`, and `build/tests/gpu/answer_kat`. Run
+`build/tests/gpu/answer_kat` before trusting any GPU measurement.
 
 To rent a RunPod GPU instead, register an SSH key on your RunPod account, copy
 `.env.example` to `.env`, and fill in `RUNPOD_API_KEY` and `MEMCHAL_SSH_KEY`. Then
@@ -105,17 +104,20 @@ releases the card.
 
 ### What the tests cover
 
-- `tests/known_answer.cpp` — pins the challenge math and the ChaCha20 fill to
-  fixed constants.
-- `tests/known_answer_gpu.cpp` — checks the CUDA kernel against the same
-  constants, for both folds.
-- `tests/known_answer_argon2d.cpp` — pins Argon2d against the RFC 7693 and
-  RFC 9106 test vectors.
-- `tests/differential_argon2d.cpp` — compares Argon2d with the reference
+- `tests/shared/challenge_kat.cpp` — pins the challenge math and the ChaCha20
+  fill to fixed constants.
+- `tests/shared/argon2d_kat.cpp` — pins Argon2d against the RFC 7693 and RFC 9106
+  test vectors.
+- `tests/shared/argon2d_differential.cpp` — compares Argon2d with the reference
   `libargon2` across many parameter combinations. Only this test links
   `libargon2`.
-- `tests/rebuild_argon2d.cpp` — checks that every block the recompute engine
-  rebuilds matches a full build.
+- `tests/shared/argon2d_rebuild_test.cpp` — checks that every block the rebuild
+  engine produces matches a full build.
+- `tests/cpu/seed_recovery_test.cpp` — checks the recompute adversary's
+  splitmix64 seed recovery.
+- `tests/gpu/answer_kat.cpp` — checks the CUDA kernel against the same constants
+  as `challenge_kat.cpp`, for both folds.
+- `tests/demo/` — checks the demo's event streams and its canvas sizing.
 - `tests/run_tests.sh` — builds everything, runs the tests above except the GPU
   one, and then runs a verifier against each prover and adversary to check that
   every answer is right or every answer is wrong, as expected.
@@ -130,7 +132,7 @@ measure real storage speed. The virtual CPUs land on performance or efficiency
 cores for a container's whole life, which moves absolute latency by up to about
 1.6x between sessions.
 
-It measures these reliably: correctness, how latency scales with `k`, the
+It measures these reliably: correctness, how latency scales with the samples per challenge, the
 network and fixed overhead (the `floor` mode, which sends zero probes),
 run-to-run variance, and ratios between modes within one session.
 
@@ -140,7 +142,9 @@ run-to-run variance, and ratios between modes within one session.
   and the known-answer tests fail on any change. If a change is intended, add new
   test vectors and say so in the pull request.
 - **Keep the math free of POSIX.** `challenge.hpp` must stay includable from a `.cu`
-  file, so sockets and `/proc` belong in `net.hpp`.
+  file, so sockets and `/proc` stay out of it.
+- **Keep the parts apart.** Code one part needs goes in that part's folder; code
+  two parts need goes in `src/shared/`. Demo-only output goes in `src/demo/`.
 - **Fold lane hashes only through the functions in `challenge.hpp`.** The
   sequential fold chains lanes in order, and the tree fold pairs them in a fixed
   order. Any other reduction, such as a warp shuffle, changes every answer.

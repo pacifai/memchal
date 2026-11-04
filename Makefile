@@ -1,99 +1,76 @@
-CXX      ?= g++
-CXXFLAGS ?= -O3 -std=c++17 -Wall -Wextra -pthread
-# Add -march=native locally for best codegen (kept off by default for portability):
-#   make CXXFLAGS="-O3 -std=c++17 -march=native -pthread"
-
-# --- GPU build ---------------------------------------------------------------
-# The CPU targets never need nvcc, so `make` works unchanged on a box without
-# CUDA. `make gpu` builds the GPU prover and its known-answer gate.
-#
-# One PTX floor (compute_75) plus cubins for the cards worth renting, so a
-# single binary runs on whatever the pod hands you: sm_80 A100, sm_86 for the
-# cheap Ampere dev cards, sm_90 H100/H200. Anything newer JITs from the PTX.
+CXX       ?= g++
+CXXFLAGS  ?= -O3 -std=c++17 -Wall -Wextra -pthread
 NVCC      ?= nvcc
 CUDA_HOME ?= /usr/local/cuda
-NVCCFLAGS ?= -O3 -std=c++17 -Isrc \
+NVCCFLAGS ?= -O3 -std=c++17 \
              -gencode arch=compute_75,code=compute_75 \
              -gencode arch=compute_80,code=sm_80 \
              -gencode arch=compute_86,code=sm_86 \
              -gencode arch=compute_90,code=sm_90
 CUDA_LIBS ?= -L$(CUDA_HOME)/lib64 -lcudart
 
-all: prover verifier cheating_prover bench_build
+BUILD := build
+DEPFLAGS = -MMD -MP
 
-prover: src/prover.cpp src/challenge.hpp src/net.hpp src/argon2d.hpp src/cli.hpp src/server.hpp src/pinned.hpp
-	$(CXX) $(CXXFLAGS) -o $@ src/prover.cpp
+CPU_BINS  := $(BUILD)/verifier $(BUILD)/cpu/prover $(BUILD)/cpu/cheating_prover $(BUILD)/bench/build_cost
+TEST_BINS := $(BUILD)/tests/shared/challenge_kat $(BUILD)/tests/shared/argon2d_kat \
+             $(BUILD)/tests/shared/argon2d_differential $(BUILD)/tests/shared/argon2d_rebuild_test \
+             $(BUILD)/tests/cpu/seed_recovery_test
+GPU_BINS  := $(BUILD)/gpu/prover $(BUILD)/gpu/cheating_prover $(BUILD)/tests/gpu/answer_kat
 
-verifier: src/verifier.cpp src/challenge.hpp src/net.hpp src/argon2d.hpp src/cli.hpp
-	$(CXX) $(CXXFLAGS) -o $@ src/verifier.cpp
+all: $(CPU_BINS)
+tests: $(TEST_BINS)
+gpu: $(GPU_BINS)
 
-cheating_prover: src/cheating_prover.cpp src/challenge.hpp src/net.hpp src/argon2d.hpp src/cli.hpp src/server.hpp src/pinned.hpp
-	$(CXX) $(CXXFLAGS) -o $@ src/cheating_prover.cpp
+$(BUILD)/verifier: src/verifier/main.cpp
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -Isrc -o $@ $<
 
-# Build-cost benchmark for the memory-hard buffer generator (ADR 0007).
-# Not a protocol participant: it measures what one 1 KiB block costs to build,
-# which is the attacker's unit of work in the build-buffer design.
-bench_build: src/bench_build.cpp src/argon2d.hpp
-	$(CXX) $(CXXFLAGS) -o $@ src/bench_build.cpp
+$(BUILD)/cpu/%: src/cpu/%.cpp
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -Isrc -o $@ $<
 
-# --- CPU tests ---------------------------------------------------------------
-# tests/run_tests.sh builds and runs these; the targets let you build one alone.
-# The differential test links libargon2, a test-only dependency (see Dockerfile).
-tests/known_answer: tests/known_answer.cpp src/challenge.hpp src/net.hpp src/argon2d.hpp
-	$(CXX) $(CXXFLAGS) -Isrc -o $@ tests/known_answer.cpp
+$(BUILD)/bench/%: src/bench/%.cpp
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -Isrc -o $@ $<
 
-tests/known_answer_argon2d: tests/known_answer_argon2d.cpp src/argon2d.hpp
-	$(CXX) $(CXXFLAGS) -Isrc -o $@ tests/known_answer_argon2d.cpp
+$(BUILD)/tests/shared/argon2d_differential: tests/shared/argon2d_differential.cpp
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -Isrc -o $@ $< -largon2
 
-tests/differential_argon2d: tests/differential_argon2d.cpp src/argon2d.hpp
-	$(CXX) $(CXXFLAGS) -Isrc -o $@ tests/differential_argon2d.cpp -largon2
+$(BUILD)/tests/shared/%: tests/shared/%.cpp
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -Isrc -o $@ $<
 
-# The partial-recompute cheat's engine rebuilds the same bytes build_buffer() does.
-tests/rebuild_argon2d: tests/rebuild_argon2d.cpp src/argon2d.hpp src/argon2d_rebuild.hpp
-	$(CXX) $(CXXFLAGS) -Isrc -o $@ tests/rebuild_argon2d.cpp
+$(BUILD)/tests/cpu/%: tests/cpu/%.cpp
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -Isrc -o $@ $<
 
-tests: tests/known_answer tests/known_answer_argon2d tests/differential_argon2d tests/rebuild_argon2d
+$(BUILD)/gpu/%.o: src/gpu/%.cu
+	@mkdir -p $(@D)
+	$(NVCC) $(NVCCFLAGS) $(DEPFLAGS) -Isrc -c $< -o $@
 
-# --- GPU targets -------------------------------------------------------------
-gpu: prover_cuda cheating_prover_cuda tests/known_answer_gpu
+$(BUILD)/gpu/prover: src/gpu/prover.cpp $(BUILD)/gpu/answer.o
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -Isrc -o $@ $^ $(CUDA_LIBS)
 
-# Only the .cu files need nvcc. They include challenge.hpp and the CUDA runtime,
-# and no POSIX headers.
-GPU_CU_DEPS = src/gpu_kernels.cuh src/gpu_answer.hpp src/challenge.hpp src/chacha20.hpp
+$(BUILD)/gpu/cheating_prover: src/gpu/cheating_prover.cpp $(BUILD)/gpu/answer.o $(BUILD)/gpu/adversary.o
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -Isrc -o $@ $^ $(CUDA_LIBS)
 
-gpu_answer.o: src/gpu_answer.cu $(GPU_CU_DEPS)
-	$(NVCC) $(NVCCFLAGS) -c src/gpu_answer.cu -o $@
+$(BUILD)/tests/gpu/answer_kat: tests/gpu/answer_kat.cpp $(BUILD)/gpu/answer.o
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -Isrc -o $@ $^ $(CUDA_LIBS)
 
-gpu_adversary.o: src/gpu_adversary.cu src/gpu_adversary.hpp $(GPU_CU_DEPS)
-	$(NVCC) $(NVCCFLAGS) -c src/gpu_adversary.cu -o $@
-
-# The provers are ordinary C++: the GPU headers use no CUDA types, so g++
-# compiles them and they need libcudart only at link time.
-GPU_SERVER_DEPS = src/challenge.hpp src/net.hpp src/argon2d.hpp src/cli.hpp src/server.hpp \
-                  src/gpu_answer.hpp src/gpu_server.hpp
-
-prover_cuda: src/prover_cuda.cpp $(GPU_SERVER_DEPS) gpu_answer.o
-	$(CXX) $(CXXFLAGS) -Isrc -o $@ src/prover_cuda.cpp gpu_answer.o $(CUDA_LIBS)
-
-cheating_prover_cuda: src/cheating_prover_cuda.cpp $(GPU_SERVER_DEPS) src/gpu_adversary.hpp src/argon2d_rebuild.hpp gpu_answer.o gpu_adversary.o
-	$(CXX) $(CXXFLAGS) -Isrc -o $@ src/cheating_prover_cuda.cpp gpu_answer.o gpu_adversary.o $(CUDA_LIBS)
-
-tests/known_answer_gpu: tests/known_answer_gpu.cpp src/challenge.hpp src/gpu_answer.hpp gpu_answer.o
-	$(CXX) $(CXXFLAGS) -Isrc -o $@ tests/known_answer_gpu.cpp gpu_answer.o $(CUDA_LIBS)
-
-# Report whether this box can build the GPU targets at all.
 gpu-check:
 	@command -v $(NVCC) >/dev/null 2>&1 \
 	  && { echo "nvcc: $$($(NVCC) --version | tail -1)"; } \
-	  || { echo "nvcc: NOT FOUND — GPU targets unavailable on this box"; exit 1; }
+	  || { echo "nvcc: not found; GPU targets unavailable"; exit 1; }
 	@command -v nvidia-smi >/dev/null 2>&1 \
 	  && nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv,noheader \
-	  || echo "nvidia-smi: not found (no driver visible)"
+	  || echo "nvidia-smi: not found"
 
 clean:
-	rm -f prover verifier cheating_prover bench_build \
-	      tests/known_answer tests/known_answer_argon2d tests/differential_argon2d \
-	      tests/rebuild_argon2d \
-	      prover_cuda cheating_prover_cuda tests/known_answer_gpu gpu_answer.o gpu_adversary.o
+	rm -rf $(BUILD)
+
+-include $(shell find $(BUILD) -name '*.d' 2>/dev/null)
 
 .PHONY: all tests gpu gpu-check clean

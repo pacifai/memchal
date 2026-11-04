@@ -1,47 +1,31 @@
-"""Shared statistics + IO for the memory-challenge harness.
-
-Single source of truth for the percentile tail-support rule (which percentiles the
-sample size can trust) and for error propagation across repeated runs. Used by the
-repeat-trials driver and the plot script so the numbers in the README cannot drift
-from the numbers on the charts. Raw percentile *values* are computed in verifier.cpp
-and consumed here from its JSON, so they are computed in exactly one place.
-"""
+"""Shared statistics for run_trials.py and plot.py."""
 from __future__ import annotations
 import json, math
 from dataclasses import dataclass
 
-# Must match kMinTail in verifier.cpp: a percentile with fewer than this many
-# samples in its tail is not trustworthy (p99.9 from n=300 has ~0 tail samples).
+# Must match kMinTail in the verifier.
 MIN_TAIL = 10
 
 
-# --- percentile tail-support rule (mirrors verifier.cpp) ---------------------
 def tail_count(p: float, n: int) -> int:
     return max(0, round((1.0 - p / 100.0) * n))
 
 
 def reliable(p: float, n: int) -> bool:
-    # min/max are extremes, not inner percentiles; only inner ones need support.
+    """True if percentile p has at least MIN_TAIL tail samples at size n; min and max always do."""
     if p <= 0.0 or p >= 100.0:
         return True
     return tail_count(p, n) >= MIN_TAIL
 
 
-# --- IO ----------------------------------------------------------------------
 def load_json(path: str) -> dict:
     with open(path) as f:
         return json.load(f)
 
 
-# --- aggregation across repeated runs ----------------------------------------
 @dataclass
 class Agg:
-    """Central tendency AND spread of a scalar (e.g. p50) across R independent runs.
-
-    - mean/sd describe the run-to-run distribution (sd = spread, for error bars).
-    - sem = sd/sqrt(n) is the uncertainty on the *estimate of the mean*, used when
-      propagating error into derived quantities (differences, floor subtraction).
-    """
+    """Mean, sample sd, and standard error of the mean of a scalar across runs."""
     n: int
     mean: float
     sd: float
@@ -72,12 +56,7 @@ def aggregate(values) -> Agg:
 
 @dataclass
 class Diff:
-    """Difference of two aggregates with propagated error (e.g. memory = total-floor).
-
-    error is the propagated standard error; `separable` is True only if the
-    magnitude exceeds `sigmas` propagated errors, so we never print a difference
-    the data can't actually resolve.
-    """
+    """A difference with its propagated standard error; separable when it exceeds the sigma threshold."""
     value: float
     error: float
     sigmas_observed: float
@@ -97,16 +76,11 @@ def diff(a: Agg, b: Agg, sigmas: float = 2.0) -> Diff:
 
 
 def paired_diff(a_list: list, b_list: list, sigmas: float = 2.0) -> Diff:
-    """Element-wise differences d_i = a_list[i] - b_list[i], then aggregate.
-
-    Uses paired subtraction to cancel per-cycle drift (e.g. VM performance level
-    shifting between cycles). The lists must be the same length and ordered by cycle.
-    """
+    """Aggregates a_list[i] - b_list[i]; both lists must be equal length and ordered by cycle."""
     if len(a_list) != len(b_list):
         raise ValueError(f"paired_diff: lists must be equal length ({len(a_list)} vs {len(b_list)})")
     diffs = [float(a) - float(b) for a, b in zip(a_list, b_list)]
     agg = aggregate(diffs)
-    # For a single element, use 0 error (can't compute SEM from 1 sample).
     error = agg.sem if agg.n > 1 else 0.0
     obs = abs(agg.mean) / error if error > 0 else float("inf")
     return Diff(agg.mean, error, obs, obs >= sigmas)
@@ -128,7 +102,6 @@ def ratio(a: Agg, b: Agg) -> Ratio:
     if b.mean == 0:
         return Ratio(float("inf"), float("inf"), float("inf"))
     v = a.mean / b.mean
-    # Relative error propagation: (sem_a/mean_a)^2 + (sem_b/mean_b)^2
     rel_a = (a.sem / a.mean) if a.mean != 0 else 0.0
     rel_b = (b.sem / b.mean) if b.mean != 0 else 0.0
     rel_err = math.sqrt(rel_a ** 2 + rel_b ** 2)
@@ -137,13 +110,9 @@ def ratio(a: Agg, b: Agg) -> Ratio:
 
 
 def trend(values: list) -> dict:
-    """Split ordered values into first and last thirds, compare with diff().
+    """Compares the first and last thirds of ordered values with diff().
 
-    Returns {"first": Agg, "last": Agg, "diff": Diff, "drifted": bool,
-             "insufficient_data": bool}.
-    A separable first-vs-last difference means the baseline drifted within the session.
-    When each third has fewer than 2 elements, SEMs are zero and separability cannot
-    be assessed; drifted is False and insufficient_data is True in that case.
+    Returns a dict of first, last, diff, drifted, and insufficient_data (a third has under 2 values).
     """
     vals = [float(v) for v in values]
     n = len(vals)
@@ -152,7 +121,6 @@ def trend(values: list) -> dict:
     last_agg = aggregate(vals[n - third:])
     insufficient = first_agg.n < 2 or last_agg.n < 2
     d = diff(last_agg, first_agg)
-    # If SEM is 0 on both sides, diff() returns inf sigma (spurious). Suppress.
     drifted = d.separable and not insufficient
     return {"first": first_agg.__dict__, "last": last_agg.__dict__,
             "diff": d.__dict__, "drifted": drifted,

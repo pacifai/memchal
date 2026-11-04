@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
-"""JSON handling for gpu_demo_up.sh and gpu_demo_down.sh.
+"""JSON helpers for the runpod/ shell scripts; input JSON comes on stdin.
 
-The shell scripts talk to the RunPod API with curl; this does the parts that
-need a JSON parser.
-
-  get KEY.PATH            print a dotted field of the JSON on stdin, or nothing
-  catalog GPU_ID CLOUD    from the GPU catalog on stdin, print NAME|PRICE|STOCK,
-                          or ERR|reason when the card is not listed
-  pod-body IMAGE GPU_ID DISK_GB CLOUD BOOT_CMD
-                          print the JSON body that rents one pod
+  get KEY.PATH                                  print a dotted field, or nothing
+  catalog GPU_ID CLOUD                          print NAME|PRICE|STOCK, or ERR|reason
+  pod-body IMAGE GPU_ID DISK_GB CLOUD BOOT_CMD  print the JSON body that rents one pod
 """
 import json
 import sys
@@ -34,10 +29,8 @@ def catalog(gpu, cloud):
         return
     g = next((x for x in gpus if x.get("id") == gpu), None)
     if g is None:
-        # The catalog ignores a gpuTypeIds filter and returns every card, so an
-        # id missing here is a typo in --gpu. Suggest ids sharing its last word.
-        word = gpu.split()[-1].lower()
-        near = [x["id"] for x in gpus if word in x.get("id", "").lower()][:5]
+        last_word = gpu.split()[-1].lower()
+        near = [x["id"] for x in gpus if last_word in x.get("id", "").lower()][:5]
         hint = (" - did you mean: " + ", ".join(near)) if near else ""
         print("ERR|no card with id " + repr(gpu) + hint)
         return

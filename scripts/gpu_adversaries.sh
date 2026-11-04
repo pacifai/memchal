@@ -1,25 +1,19 @@
 #!/usr/bin/env bash
-# gpu_adversaries.sh — run the honest GPU prover and each GPU cheat against the
-# same verifier settings, in one session, and print the p50 ratios.
-#
-# Absolute times do not transfer between cards or sessions, so compare ratios
-# within one run. Modes are interleaved so thermal drift spreads across all of
-# them. uvm runs with --leave-free MiB of HBM free, and partial runs with
-# --offload of the buffer in host memory.
-#
-# Usage: bash scripts/gpu_adversaries.sh [--mb 4096] [--k 262144] [--lanes 16384]
-#                                        [--n 50] [--leave-free 2048] [--offload 1.0]
-#                                        [--cycles 2] [--fold tree|sequential]
+# Runs the honest GPU prover and each GPU cheat in interleaved cycles against one verifier setting and prints p50 ratios.
+# Usage: bash scripts/gpu_adversaries.sh [--mb 4096] [--samples 262144] [--lanes 16384] [--challenges 50] [--warmup 10]
+#          [--leave-free 2048] [--offload 1.0] [--cycles 2] [--port 9099] [--fold tree|sequential]
+#   --leave-free  MiB of HBM the uvm cheat leaves free
+#   --offload     fraction of the buffer the partial cheat keeps in host memory
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-MB=4096; K=262144; LANES=16384; N=50; WARMUP=10; LEAVE_FREE=2048; OFFLOAD=1.0
+MB=4096; SAMPLES=262144; LANES=16384; CHALLENGES=50; WARMUP=10; LEAVE_FREE=2048; OFFLOAD=1.0
 CYCLES=2; PORT=9099
 FOLD=tree
 while [ $# -gt 0 ]; do
   case "$1" in
-    --mb) MB="$2"; shift 2 ;; --k) K="$2"; shift 2 ;;
-    --lanes) LANES="$2"; shift 2 ;; --n) N="$2"; shift 2 ;;
+    --mb) MB="$2"; shift 2 ;; --samples) SAMPLES="$2"; shift 2 ;;
+    --lanes) LANES="$2"; shift 2 ;; --challenges) CHALLENGES="$2"; shift 2 ;;
     --warmup) WARMUP="$2"; shift 2 ;; --leave-free) LEAVE_FREE="$2"; shift 2 ;;
     --offload) OFFLOAD="$2"; shift 2 ;;
     --cycles) CYCLES="$2"; shift 2 ;; --port) PORT="$2"; shift 2 ;;
@@ -37,9 +31,10 @@ STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 OUT="results/adversaries/$STAMP"
 mkdir -p "$OUT"
 
-kill_provers() { pkill -f prover_cuda >/dev/null 2>&1; pkill -f cheating_prover_cuda >/dev/null 2>&1; sleep 1; }
+kill_provers() { pkill -f build/gpu/prover >/dev/null 2>&1; pkill -f build/gpu/cheating_prover >/dev/null 2>&1; sleep 1; }
 trap kill_provers EXIT
 
+# Waits up to 60 s for a prover to listen on $PORT.
 wait_for_port() {
   local waited=0
   while ! (echo > "/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; do
@@ -49,14 +44,14 @@ wait_for_port() {
   return 0
 }
 
-# One (mode, cycle) trial. Writes the verifier JSON and the prover's event log.
+# Runs one (mode, cycle) trial and writes the verifier JSON and the prover log.
 run_one() {
   local mode="$1" cycle="$2"
   local tag="${mode}-c${cycle}"
   kill_provers
 
   if [ "$mode" = "honest" ]; then
-    nohup ./prover_cuda --port "$PORT" --trace 10 --lane-cap "$LANES" \
+    nohup build/gpu/prover --port "$PORT" --trace 10 --lane-cap "$LANES" \
       > "$OUT/prover-$tag.log" 2>&1 &
   else
     local extra=()
@@ -65,7 +60,7 @@ run_one() {
       uvm)     extra=(--leave-free "$LEAVE_FREE") ;;
       partial) extra=(--offload "$OFFLOAD") ;;
     esac
-    nohup ./cheating_prover_cuda --port "$PORT" --mode "$mode" "${extra[@]}" \
+    nohup build/gpu/cheating_prover --port "$PORT" --mode "$mode" "${extra[@]}" \
       --trace 10 --lane-cap "$LANES" \
       > "$OUT/prover-$tag.log" 2>&1 &
   fi
@@ -78,8 +73,8 @@ run_one() {
   nvidia-smi --query-gpu=clocks.sm,clocks.mem,temperature.gpu,clocks_throttle_reasons.active \
              --format=csv,noheader > "$OUT/clocks-$tag.txt" 2>/dev/null
 
-  timeout 900 ./verifier --host 127.0.0.1 --port "$PORT" \
-      --mb "$MB" --k "$K" --lanes "$LANES" --n "$N" --warmup "$WARMUP" \
+  timeout 900 build/verifier --host 127.0.0.1 --port "$PORT" \
+      --mb "$MB" --samples "$SAMPLES" --lanes "$LANES" --challenges "$CHALLENGES" --warmup "$WARMUP" \
       --fold "$FOLD" \
       --label "$tag" --csv /dev/null --json "$OUT/$tag.json" \
       > "$OUT/verifier-$tag.log" 2>&1
@@ -92,7 +87,7 @@ run_one() {
   return 0
 }
 
-echo "geometry: ${MB} MiB buffer, k=$K, lanes=$LANES, depth=$((K / LANES)), n=$N, fold=$FOLD"
+echo "geometry: ${MB} MiB buffer, samples=$SAMPLES, lanes=$LANES, depth=$((SAMPLES / LANES)), challenges=$CHALLENGES, fold=$FOLD"
 echo "uvm leaves ${LEAVE_FREE} MiB free; partial offloads ${OFFLOAD}"
 echo "output:   $OUT"
 echo

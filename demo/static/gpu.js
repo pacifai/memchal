@@ -1,16 +1,10 @@
-// gpu.js — the GPU demo page.
-//
-// Draws only what the binaries and the driver report, and says so where it
-// doesn't. Three things are deliberately visual rather than written down:
-// where the buffer physically lives, where a challenge's time goes, and which
-// of the two detectors is firing. The caveats are badges, not paragraphs.
 'use strict';
 
 const $ = (id) => document.getElementById(id);
 const el = {};
 ['led','statusText','deviceText','themeBtn','runBtn','stopBtn','mode','modeHint',
  'offload','offloadLabel','offloadKnob','free','freeLabel','freeKnob','frac','fracLabel','fracKnob',
- 'mb','k','lanes','n','warmup','gap','verify','geomHint','gen','chain','nonce','fold',
+ 'mb','samples','lanes','challenges','warmup','gap','verify','geomHint','gen','chain','nonce','fold',
  'residency','resLegend','resBadges','timesplit','timeLegend','detect','latency','latLegend',
  'cSm','cTemp','cGbps','cErr','cardBadges','log','synthetic',
  'baseText','baseBadges','clearBaseBtn','hist','clearHistBtn',
@@ -24,17 +18,14 @@ const MODE_HINTS = {
 };
 
 const FREE_STEPS = 16;
-const STORE_KEY = 'memchal.gpu.v1';
+const STORE_KEY = 'memchal.gpu.v2';
 const state = {
   phase: 'idle', cfg: null, challenges: [], gpu: [], smi: null, end: null,
   backing: null, device: null, hbmTotal: null, hbmUsed: null, residentFrac: null,
   baseline: null, history: [], synthetic: false, dirty: {}, pending: [],
 };
 
-// The geometry a measurement is only comparable within. A baseline taken at a
-// different buffer size, probe count, lane count, or fold is a different
-// experiment, so every ratio drawn against it would be meaningless.
-const GEOM_KEYS = ['mb', 'k', 'lanes', 'fold', 'chain', 'gen', 'nonce'];
+const GEOM_KEYS = ['mb', 'samples', 'lanes', 'fold', 'chain', 'gen', 'nonce'];
 const geomOf = (cfg) => cfg ? GEOM_KEYS.map(k => `${k}=${cfg[k]}`).join(' ') : '';
 const sameGeom = (a, b) => !!a && !!b && geomOf(a) === geomOf(b);
 
@@ -43,7 +34,7 @@ function save() {
     localStorage.setItem(STORE_KEY, JSON.stringify({
       baseline: state.baseline, history: state.history.slice(-40),
     }));
-  } catch (_) { /* private window, quota, blocked storage: the page still works */ }
+  } catch (_) {}
 }
 function load() {
   try {
@@ -52,16 +43,15 @@ function load() {
     const d = JSON.parse(raw);
     if (d && d.baseline) state.baseline = d.baseline;
     if (d && Array.isArray(d.history)) state.history = d.history;
-  } catch (_) { /* same */ }
+  } catch (_) {}
 }
 const markDirty = () => { state.dirty = { res: 1, time: 1, detect: 1, lat: 1 }; };
 
-// ── palette ─────────────────────────────────────────────────────────────────
 const css = (n, f) => (getComputedStyle(document.documentElement).getPropertyValue(n).trim() || f);
 const P = () => ({
-  card:   css('--fast', '#3987e5'),      // on the card
-  host:   css('--slow', '#d95926'),      // in host memory
-  absent: css('--critical', '#e2445c'),  // not held at all
+  card:   css('--fast', '#3987e5'),
+  host:   css('--slow', '#d95926'),
+  absent: css('--critical', '#e2445c'),
   good:   css('--good', '#39b56a'),
   axis:   css('--axis', '#5b6b73'),
   hair:   css('--hair', '#1e2a30'),
@@ -70,9 +60,6 @@ const P = () => ({
   mono:   css('--face-num', 'ui-monospace, monospace'),
 });
 
-// The verifier's phase tags, as it writes them on the wire: 'w' warmup,
-// 'r' measured. Comparing against the spelled-out words matches nothing and
-// folds the cold-start challenges into every statistic.
 const WARMUP = 'w';
 const isWarm = (x) => x.ph === WARMUP;
 
@@ -88,27 +75,18 @@ function log(line, src) {
   el.log.scrollTop = el.log.scrollHeight;
 }
 
-// ── canvas sizing ───────────────────────────────────────────────────────────
-// The CSS box is authoritative. Assigning canvas.height rewrites the height
-// attribute, so reading that attribute back next frame returns what we wrote,
-// scaled again — the canvas then doubles every redraw until the tab dies.
-// gpu.css gives every canvas here an explicit height for exactly this reason.
 const MAX_PX = 2000;
+// Size a canvas for the device pixel ratio and return its 2D context and CSS size.
 function fit(c) {
   const dpr = window.devicePixelRatio || 1;
   if (!c.dataset.baseH) {
-    // First call only, and this is the whole fix. Every way of asking a canvas
-    // how tall it is — clientHeight, the height attribute, computed style —
-    // reports the bitmap once CSS does not pin it, and the bitmap is what we
-    // are about to set. So read it exactly once, remember it, and never ask
-    // again. gpu.css also pins each canvas, which makes the first read right;
-    // this makes every later read unnecessary.
+    // Read the height once: later reads return the bitmap size set below and grow every frame.
     const initial = c.clientHeight || Number(c.getAttribute('height')) || 160;
     c.dataset.baseH = String(Math.max(40, Math.min(initial, MAX_PX)));
     c.style.height = c.dataset.baseH + 'px';
   }
   const h = Number(c.dataset.baseH);
-  const w = c.clientWidth || 600;   // width is CSS-driven (app.css: canvas{width:100%})
+  const w = c.clientWidth || 600;
   const bw = Math.round(w * dpr), bh = Math.round(h * dpr);
   if (c.width !== bw || c.height !== bh) { c.width = bw; c.height = bh; }
   const ctx = c.getContext('2d');
@@ -138,9 +116,6 @@ function label(ctx, text, x, y, color, size = 10, weight = 600) {
   ctx.fillText(text, x, y);
 }
 
-// ── 1. where the buffer lives ───────────────────────────────────────────────
-// The thing every cheat manipulates, drawn as the thing it is: a block of bytes
-// split across places with very different speeds.
 function drawResidency() {
   const { ctx, w, h } = fit(el.residency);
   const p = P();
@@ -171,7 +146,6 @@ function drawResidency() {
   const mb = state.cfg ? state.cfg.mb : 0;
   label(ctx, `${mb} MiB challenge buffer`, pad, y - 4, p.muted, 10, 500);
 
-  // HBM capacity underneath, so "does it fit" is visible rather than asserted.
   if (state.hbmTotal) {
     const cy = y + barH + 20;
     const usedFrac = Math.min(1, (state.hbmUsed || 0) / state.hbmTotal);
@@ -188,23 +162,13 @@ function drawResidency() {
     .map(([c, t]) => `<span class="badge ${c}">${t}</span>`).join('');
 }
 
-// ── 2. where the time goes ──────────────────────────────────────────────────
-// The honest baseline is drawn above the current run at the same scale, so a
-// slowdown shows as a bar getting longer rather than as a ratio to read.
 function drawTime() {
   const { ctx, w, h } = fit(el.timesplit);
   const p = P();
-  // 'result readback' rather than 'pcie copy': copy_ms is only the answer
-  // coming back (8 bytes for the tree fold, lanes x 8 for the sequential one).
-  // A partial cheat's PCIe reads happen inside the kernel, so they are counted
-  // in kernel time — which is where the stall actually is.
   legend(el.timeLegend, [[p.card, 'kernel (incl. any host-memory probes)'],
                          [p.good, 'result readback'],
                          [p.host, 'fold'], [p.muted, 'residual']]);
 
-  // The run under test gets a bar only once it has results of its own; until
-  // then only the honest baseline shows. An honest run IS the baseline, so it
-  // gets one bar, not the stored baseline plus itself.
   const rows = [];
   const base = usableBaseline();
   const cur = currentSplit();
@@ -217,9 +181,6 @@ function drawTime() {
   }
 
   const max = Math.max(...rows.map(r => r.total));
-  // Each bar ends in its total, and the run under test also says how it
-  // compares with honest. Room for the longest of those labels is reserved on
-  // the right, so the longest bar cannot push its own number off the canvas.
   const honestTotal = base ? base.total : null;
   rows.forEach(r => {
     r.text = fmtUs(r.total * 1000);
@@ -250,15 +211,14 @@ function drawTime() {
   });
 }
 
-// The stored baseline, but only when it describes the same experiment. A
-// baseline from a different buffer size or lane count is not a baseline.
+// Return the stored baseline if its geometry matches the current run, else null.
 function usableBaseline() {
   if (!state.baseline) return null;
   if (!state.cfg) return state.baseline;
   return sameGeom(state.baseline.cfg, state.cfg) ? state.baseline : null;
 }
 
-// Median of the traced per-challenge costs, in ms, plus the round trip.
+// Return the median kernel, readback, and fold times and the round trip, in ms.
 function currentSplit() {
   if (!state.gpu.length) return null;
   const k = pct(state.gpu.map(g => g.kernel_ms), 0.5);
@@ -270,23 +230,18 @@ function currentSplit() {
   return { kernel: k, copy: c, fold: f, total: rt / 1000 };
 }
 
-// ── 3. detector state ───────────────────────────────────────────────────────
-// x: response p50 relative to the honest baseline. y: share of CHECKED answers
-// that were wrong. Two independent detectors, so two axes; a prover leaving the
-// origin in either direction is caught, and the axis says by which one.
 function drawDetect() {
   const { ctx, w, h } = fit(el.detect);
   const p = P();
   const pad = { l: 44, r: 16, t: 16, b: 30 };
   const pw = w - pad.l - pad.r, ph = h - pad.t - pad.b;
 
-  // x: timing ratio, log from 1x to 100x. y: share of answers wrong.
   const X = (r) => pad.l + pw * Math.min(1, Math.log10(Math.max(1, r)) / 2);
   const Y = (e) => pad.t + ph * (1 - Math.min(1, e));
 
   ctx.fillStyle = p.hair; ctx.globalAlpha = 0.5;
-  ctx.fillRect(X(1.5), pad.t, pad.l + pw - X(1.5), ph);          // caught: slow
-  ctx.fillRect(pad.l, pad.t, pw, Y(0.02) - pad.t);               // caught: wrong
+  ctx.fillRect(X(1.5), pad.t, pad.l + pw - X(1.5), ph);
+  ctx.fillRect(pad.l, pad.t, pw, Y(0.02) - pad.t);
   ctx.globalAlpha = 1;
 
   ctx.strokeStyle = p.hair;
@@ -307,9 +262,6 @@ function drawDetect() {
   const meas = state.challenges.filter(x => !isWarm(x));
   if (!meas.length) { label(ctx, 'no measured challenges', pad.l + 8, pad.t + ph / 2, p.muted, 11, 500); return; }
 
-  // Only challenges the verifier actually recomputed can be right or wrong.
-  // Dividing by every challenge instead scaled the rate down by exactly the
-  // sampling factor, so a prover wrong on all of them plotted at 1/verify.
   const checked = meas.filter(x => x.checked !== false);
   const errRate = checked.length ? checked.filter(x => !x.ok).length / checked.length : 0;
   const p50 = pct(meas.map(x => x.us), 0.5);
@@ -335,7 +287,7 @@ function drawDetect() {
         caught ? p.absent : p.ink, 11, 700);
 }
 
-// ── 4. round trip per challenge ─────────────────────────────────────────────
+// Reduce points to about `target` buckets, keeping the slowest point of each.
 function downsample(pts, target) {
   if (pts.length <= target) return pts;
   const out = [], step = pts.length / target;
@@ -393,7 +345,6 @@ function drawLatency() {
   });
 }
 
-// ── readouts ────────────────────────────────────────────────────────────────
 function updateReadouts() {
   const s = state.smi;
   el.cSm.textContent = s && s.sm_mhz != null ? s.sm_mhz.toFixed(0) : '—';
@@ -411,13 +362,12 @@ function updateReadouts() {
   }
   b.push('<span class="badge">clocks unlocked — ratios only</span>');
   b.push('<span class="badge">clock sampled between challenges, not during</span>');
-  if (state.end && state.end.checked != null && state.end.checked < state.end.samples) {
-    b.push(`<span class="badge warn">${state.end.checked} of ${state.end.samples} answers checked</span>`);
+  if (state.end && state.end.checked != null && state.end.checked < state.end.challenges) {
+    b.push(`<span class="badge warn">${state.end.checked} of ${state.end.challenges} answers checked</span>`);
   }
   el.cardBadges.innerHTML = b.join('');
 }
 
-// ── baseline and history panels ─────────────────────────────────────────────
 function renderBaseline() {
   const b = state.baseline;
   if (!b) {
@@ -450,7 +400,7 @@ function renderHistory() {
     const b = state.baseline;
     const cmp = b && sameGeom(b.cfg, r.cfg)
       ? `${(r.p50 / (b.total * 1000)).toFixed(2)}x` : '—';
-    const den = r.checked != null ? r.checked : r.samples;
+    const den = r.checked != null ? r.checked : r.challenges;
     const wrong = r.errors ? `<b class="bad">${r.errors}/${den}</b>` : `0/${den}`;
     return `<tr><td>${r.mode}</td><td>${fmtUs(r.p50)}</td><td>${cmp}</td>`
          + `<td>${wrong}</td><td>${fmtUs(r.kernel * 1000)}</td>`
@@ -460,23 +410,16 @@ function renderHistory() {
   el.hist.innerHTML = head + body;
 }
 
-// ── controls ────────────────────────────────────────────────────────────────
-// The reserve slider sets free HBM as a multiple of the buffer size,
-// geometrically from 8x down to 0.25x.
 const FREE_HI = 8, FREE_LO = 0.25;
-// 256 MiB free under a 1 GiB managed buffer with 131072 lanes wedged the
-// driver; 4096 MiB with ~2.5 GiB free and 16384 lanes ran cleanly.
 const FREE_FLOOR_MIB = 1024;
-// Lanes above this, on a starved buffer, is the configuration that crashed.
 const STARVED_LANES_MAX = 16384;
+// Free HBM as a multiple of the buffer, geometric from FREE_HI to FREE_LO; null reserves nothing.
 function freeRatio() {
   const pos = Number(el.free.value) || 0;
-  if (!pos) return null;                       // 0 = reserve nothing
+  if (!pos) return null;
   return FREE_HI * Math.pow(FREE_LO / FREE_HI, pos / FREE_STEPS);
 }
-// MiB the prover should leave free. The prover measures what is free and
-// reserves the rest itself; computing a reserve here from the card's total
-// asked for memory the CUDA context already holds, and the reserve failed.
+// MiB of HBM the prover should leave free.
 function freeMib() {
   const r = freeRatio();
   if (r == null) return 0;
@@ -501,37 +444,27 @@ function syncControls() {
     el.freeLabel.textContent = `${(f / 1024).toFixed(2)} GiB · ${(f / mb).toFixed(2)}x buffer`;
   }
 
-  const k = Number(el.k.value) || 1, lanes = Number(el.lanes.value) || 1;
-  const depth = Math.floor(k / lanes);
+  const samples = Number(el.samples.value) || 1, lanes = Number(el.lanes.value) || 1;
+  const depth = Math.floor(samples / lanes);
   const bits = [`depth ${depth}`];
   if (el.chain.value === 'dependent' && depth < 16) {
-    bits.push(`— too shallow, needs k ≥ ${(16 * lanes).toLocaleString()}`);
+    bits.push(`— too shallow, needs samples ≥ ${(16 * lanes).toLocaleString()}`);
   }
   const mb = Number(el.mb.value) || 0;
-  // argon2d sends a recipe instead of the bytes: the verifier builds its
-  // reference copy, then the prover builds its own on the host CPU and copies
-  // it to the card. Two builds back to back, so setup is roughly twice one.
   if (mb >= 4096) {
     bits.push(el.gen.value === 'argon2d'
       ? '— both sides build the buffer before the first challenge, which takes a while'
       : `— ~${Math.round(mb / 250)}s to upload before the first challenge`);
   }
-  // Wall clock is dominated by two host-side terms, not by the card: the pace
-  // you asked for, and the verifier recomputing answers at ~100 ns per probe.
-  // Break them out, because otherwise a 40 s run reads as a slow GPU when the
-  // GPU's share of it is a tenth of a second.
   const ve = Number(el.verify.value) || 1;
-  const N = (Number(el.n.value) || 0) + (Number(el.warmup.value) || 0);
+  const N = (Number(el.challenges.value) || 0) + (Number(el.warmup.value) || 0);
   const paceS = (Number(el.gap.value) || 0) / 1e6 * N;
-  const checkS = (k * 100e-9) / ve * N;
-  const gpuS = 0.0003 * N;                 // ~300 us per response, order of magnitude
+  const checkS = (samples * 100e-9) / ve * N;
+  const gpuS = 0.0003 * N;
   const total = paceS + checkS + gpuS;
   const fmtS = (v) => v < 1 ? '<1s' : `${Math.round(v)}s`;
   bits.push(`— ${fmtS(total)} total: ${fmtS(paceS)} pacing, ${fmtS(checkS)} verify, ${fmtS(gpuS)} gpu`);
   if (ve > 1) bits.push(`(checking 1 in ${ve})`);
-  // A managed buffer larger than the free HBM left for it faults on every
-  // probe, which costs seconds per challenge rather than microseconds. Say so,
-  // because the first result then takes long enough to look like no run at all.
   let starvedRisk = false;
   if (mode === 'uvm' && freeRatio() != null) {
     const f = freeMib();
@@ -551,15 +484,9 @@ function syncControls() {
   markDirty();
 }
 
-// ── presets ─────────────────────────────────────────────────────────────────
-// One per configuration the project has actually measured, all at the H100
-// sweep's geometry, so a single honest run is the baseline for every one of
-// them. Each sets every control; the settings panel stays available for
-// anything else. `expect` quotes the H100 tree-fold sweep (one card, one
-// session), so it says what to look for, not what this run must produce.
-const SWEEP = { mb: 4096, k: 262144, lanes: 16384, warmup: 10, gap: 0, verify: 10,
+const SWEEP = { mb: 4096, samples: 262144, lanes: 16384, warmup: 10, gap: 0, verify: 10,
                 gen: 'argon2d', chain: 'dependent', nonce: 'random', fold: 'tree',
-                offload: 10, free: 0, frac: 50, n: 200 };
+                offload: 10, free: 0, frac: 50, challenges: 200 };
 const PRESETS = [
   { id: 'honest', name: 'honest', by: 'baseline', set: { mode: 'honest' },
     hint: 'The whole buffer in HBM, allocated with cudaMalloc and verified. Run it first: it is the baseline every other preset is compared against.',
@@ -570,7 +497,7 @@ const PRESETS = [
   { id: 'uvm-fits', name: 'uvm, fits', by: 'not caught', set: { mode: 'uvm', free: 0 },
     hint: 'Managed memory with all of HBM free. The driver moves the whole buffer onto the card, so the data really is resident and passing is the correct result.',
     expect: [['answers', 'all correct'], ['speed', '~0.85× honest']] },
-  { id: 'uvm-starved', name: 'uvm, starved', by: 'timing', set: { mode: 'uvm', free: 12, n: 20, warmup: 2 },
+  { id: 'uvm-starved', name: 'uvm, starved', by: 'timing', set: { mode: 'uvm', free: 12, challenges: 20, warmup: 2 },
     hint: 'Managed memory with about 2.4 GiB of HBM left free under a 4 GiB buffer. Pages move back and forth on every challenge. About 3.5 s per challenge, so it runs 20.',
     expect: [['answers', 'all correct'], ['speed', '~16,800× honest']] },
   { id: 'host', name: 'partial, 100%', by: 'timing', set: { mode: 'partial', offload: 100 },
@@ -586,7 +513,7 @@ const PRESETS = [
     hint: 'The last 2% of the buffer in host RAM. Below the ~5% resolution: the slowdown is inside the honest noise.',
     expect: [['answers', 'all correct'], ['speed', '~1.1× honest, within noise']] },
 ];
-const PRESET_IDS = ['mode', 'mb', 'k', 'lanes', 'n', 'warmup', 'gap', 'verify',
+const PRESET_IDS = ['mode', 'mb', 'samples', 'lanes', 'challenges', 'warmup', 'gap', 'verify',
                     'gen', 'chain', 'nonce', 'fold', 'offload', 'free', 'frac'];
 let activePreset = null;
 const presetValues = (pr) => ({ ...SWEEP, ...pr.set });
@@ -599,8 +526,6 @@ function applyPreset(pr) {
   renderBaseline();
   renderPresets();
 }
-// A preset stays selected while every control still matches it. Touch one and
-// the run is no longer that preset, so the panel says so instead of implying it.
 function presetModified() {
   if (!activePreset) return false;
   const v = presetValues(activePreset);
@@ -630,14 +555,11 @@ function renderPresets() {
     .map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
 }
 
-// ── events ──────────────────────────────────────────────────────────────────
 function handle(e) {
   if (e.synthetic) { state.synthetic = true; el.synthetic.classList.add('on'); }
   switch (e.t) {
     case 'status':
       state.phase = e.phase; state.cfg = e.cfg || state.cfg;
-      // A new run starts: drop the last run's results, so nothing on the page
-      // is drawn under the new run's name before it has answered anything.
       if (e.phase === 'starting prover') { state.gpu = []; state.challenges = []; state.end = null; }
       el.statusText.textContent = e.error ? `error: ${e.error}`
         : e.phase === 'uploading'
@@ -670,18 +592,16 @@ function handle(e) {
       state.cfg = e.cfg || state.cfg;
       state.challenges = []; state.gpu = []; state.end = null;
       if (state.cfg && state.cfg.mode === 'honest') state.backing = 'device — cudaMalloc, verified';
-      // In build mode upload_s times only the 92-byte recipe, so report the
-      // verifier's own build instead.
       log(e.gen === 'argon2d'
-        ? `${e.mb} MiB, k=${e.k}, lanes=${e.lanes}, argon2d reference built in ${Number(e.gen_s).toFixed(1)}s`
-        : `${e.mb} MiB, k=${e.k}, lanes=${e.lanes}, ${e.gen || 'gen'} ${Number(e.gen_s).toFixed(1)}s, upload ${Number(e.upload_s).toFixed(1)}s`,
+        ? `${e.mb} MiB, samples=${e.samples}, lanes=${e.lanes}, argon2d reference built in ${Number(e.gen_s).toFixed(1)}s`
+        : `${e.mb} MiB, samples=${e.samples}, lanes=${e.lanes}, ${e.gen || 'gen'} ${Number(e.gen_s).toFixed(1)}s, upload ${Number(e.upload_s).toFixed(1)}s`,
         'verifier');
       break;
     case 'c':
       state.challenges.push({ us: e.us, ph: e.ph, ok: e.ok, checked: e.checked });
       if (state.challenges.length > 5000) state.challenges.shift();
       if (state.phase === 'running' && state.cfg) {
-        const total = (state.cfg.warmup || 0) + (state.cfg.n || 0);
+        const total = (state.cfg.warmup || 0) + (state.cfg.challenges || 0);
         el.statusText.textContent = `running · challenge ${state.challenges.length} of ${total}`;
       }
       break;
@@ -701,7 +621,7 @@ function handle(e) {
       if (state.cfg && split) {
         state.history.push({
           at: Date.now(), mode: state.cfg.mode, cfg: { ...state.cfg },
-          p50: e.p50, errors: e.errors, samples: e.samples, checked: e.checked,
+          p50: e.p50, errors: e.errors, challenges: e.challenges, checked: e.checked,
           kernel: split.kernel, copy: split.copy, fold: split.fold,
         });
         state.history = state.history.slice(-40);
@@ -709,7 +629,7 @@ function handle(e) {
       save();
       renderBaseline();
       renderHistory();
-      log(`${e.samples} samples, ${e.errors} errors, p50 ${fmtUs(e.p50)}`, 'verifier');
+      log(`${e.challenges} challenges, ${e.errors} errors, p50 ${fmtUs(e.p50)}`, 'verifier');
       break;
     }
     case 'smi': state.smi = e; break;
@@ -738,14 +658,13 @@ function connect() {
   src.onerror = () => { el.statusText.textContent = 'bridge disconnected'; };
 }
 
-// ── wiring ──────────────────────────────────────────────────────────────────
 el.runBtn.addEventListener('click', async () => {
   el.log.innerHTML = '';
   const body = {
     mode: el.mode.value, gen: el.gen.value, chain: el.chain.value,
     nonce: el.nonce.value, fold: el.fold.value,
-    mb: +el.mb.value, k: +el.k.value, lanes: +el.lanes.value,
-    n: +el.n.value, warmup: +el.warmup.value, gap: +el.gap.value,
+    mb: +el.mb.value, samples: +el.samples.value, lanes: +el.lanes.value,
+    challenges: +el.challenges.value, warmup: +el.warmup.value, gap: +el.gap.value,
     verify: +el.verify.value,
     free: freeMib(), trace: 1,
     frac: (+el.frac.value) / 100, offload: (+el.offload.value) / 100,
@@ -768,14 +687,12 @@ el.clearHistBtn.addEventListener('click', () => {
   state.history = []; save(); renderHistory();
 });
 ['input', 'change'].forEach(ev => {
-  ['mode', 'offload', 'free', 'frac', 'k', 'lanes', 'mb', 'chain', 'gen']
+  ['mode', 'offload', 'free', 'frac', 'samples', 'lanes', 'mb', 'chain', 'gen']
     .forEach(id => el[id].addEventListener(ev, () => { syncControls(); renderBaseline(); }));
   PRESET_IDS.forEach(id => el[id].addEventListener(ev, renderPresets));
 });
 window.addEventListener('resize', markDirty);
 
-// Whether settings is open is a per-viewer convenience, so browser storage is
-// enough; the page opens closed when it is unavailable.
 const ADV_KEY = 'memchal.gpu.adv';
 try { el.adv.open = localStorage.getItem(ADV_KEY) === '1'; } catch (_) {}
 el.adv.addEventListener('toggle', () => {
@@ -785,7 +702,7 @@ el.adv.addEventListener('toggle', () => {
 load();
 applyPreset(PRESETS[0]);
 setInterval(pump, 40);
-setInterval(renderBaseline, 30000);   // the age readout, so a stale baseline says so
+setInterval(renderBaseline, 30000);
 syncControls();
 updateReadouts();
 renderBaseline();

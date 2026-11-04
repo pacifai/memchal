@@ -1,26 +1,7 @@
-# compiled binaries (repo root)
-/prover
-/verifier
-/cheating_prover
-/bench_build
-# compiled GPU binaries (built on a rented box, never committed)
-/prover_cuda
-/cheating_prover_cuda
-/tests/known_answer_gpu
-# compiled test binary
-/tests/known_answer
-/tests/known_answer_argon2d
-/tests/differential_argon2d
-/tests/rebuild_argon2d
-*.o
-# generated results (CSVs/plots) — regenerate with ./run.sh; summaries live in docs
+/build/
 /results/
-# python bytecode
 __pycache__/
 *.pyc
-# GPU demo state — which pod this checkout rented (runpod/gpu_demo_up.sh)
 /.gpu_demo_state
-# macOS Finder metadata
 .DS_Store
-# local secrets for the runpod/ scripts (see .env.example)
 .env

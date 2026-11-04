@@ -4,9 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>memory challenge · instrument</title>
-<!-- Favicon: the page map itself, at tab size — a grid of pages, most served from
-     memory (blue) and a few faulting to storage (orange). Inline SVG so there is
-     no second request and nothing external to fail. -->
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230a0e0f'/><g fill='%233987e5'><rect x='4' y='4' width='5' height='5'/><rect x='11' y='4' width='5' height='5'/><rect x='23' y='4' width='5' height='5'/><rect x='4' y='11' width='5' height='5'/><rect x='17' y='11' width='5' height='5'/><rect x='23' y='11' width='5' height='5'/><rect x='11' y='18' width='5' height='5'/><rect x='17' y='18' width='5' height='5'/><rect x='4' y='25' width='5' height='5'/><rect x='23' y='25' width='5' height='5'/></g><g fill='%23d95926'><rect x='17' y='4' width='5' height='5'/><rect x='11' y='11' width='5' height='5'/><rect x='4' y='18' width='5' height='5'/><rect x='23' y='18' width='5' height='5'/><rect x='11' y='25' width='5' height='5'/><rect x='17' y='25' width='5' height='5'/></g></svg>">
 <link rel="stylesheet" href="app.css">
 </head>
@@ -24,7 +21,6 @@
 </header>
 
 <main>
-  <!-- ── control column ─────────────────────────────────────────────────── -->
   <aside class="col-controls">
     <section class="block">
       <h2 class="eyebrow">prover under test</h2>
@@ -81,8 +77,8 @@
 
       <div class="pairs">
         <label class="field"><span class="lab">buffer mib</span><input class="num" type="number" id="mb" value="64" min="1" max="1024"></label>
-        <label class="field"><span class="lab">probes k</span><input class="num" type="number" id="k" value="4096" min="1" max="65536"></label>
-        <label class="field"><span class="lab">challenges</span><input class="num" type="number" id="n" value="200" min="1" max="20000"></label>
+        <label class="field"><span class="lab">samples</span><input class="num" type="number" id="samples" value="4096" min="1" max="65536"></label>
+        <label class="field"><span class="lab">challenges</span><input class="num" type="number" id="challenges" value="200" min="1" max="20000"></label>
         <label class="field"><span class="lab">warmup</span><input class="num" type="number" id="warmup" value="20" min="0" max="20000"></label>
       </div>
 
@@ -96,10 +92,8 @@
     </section>
   </aside>
 
-  <!-- ── instrument ─────────────────────────────────────────────────────── -->
   <div class="col-instrument">
 
-    <!-- hero: the buffer itself, and the verdict about it -->
     <section class="hero">
       <figure class="screen-frame">
         <div class="screen-top">
@@ -132,7 +126,6 @@
       </section>
     </section>
 
-    <!-- scope trace -->
     <section class="block">
       <div class="block-head">
         <h2 class="eyebrow">latency per challenge</h2>

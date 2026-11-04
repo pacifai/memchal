@@ -1,36 +1,10 @@
 #!/usr/bin/env bash
-# gpu_demo_up.sh — rent a GPU, put the demo on it, and open it in your browser.
-#
-# One command from nothing to a browsable demo. It rents a card, ships this
-# working tree to it, builds, runs the known-answer gate, starts the bridge,
-# and forwards the port. If any step fails it stops rather than leaving you a
-# pod you forgot about, and it records what it created in a state file so
-# gpu_demo_down.sh can undo exactly that and nothing else.
-#
-# It never reuses a pod it did not create. A pod you started by hand is yours
-# to manage.
-#
-# Requires: RUNPOD_API_KEY (get one from https://console.runpod.io/user/settings)
-#   and MEMCHAL_SSH_KEY, the path to an SSH private key registered on that
-#   account. Set them in your shell or in .env (see .env.example).
-#
-# Usage:
-#   bash runpod/gpu_demo_up.sh                      # H100 SXM, 60 GB disk
-#   bash runpod/gpu_demo_up.sh --gpu "NVIDIA A40"   # a cheaper card
-#   bash runpod/gpu_demo_up.sh --port 8888          # a different local port
-#   bash runpod/gpu_demo_up.sh --yes                # skip the price prompt
-#   bash runpod/gpu_demo_up.sh --idle-min 30 --max-hours 3
-#
-# The pod guards its own bill, so a closed laptop cannot leave it running:
-#   --max-hours H  the pod terminates itself H hours after boot, whatever it is
-#                  doing (default 6). Armed in the boot command, before any
-#                  other step, so it holds even if this script dies halfway.
-#   --idle-min M   the pod terminates itself after M minutes with no demo run
-#                  and no verifier running (default 90). An open tunnel does
-#                  not count as use. See runpod/gpu_watchdog.sh.
-#
-# Exit: 0 the demo is up, 1 a prerequisite is missing, 2 renting failed,
-#       3 the box is unusable or the gate failed.
+# Rents a RunPod GPU, ships and builds this tree, runs the known-answer gate, and forwards the demo to localhost.
+# Usage: bash runpod/gpu_demo_up.sh [--gpu ID] [--disk GB] [--port N] [--cloud SECURE|COMMUNITY]
+#          [--image IMAGE] [--key PATH] [--yes] [--max-hours H] [--idle-min M]
+#   --max-hours H  the pod terminates itself H hours after boot (default 6)
+#   --idle-min M   the pod terminates itself after M minutes with no run (default 90)
+# Requires RUNPOD_API_KEY and MEMCHAL_SSH_KEY. Exit: 0 up, 1 prerequisite, 2 renting, 3 box or gate.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
@@ -58,7 +32,7 @@ while [ $# -gt 0 ]; do
     --yes|-y) ASSUME_YES=1; shift ;;
     --max-hours) MAX_HOURS="$2"; shift 2 ;;
     --idle-min)  IDLE_MIN="$2"; shift 2 ;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,7p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -66,7 +40,8 @@ done
 API="https://api.runpod.io/v2"
 say()  { printf '\n== %s ==\n' "$1"; }
 die()  { printf '\nFAILED: %s\n' "$1" >&2; exit "${2:-1}"; }
-api()  { # api METHOD PATH [BODY]
+# Calls the RunPod API: api METHOD PATH [BODY].
+api()  {
   local m="$1" p="$2" b="${3:-}"
   if [ -n "$b" ]; then
     curl -sS -X "$m" "$API$p" \
@@ -78,7 +53,6 @@ api()  { # api METHOD PATH [BODY]
 }
 jget() { python3 runpod/runpod_json.py get "$1" 2>/dev/null; }
 
-# --- 0. prerequisites -------------------------------------------------------
 say "prerequisites"
 [ -n "${RUNPOD_API_KEY:-}" ] || die "RUNPOD_API_KEY is not set. Export it or put it in .env (see .env.example)." 1
 command -v curl   >/dev/null || die "curl is not installed" 1
@@ -97,11 +71,7 @@ fi
 echo "ssh key:    $SSH_KEY"
 echo "local port: $LPORT"
 
-# --- 1. price, and consent --------------------------------------------------
 say "price"
-# The catalog ignores a gpuTypeIds filter and returns every card, so find ours
-# by id. include=AVAILABILITY&product=POD is what adds the stock field. An id
-# that is not in the list is a typo in --gpu, and renting would fail anyway.
 CAT=$(curl -sS "$API/catalog/gpus?include=AVAILABILITY&product=POD" \
         -H "Authorization: Bearer $RUNPOD_API_KEY")
 INFO=$(printf '%s' "$CAT" | python3 runpod/runpod_json.py catalog "$GPU" "$CLOUD" 2>&1)
@@ -121,16 +91,11 @@ if [ "$ASSUME_YES" -ne 1 ]; then
   case "$ans" in y|Y|yes|YES) ;; *) echo "nothing rented."; exit 0 ;; esac
 fi
 
-# --- 2. rent ----------------------------------------------------------------
 say "renting"
 case "$MAX_HOURS" in ''|*[!0-9.]*) die "--max-hours takes a number of hours, such as 6 or 0.5" 1 ;; esac
 CAP_S=$(awk -v h="$MAX_HOURS" 'BEGIN { printf "%d", h * 3600 }')
 case "$IDLE_MIN"  in ''|*[!0-9]*) die "--idle-min takes a whole number of minutes" 1 ;; esac
-# The hard cap runs first in the boot command, so it is armed before anything
-# else can fail. It uses the pod-scoped key and pod id RunPod puts in every
-# pod's environment; the single quotes keep them unexpanded until the pod.
-# runpodctl is RunPod's documented way for a pod to act on itself; the curl
-# calls are a fallback for an image where it is missing.
+# CAP must stay first in BOOT so the pod's self-termination is armed even if a later step fails.
 CAP='(sleep '"$CAP_S"'; echo "hard cap reached" > /root/watchdog.cap; runpodctl pod delete $RUNPOD_POD_ID; for u in https://rest.runpod.io/v1/pods/$RUNPOD_POD_ID https://api.runpod.io/v2/pods/$RUNPOD_POD_ID; do curl -sS -o /dev/null -X DELETE "$u" -H "Authorization: Bearer $RUNPOD_API_KEY"; done) > /dev/null 2>&1 &'
 BOOT=$CAP' apt-get update -q >/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server rsync git python3 build-essential curl >/dev/null 2>&1; mkdir -p /run/sshd /root/.ssh; echo "$PUBLIC_KEY" > /root/.ssh/authorized_keys; chmod 700 /root/.ssh; chmod 600 /root/.ssh/authorized_keys; echo "export PATH=/usr/local/cuda/bin:\$PATH" >> /root/.bashrc; touch /root/.ssh_ready; /usr/sbin/sshd -D -p 22'
 BODY=$(python3 runpod/runpod_json.py pod-body "$IMAGE" "$GPU" "$DISK" "$CLOUD" "$BOOT")
@@ -140,13 +105,12 @@ if [ -z "$POD_ID" ]; then
   printf '%s\n' "$RESP" | head -c 600; echo
   die "could not rent a $GPU. Try --gpu with another card, or --cloud COMMUNITY." 2
 fi
-# Record it NOW, before anything else can fail, so teardown can always find it.
+# Record the pod before any step that can fail, so gpu_demo_down.sh can always release it.
 { echo "POD_ID=$POD_ID"; echo "LPORT=$LPORT"; echo "SSH_KEY=$SSH_KEY";
   echo "CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)"; } > "$STATE"
 echo "pod $POD_ID  (recorded in .gpu_demo_state)"
 trap 'echo; echo "Bring-up failed. The pod is still rented — run runpod/gpu_demo_down.sh"; ' ERR
 
-# --- 3. wait for ssh --------------------------------------------------------
 say "waiting for ssh"
 HOST=""; PORT=""
 for i in $(seq 1 90); do
@@ -168,33 +132,21 @@ echo
 $SSH 'test -f /root/.ssh_ready' 2>/dev/null || die "ssh never came up on $HOST:$PORT" 2
 echo "ssh: root@$HOST -p $PORT"
 
-# --- 4. ship, build, gate ---------------------------------------------------
 say "shipping this working tree"
 rsync -az --delete \
-  --exclude .git --exclude .env --exclude results --exclude __pycache__ --exclude '*.o' \
-  --exclude prover --exclude verifier --exclude cheating_prover \
-  --exclude prover_cuda --exclude cheating_prover_cuda \
+  --exclude .git --exclude .env --exclude results --exclude __pycache__ --exclude build \
   -e "ssh -i $SSH_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $PORT" \
   ./ "root@$HOST:/root/memchal/" || die "could not copy the repo to the pod" 3
 
 say "building and gating"
-# gpu_pod_setup.sh records the machine, refuses an unusable box, builds the GPU
-# targets, and runs the known-answer gate. `make` on its own builds the CPU
-# verifier, which the demo also needs.
 $SSH 'export PATH=/usr/local/cuda/bin:$PATH; cd /root/memchal && make -j8 >/dev/null 2>&1 && bash runpod/gpu_pod_setup.sh 2>&1 | tail -4'
-$SSH 'export PATH=/usr/local/cuda/bin:$PATH; cd /root/memchal && ./tests/known_answer_gpu 2>&1 | tail -1' | grep -q "all vectors PASS" \
+$SSH 'export PATH=/usr/local/cuda/bin:$PATH; cd /root/memchal && build/tests/gpu/answer_kat 2>&1 | tail -1' | grep -q "all vectors PASS" \
   || die "the known-answer gate did not pass on this card — do not trust anything it measures" 3
 
-# --- 5. start the bridge ----------------------------------------------------
 say "starting the demo"
-# A script file, not a one-liner: see the header of gpu_bridge_start.sh for why
-# stopping and starting the bridge in one ssh command kills itself.
 $SSH 'bash /root/memchal/runpod/gpu_bridge_start.sh' || die "the bridge did not start" 3
 
 say "arming the idle watchdog"
-# One ssh call, and setsid -f so the watchdog leaves this session at once.
-# Backgrounding it with `&` instead left a subshell holding the ssh channel,
-# and bring-up hung on this step.
 WD=$($SSH "cd /root/memchal && bash runpod/gpu_watchdog.sh --check && setsid -f bash runpod/gpu_watchdog.sh $IDLE_MIN > /root/watchdog.log 2>&1 < /dev/null" 2>/dev/null)
 if [ $? -eq 0 ]; then
   echo "$WD; terminates after $IDLE_MIN idle minutes, or $MAX_HOURS h after boot"

@@ -1,20 +1,6 @@
-/* app.js — memory-challenge live demo.
- *
- * Everything drawn here arrives from the real binaries over SSE (see
- * demo/bridge.py): per-challenge latency and correctness from the verifier, and
- * per-N-challenge counters + a mincore() residency bitmap from the prover. The
- * page map is not an illustration — the probed pages come from the verifier's own
- * index sequence and the colours come from the kernel's view of what is resident.
- *
- * Two honest-presentation rules the code keeps:
- *   1. x is challenge number, never wall-clock. Events are drained at a paced
- *      rate so a burst is legible, which is a drawing choice, not a timeline.
- *   2. Nothing is inferred from a colour alone — every series and page state is
- *      named in a legend, and the same facts appear numerically in the tiles.
- */
 'use strict';
 
-const MEM_STEPS = [32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024]; // MiB
+const MEM_STEPS_MIB = [32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024];
 const GEN_HINTS = {
   splitmix64: "Weak: the seed is recoverable from a single word, so recompute regenerates the whole buffer and wins.",
   chacha: "The buffer is still uploaded, but a random 256-bit key means the seed can't be recovered, so recompute regenerates wrong data and every challenge fails.",
@@ -32,13 +18,6 @@ const MODE_HINTS = {
   precompute: "Holds nothing resident: it predicts the (sequential) nonces and precomputes each answer offline, serving from cache — instant, while the page map stays empty. Give it a starved RAM budget to see it shine (reading on the spot is slow, so cache hits are a big win). Flip the nonce to random and it can't predict — back to reading from disk on the spot.",
 };
 
-// Each prover mode is its own series: their latency footprints have nothing in
-// common (fake is FASTER than honest; disk is syscall-bound; mmapdisk depends
-// entirely on its budget), so collapsing them into one "cheating" line would hide
-// the whole point. Hue carries the family — where the answer came from — and the
-// marker shape carries the individual mode, because five distinguishable hues do
-// not exist in this palette (no five-set clears the normal-vision floor with all
-// pairs on screen). Identity therefore never rests on hue alone.
 const MODE_STYLE = {
   honest:    { hue: '--fast', shape: 'circle',   glyph: '●', family: 'holds it in RAM' },
   mmapdisk:  { hue: '--slow', shape: 'circle',   glyph: '●', family: 'reads it from storage' },
@@ -51,7 +30,6 @@ const MODE_STYLE = {
 };
 const modeStyle = (mode) => MODE_STYLE[mode] || MODE_STYLE.mmapdisk;
 
-/** Marker shapes are the per-mode identity channel, so they must be legible small. */
 function drawMarker(ctx, x, y, shape, r) {
   ctx.beginPath();
   if (shape === 'square') ctx.rect(x - r, y - r, r * 2, r * 2);
@@ -69,7 +47,7 @@ const REDUCED_MOTION = window.matchMedia('(prefers-reduced-motion: reduce)').mat
 const $ = (id) => document.getElementById(id);
 const el = {
   mode: $('mode'), gen: $('gen'), chain: $('chain'), nonce: $('nonce'), mem: $('mem'), memLabel: $('memLabel'), memHint: $('memHint'),
-  modeHint: $('modeHint'), genHint: $('genHint'), genNote: $('genNote'), mb: $('mb'), k: $('k'), n: $('n'), warmup: $('warmup'),
+  modeHint: $('modeHint'), genHint: $('genHint'), genNote: $('genNote'), mb: $('mb'), samples: $('samples'), challenges: $('challenges'), warmup: $('warmup'),
   runBtn: $('runBtn'), stopBtn: $('stopBtn'), clearBtn: $('clearBtn'), themeBtn: $('themeBtn'),
   led: $('led'), statusText: $('statusText'),
   latency: $('latency'), pagemap: $('pagemap'), collapse: $('collapse'),
@@ -82,16 +60,15 @@ const el = {
 };
 
 const state = {
-  run: null,        // current run
-  prev: null,       // last completed run, kept on the chart for comparison
-  baseline: null,   // last completed honest run: {label, p50}
-  collapse: [],     // one point per completed run
-  pending: [],      // challenge events waiting to be drawn (paced)
+  run: null,
+  prev: null,
+  baseline: null,
+  collapse: [],
+  pending: [],
   dirty: { lat: true, map: true, collapse: true },
   hover: { lat: null, map: null },
 };
 
-// ── helpers ──────────────────────────────────────────────────────────────────
 const fmtUs = (us) =>
   us == null ? '—' :
   us < 1000 ? `${us.toFixed(1)} µs` :
@@ -131,8 +108,7 @@ const mix = (a, b, t) => a.map((x, i) => Math.round(x + (b[i] - x) * t));
 function fitCanvas(canvas) {
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth || 600;
-  // The CSS height is authoritative. Never read back canvas.height: assigning it
-  // rewrites the attribute, so the next read would compound.
+  // Never read canvas.height here: it is reassigned below, so the size would compound.
   const h = canvas.clientHeight || parseInt(canvas.getAttribute('height'), 10) || 240;
   canvas.width = Math.round(w * dpr);
   canvas.height = Math.round(h * dpr);
@@ -142,7 +118,6 @@ function fitCanvas(canvas) {
   return { ctx, w, h };
 }
 
-// ── run bookkeeping ──────────────────────────────────────────────────────────
 function runLabel(cfg) { return `${cfg.mode} · ${cfg.mem.replace('m', ' MiB').replace('g', ' GiB')}`; }
 
 function newRun(meta, cfg) {
@@ -150,11 +125,11 @@ function newRun(meta, cfg) {
     cfg, label: runLabel(cfg), meta,
     pages: meta.pages, pageBytes: meta.page_bytes,
     points: [], sortedRun: [], errors: 0, measured: 0,
-    probe: new Uint8Array(meta.pages),      // probed pages, latest sampled challenge
-    heat: new Float32Array(meta.pages),     // decaying "recently probed" glow
+    probe: new Uint8Array(meta.pages),
+    heat: new Float32Array(meta.pages),
     heatFrames: 0,
-    residency: null,                        // prover's mincore view
-    mappedPages: null,                      // pages it can even inspect (0 for a pread reader)
+    residency: null,
+    mappedPages: null,
     prover: null, p50: null, isHonest: cfg.mode === 'honest',
   };
 }
@@ -166,7 +141,6 @@ function ingestChallenge(ev) {
   if (ev.ph === 'r') {
     run.measured++;
     if (!ev.ok) run.errors++;
-    // Sorted insert keeps the running median cheap enough to update every frame.
     const arr = run.sortedRun;
     let lo = 0, hi = arr.length;
     while (lo < hi) { const mid = (lo + hi) >> 1; if (arr[mid] < ev.us) lo = mid + 1; else hi = mid; }
@@ -176,8 +150,6 @@ function ingestChallenge(ev) {
   if (ev.map) {
     run.probe = bitsFromB64(ev.map, run.pages);
     if (REDUCED_MOTION) run.heat.fill(0);
-    // A probe happens and is over; the glow decays so the eye can see *where* the
-    // last sampled challenge landed without freezing it into a permanent state.
     for (let i = 0; i < run.pages; i++) if (run.probe[i]) run.heat[i] = 1;
     run.heatFrames = REDUCED_MOTION ? 0 : 110;
   }
@@ -197,7 +169,7 @@ function ingestProver(ev) {
 function finishRun(endEv) {
   const run = state.run;
   if (!run) return;
-  if (endEv) { run.p50 = endEv.p50; run.errors = endEv.errors; run.measured = endEv.samples; }
+  if (endEv) { run.p50 = endEv.p50; run.errors = endEv.errors; run.measured = endEv.challenges; }
   const mib = memMiB(run.cfg.mem);
   state.collapse.push({ mib, p50: run.p50, mode: run.cfg.mode, label: run.label,
                         errors: run.errors, measured: run.measured });
@@ -207,17 +179,13 @@ function finishRun(endEv) {
 
 const memMiB = (mem) => (mem.endsWith('g') ? parseInt(mem, 10) * 1024 : parseInt(mem, 10));
 
-// ── event stream ─────────────────────────────────────────────────────────────
 function connect() {
   const es = new EventSource('/events');
   es.onmessage = (msg) => {
     let ev;
     try { ev = JSON.parse(msg.data); } catch { return; }
     switch (ev.t) {
-      // Everything on the data timeline goes through ONE ordered queue. Applying
-      // 'run' or 'p' immediately while 'c' waited its turn meant a page pacing
-      // behind reality filed the previous run's challenges under the next run —
-      // which silently lost the honest baseline.
+      // Queue these together: applying 'run' early would file old challenges under the new run.
       case 'run': case 'c': case 'p': case 'end':
         state.pending.push(ev); break;
       case 'history': restoreHistory(ev.runs); break;
@@ -228,15 +196,14 @@ function connect() {
   es.onerror = () => setStatus('err', 'bridge disconnected — is bridge.py still running?');
 }
 
-/** Rebuild baseline + collapse marks from runs that finished before this page
- *  connected, so a reload mid-demo doesn't lose the reference run. */
+// Rebuild the baseline and collapse marks from runs that finished before this page connected.
 function restoreHistory(runs) {
   state.collapse = [];
   state.baseline = null;
   for (const r of runs || []) {
     if (r.p50 == null) continue;
     state.collapse.push({ mib: memMiB(r.cfg.mem), p50: r.p50, mode: r.cfg.mode,
-                          label: runLabel(r.cfg), errors: r.errors, measured: r.samples });
+                          label: runLabel(r.cfg), errors: r.errors, measured: r.challenges });
     if (r.cfg.mode === 'honest') state.baseline = { label: runLabel(r.cfg), p50: r.p50 };
   }
   state.dirty.collapse = true;
@@ -259,17 +226,9 @@ function setStatus(cls, text) {
   el.statusText.textContent = text;
 }
 
-// ── paced playback: drain the queue so a burst is watchable ──────────────────
-/** Ingest queued challenges. Runs on an interval, not on a frame: a tab that is
- *  hidden or not painting stops getting frames, and the run must still be
- *  accounted for — otherwise switching away mid-demo silently stalls the page and
- *  dumps a backlog when you switch back. */
 function apply(ev) {
   switch (ev.t) {
     case 'run':
-      // The run being replaced becomes the retained comparison series. Doing this
-      // here (rather than when a run ends) keeps prev and run distinct objects —
-      // otherwise a finished run was drawn, and legended, twice.
       state.prev = state.run;
       state.run = newRun(ev, ev.cfg || currentCfg());
       clearConsole();
@@ -280,18 +239,14 @@ function apply(ev) {
   }
 }
 
+// Apply a paced batch of queued events, skipping ahead when a newer run is already queued.
 function pump() {
   if (!state.pending.length) return;
-  // Pacing is for the run being watched. If a newer run has already started,
-  // fast-forward through the older one so the page never narrates stale work.
   const nextRunAt = state.pending.findIndex((e, i) => i > 0 && e.t === 'run');
   const budget = nextRunAt > 0 ? nextRunAt + 1
                                : Math.max(1, Math.ceil(state.pending.length / 12));
   for (let i = 0; i < budget && state.pending.length; i++) apply(state.pending.shift());
   updateTiles();
-  // Frames can stop entirely (a tab that isn't painting), which would leave the
-  // canvases showing an older run than the numbers beside them. Draw from here if
-  // no frame has arrived recently.
   if (performance.now() - lastFrameAt > 500) redrawDirty();
 }
 
@@ -315,14 +270,13 @@ function tick() {
   requestAnimationFrame(tick);
 }
 
-// ── readouts + verdict ──────────────────────────────────────────────────────
 function updateTiles() {
   const run = state.run;
   const p = run && run.prover;
   if (!run && state.collapse.length) return summarizeLastRun();
 
   el.tP50.textContent = run && run.p50 != null ? fmtUs(run.p50) : '—';
-  el.tP50sub.textContent = run ? `${run.measured} of ${run.cfg.n} measured` : 'measured phase';
+  el.tP50sub.textContent = run ? `${run.measured} of ${run.cfg.challenges} measured` : 'measured phase';
 
   if (run && run.measured) {
     el.tErr.textContent = `${run.errors.toLocaleString()} / ${run.measured.toLocaleString()}`;
@@ -346,8 +300,7 @@ function updateTiles() {
   updateVerdict();
 }
 
-/** With no live run, say what the last finished one measured rather than showing
- *  a row of dashes — but keep it labelled as a summary, not a live reading. */
+// Fill the tiles and verdict from the last finished run.
 function summarizeLastRun() {
   const last = state.collapse[state.collapse.length - 1];
   el.tP50.textContent = fmtUs(last.p50);
@@ -373,16 +326,12 @@ function summarizeLastRun() {
   }
 }
 
-/** Share of probes that had to come from storage: the prover's own block-layer
- *  reads over the probes it was asked for. Defined for every reader — an mmap
- *  probe pays a major fault and a pread probe does not, but both show up here. */
+// Percentage of probes served from storage, from the prover's block-layer reads.
 function storagePct(p) {
   if (!p || !p.probes || p.read_bytes < 0) return null;
   return 100 * (p.read_bytes / 4096) / p.probes;
 }
-/** Share of the claimed buffer the kernel says is resident. A pread reader maps
- *  nothing, so this is 0 by construction — true, but the storage share is the
- *  honest signal for that reader, not this one. */
+// Percentage of the claimed buffer the kernel reports as resident.
 function residentPct(p) {
   if (!p || !p.pages_total) return null;
   return 100 * p.res_pages / p.pages_total;
@@ -408,8 +357,6 @@ function updateVerdict() {
     el.heroSub.textContent = 'Run the honest prover first — it is the reference every other prover is measured against.';
   }
 
-  // The state line is only ever a restatement of measured counters, and it names
-  // which counter it rests on. Icon + words carry it; colour only agrees.
   let cls = '', text = 'standing by';
   if (run) {
     const sp = storagePct(p), rp = residentPct(p);
@@ -437,7 +384,6 @@ function updateVerdict() {
   el.verdictState.textContent = text;
 }
 
-// ── latency chart ────────────────────────────────────────────────────────────
 function seriesColor(run) { return cssColor(modeStyle(run.cfg.mode).hue); }
 
 function latencyGeom(w, h, runs) {
@@ -445,11 +391,11 @@ function latencyGeom(w, h, runs) {
   let lo = Infinity, hi = -Infinity, maxX = 1;
   for (const r of runs) {
     for (const pt of r.points) { if (pt.us < lo) lo = pt.us; if (pt.us > hi) hi = pt.us; }
-    maxX = Math.max(maxX, r.cfg.warmup + r.cfg.n, r.points.length);
+    maxX = Math.max(maxX, r.cfg.warmup + r.cfg.challenges, r.points.length);
   }
   if (!Number.isFinite(lo)) { lo = 10; hi = 1000; }
   let yLo = Math.log10(Math.max(1, lo / 1.6)), yHi = Math.log10(hi * 1.6);
-  if (yHi - yLo < 1) {                                 // never less than one decade
+  if (yHi - yLo < 1) {
     const mid = (yLo + yHi) / 2;
     yLo = mid - 0.5; yHi = mid + 0.5;
   }
@@ -473,7 +419,6 @@ function drawLatency() {
   }
   const g = latencyGeom(w, h, runs);
 
-  // warmup region: unmeasured challenges, shown but set apart
   const wu = runs[runs.length - 1].cfg.warmup;
   if (wu > 0) {
     ctx.fillStyle = cssColor('--hair');
@@ -485,14 +430,11 @@ function drawLatency() {
     ctx.fillText('warmup', g.pad.l + 3, g.pad.t + 11);
   }
 
-  // decade gridlines — solid hairlines, one shade off the surface
   ctx.strokeStyle = cssColor('--hair');
   ctx.fillStyle = cssColor('--muted');
   ctx.lineWidth = 1;
   ctx.font = `10px ${cssColor('--face-num')}`;
   ctx.textAlign = 'right';
-  // Decades, plus the 2x/5x steps inside them when the run spans less than ~1.5
-  // decades — otherwise a tight distribution gets a single lonely gridline.
   const steps = (g.yHi - g.yLo) < 1.6 ? [1, 2, 5] : [1];
   for (let d = Math.floor(g.yLo); d <= Math.ceil(g.yHi); d++) {
     for (const mult of steps) {
@@ -508,8 +450,6 @@ function drawLatency() {
   ctx.beginPath(); ctx.moveTo(g.pad.l, h - g.pad.b); ctx.lineTo(w - g.pad.r, h - g.pad.b); ctx.stroke();
   ctx.fillText(`challenge # (0 … ${g.maxX.toLocaleString()})`, g.pad.l, h - 8);
 
-  // series: the retained run is thinner and translucent, and labelled "previous",
-  // so two runs of the same class never rely on hue alone to be told apart.
   runs.forEach((run) => {
     const isCurrent = run === state.run;
     ctx.strokeStyle = seriesColor(run);
@@ -521,12 +461,11 @@ function drawLatency() {
       i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
     });
     ctx.stroke();
-    if (run.points.length <= 60) {                    // few enough to mark individually
+    if (run.points.length <= 60) {
       ctx.fillStyle = seriesColor(run);
       const shape = modeStyle(run.cfg.mode).shape;
       run.points.forEach((pt, i) => drawMarker(ctx, g.x(i), g.y(pt.us), shape, 4));
     }
-    // direct label at the series end
     const last = run.points[run.points.length - 1];
     ctx.fillStyle = seriesColor(run);
     ctx.font = `${isCurrent ? '600 ' : ''}10px ${cssColor('--face-label')}`;
@@ -565,8 +504,6 @@ function renderLatLegend(runs) {
   el.latLegend.innerHTML = runs.map((r) => {
     const c = seriesColor(r);
     const current = r === state.run;
-    // Two runs of the same class share a hue, so the swatch carries the same
-    // opacity the mark does — the legend must not be the only place they differ.
     const swatch = `<span style="opacity:${current ? 1 : 0.55}">${modeStyle(r.cfg.mode).glyph}</span>`;
     const badge = r.errors ? `<span class="badge">✕ ${r.errors}/${r.measured} mismatched</span>` : '';
     return `<span style="color:${c}">${swatch}<span style="color:var(--ink-2)">${r.label}`
@@ -574,7 +511,6 @@ function renderLatLegend(runs) {
   }).join('');
 }
 
-// ── page map ─────────────────────────────────────────────────────────────────
 function drawPageMap() {
   const { ctx, w, h } = fitCanvas(el.pagemap);
   const run = state.run || state.prev;
@@ -587,8 +523,6 @@ function drawPageMap() {
   }
 
   const pages = run.pages;
-  // Shape the grid to the panel's aspect so the buffer fills the screen rather
-  // than sitting in a square island with dead space either side.
   const aspect = Math.max(0.4, w / h);
   const cols = Math.max(1, Math.round(Math.sqrt(pages * aspect)));
   const rows = Math.ceil(pages / cols);
@@ -609,13 +543,9 @@ function drawPageMap() {
     unmapped: mix(surface, muted, 0.20),
   };
 
-  // One pixel per page into an offscreen image, then scaled up with smoothing
-  // off: 16k pages redraw every frame without 16k fill calls.
   const img = ctx.createImageData(cols, rows);
   const mapped = run.mappedPages;
   for (let i = 0; i < pages; i++) {
-    // Resting colour says whether the page is held; the glow says a probe just
-    // landed there. A probe is momentary, so it is drawn as a momentary thing.
     let base, lit;
     if (mapped === 0 || (mapped != null && i >= mapped)) { base = PAL.unmapped; lit = PAL.probedSlow; }
     else if (!run.residency || run.residency[i]) { base = PAL.restFast; lit = PAL.probedFast; }
@@ -677,7 +607,6 @@ function renderMapLegend(run) {
       : 'Every cell is one 4 KiB page. Colour is where the probes actually came from, per the kernel — not a claim.';
 }
 
-// ── collapse curve ───────────────────────────────────────────────────────────
 function drawCollapse() {
   const { ctx, w, h } = fitCanvas(el.collapse);
   const pts = state.collapse.filter((p) => p.p50 != null);
@@ -701,8 +630,6 @@ function drawCollapse() {
     ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
     ctx.fillText(fmtUs(Math.pow(10, d)), pad.l - 5, y + 3);
   }
-  // Budgets belong on the axis, not beside every mark: with several provers at one
-  // budget, per-mark labels collide into unreadable overlap.
   ctx.fillStyle = cssColor('--muted');
   ctx.font = `9px ${cssColor('--face-num')}`;
   ctx.textAlign = 'center';
@@ -719,8 +646,6 @@ function drawCollapse() {
     const color = cssColor(style.hue);
     ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 2;
 
-    // Runs at the same budget would sit on top of each other; nudge them apart by
-    // a couple of pixels so a hidden mark can't read as a missing one.
     const dodge = (p) => {
       const same = pts.filter((q) => q.mib === p.mib);
       const i = same.indexOf(p);
@@ -737,14 +662,11 @@ function drawCollapse() {
     group.forEach((p) => {
       drawMarker(ctx, X(Math.log10(p.mib)) + dodge(p), Y(Math.log10(p.p50)), style.shape, 4.5);
     });
-    // Name each line once, beside its worst (highest) mark — that is the end of the
-    // story the chart is telling.
     const worst = group.reduce((a, b) => (b.p50 > a.p50 ? b : a));
     labels.push({ text: mode.toUpperCase(), color,
                   x: X(Math.log10(worst.mib)) + dodge(worst), y: Y(Math.log10(worst.p50)) });
   }
 
-  // Push labels apart vertically so clustered provers stay readable.
   labels.sort((a, b) => a.y - b.y);
   const MIN_GAP = 12;
   for (let i = 1; i < labels.length; i++) {
@@ -762,8 +684,6 @@ function drawCollapse() {
 
 function renderCollapseLegend(pts) {
   if (!el.collapseLegend) return;
-  // One entry per mode present, with its glyph: hue says which family, glyph says
-  // which mode. The families are named so the grouping teaches the taxonomy.
   const present = Object.keys(MODE_STYLE).filter((m) => pts.some((p) => p.mode === m));
   el.collapseLegend.innerHTML = present.map((m) => {
     const st = modeStyle(m);
@@ -772,7 +692,6 @@ function renderCollapseLegend(pts) {
   }).join('');
 }
 
-// ── console ──────────────────────────────────────────────────────────────────
 const CONSOLE_MAX = 240;
 function clearConsole() { el.consoleBody.innerHTML = ''; }
 
@@ -798,7 +717,6 @@ function appendLog(line) {
   el.log.scrollTop = el.log.scrollHeight;
 }
 
-// ── shared chart bits ────────────────────────────────────────────────────────
 function emptyNote(ctx, w, h, text) {
   ctx.fillStyle = cssColor('--muted');
   ctx.font = `12px ${cssColor('--face-prose')}`;
@@ -827,50 +745,36 @@ function trackHover(canvas, key) {
   });
 }
 
-// ── controls ─────────────────────────────────────────────────────────────────
 function currentCfg() {
-  const mib = MEM_STEPS[+el.mem.value];
+  const mib = MEM_STEPS_MIB[+el.mem.value];
   return {
     mode: el.mode.value,
     gen: el.gen.value,
     chain: el.chain.value,
     nonce: el.nonce.value,
     mem: mib >= 1024 && mib % 1024 === 0 ? `${mib / 1024}g` : `${mib}m`,
-    mb: +el.mb.value, k: +el.k.value, lanes: 32,
-    n: +el.n.value, warmup: +el.warmup.value,
+    mb: +el.mb.value, samples: +el.samples.value, lanes: 32,
+    challenges: +el.challenges.value, warmup: +el.warmup.value,
     trace: 20, probe: 20, frac: 0.5,
   };
 }
 
-// Argon2d cannot build part of a matrix, so every prover has to hold the whole
-// buffer in RAM once while it builds — even a cheat that means to spill it to
-// disk straight after. With process overhead that takes about 1.2× the buffer
-// (a 64 MiB build is OOM-killed at 64 MiB and runs at 77 MiB). A cheat with less
-// fails during the build instead of answering slowly, which is not the result a
-// starved-budget run exists to show. The honest prover is left out: it needs
-// ~1.2× under every generator, and the memory hint warns about that.
-// demo/bridge.py's starved_for_build() is the same rule.
 const BUILD_HEADROOM = 1.2;
+// True when a non-honest prover's budget is too small to build an Argon2d buffer.
 function starvedForBuild() {
-  return el.mode.value !== 'honest' && MEM_STEPS[+el.mem.value] < BUILD_HEADROOM * +el.mb.value;
+  return el.mode.value !== 'honest' && MEM_STEPS_MIB[+el.mem.value] < BUILD_HEADROOM * +el.mb.value;
 }
 
-// True until the operator picks a generator. While it holds, the page picks:
-// argon2d, or chacha for a starved run. Once the operator picks, the choice
-// sticks — including argon2d for a starved run, which then gets a warning.
 let genAuto = true;
 
-/** A scenario control changed (mode, budget, buffer size). Under argon2d a
- *  starved run would only show a build failure, so while the page is picking
- *  the generator it runs a starved run on chacha and says so, and goes back to
- *  argon2d when the budget covers the buffer again. */
+// Until the operator picks a generator, use chacha for a starved run and argon2d otherwise.
 function onScenarioChange() {
   if (genAuto) el.gen.value = starvedForBuild() ? 'chacha' : 'argon2d';
   syncControls();
 }
 
 function syncControls() {
-  const mib = MEM_STEPS[+el.mem.value];
+  const mib = MEM_STEPS_MIB[+el.mem.value];
   const buf = +el.mb.value;
   el.memLabel.textContent = fmtMiB(mib);
   const ratio = mib / buf;
@@ -881,8 +785,6 @@ function syncControls() {
       : `${ratio.toFixed(2)}× the buffer — the page cache CANNOT keep the file. Probes have to fault to storage.`;
   el.modeHint.textContent = MODE_HINTS[el.mode.value] || '';
   el.genHint.textContent = GEN_HINTS[el.gen.value] || '';
-  // See starvedForBuild(). Reached only when the operator chose argon2d for a
-  // starved run themselves; otherwise onScenarioChange() has picked chacha.
   if (el.gen.value === 'argon2d' && starvedForBuild()) {
     el.genHint.textContent += ` ⚠ At ${ratio.toFixed(2)}× the buffer this prover cannot build it: Argon2d needs buffer-sized RAM once, plus headroom, even for a cheat that means to spill to disk. This run will fail during the build. Raise the budget to ${BUILD_HEADROOM}× or more, or pick chacha.`;
   }

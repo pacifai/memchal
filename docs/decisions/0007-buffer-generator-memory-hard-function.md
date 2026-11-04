@@ -55,7 +55,7 @@ floor and rebuilds a crate on the spot when a challenge asks for it (the `recomp
 Two memchal-specific facts also shape the choice:
 
 - **Build-once vs rebuild-per-challenge.** The MHF's heavy cost lands once, at
-  construction. The per-challenge answer stays cheap (k random reads from resident
+  construction. The per-challenge answer stays cheap (`samples` random reads from resident
   memory). We are not trying to make the honest build fast; we are trying to make the
   *attacker's on-demand rebuild during a timed challenge* intolerable. The steeper the
   per-block rebuild, the wider that gap. This is the same asymmetry the whole PoC relies
@@ -130,7 +130,7 @@ well-analyzed options plus separate memory/time/lane knobs, which is exactly the
 the honest-build-vs-attacker-rebuild gap and the GPU lane count need. scrypt is the
 fallback if the Argon2 core proves too heavy to vendor or port.
 
-The **frozen challenge math is untouched.** `answer_lane_t` / `answer_challenge_t` read
+The **frozen challenge math is untouched.** `answer_lane` / `answer_sequential` read
 `load(idx)` from a flat buffer and do not care how it was filled; the known-answer test
 ([ADR 0001](0001-challenge-math-frozen-pinned-by-known-answer.md)) stays byte-identical.
 `build_buffer` is a new, separate function, not a change to the hot path.
@@ -179,7 +179,7 @@ The **frozen challenge math is untouched.** `answer_lane_t` / `answer_challenge_
 3. **Vendor vs dependency — settled: vendor the full standard.** See below.
 4. **Block granularity — settled: 1 KiB, Argon2's own block.** The generator rebuilds
    whole blocks while the challenge reads 8-byte words, so the cost model is per-block.
-   A `k=4096` challenge therefore probes at most 4096 distinct blocks, which is the
+   A `samples=4096` challenge therefore probes at most 4096 distinct blocks, which is the
    quantity the TMTO curve is a function of.
 
 ## What was decided at implementation, and why
@@ -190,7 +190,7 @@ bytes match every other Argon2d implementation) and the same graph over the ChaC
 already vendored here (~150 lines instead of ~700, but bytes nobody else can check).
 
 The memory-hardness argument rests on the graph, so both options inherit it. What the
-full standard buys is **provenance**: `tests/known_answer_argon2d.cpp` checks us against
+full standard buys is **provenance**: `tests/shared/argon2d_kat.cpp` checks us against
 RFC 7693 and RFC 9106 vectors — values this codebase did not produce — so a reviewer can
 verify the generator without reading our index arithmetic. [ADR 0006](0006-chacha20-vendored-vs-dependency.md)'s
 revisit clause named this exact trigger and asked for external provenance when it fired.
@@ -235,8 +235,8 @@ cheaper, and are the existing `partial` / `mmapdisk` story).
 ## Implementation status
 
 Landed: `src/argon2d.hpp` (the generator, with `mc::build_buffer()` handing back the
-matrix as the challenge buffer), `tests/known_answer_argon2d.cpp` (RFC-pinned),
-`tests/differential_argon2d.cpp` (swept against `libargon2`), `src/bench_build.cpp`
+matrix as the challenge buffer), `tests/shared/argon2d_kat.cpp` (RFC-pinned),
+`tests/shared/argon2d_differential.cpp` (swept against `libargon2`), `src/bench/build_cost.cpp`
 (build cost), and the recipe handshake: `--gen argon2d` sends a 92-byte `RecipeMsg`
 behind wire version 2, and the prover builds inside its already-locked region. The
 send-buffer path is untouched, so every earlier result and the demo still run.
@@ -247,7 +247,7 @@ still caught by timing. That the two independent builds agree on every answer is
 byte-equality check on the generator across two processes.
 
 The partial-recompute adversary runs on the GPU as
-`cheating_prover_cuda --mode recompute`.
+`build/gpu/cheating_prover --mode recompute`.
 
 ### Build-time memory
 
@@ -258,7 +258,7 @@ free blocks right after the build, which is the partial-recompute adversary.
 
 ### Evidence
 
-One H100 session (`partial-recompute`: 4 GiB buffer, `k=262,144`, 16,384 lanes, `p=16`)
+One H100 session (`partial-recompute`: 4 GiB buffer, `samples=262,144`, 16,384 lanes, `p=16`)
 measured the partial-recompute adversary. With `t=2` it answered wrong on every
 challenge at every discarded fraction tested, down to 0.1%, because rebuilding a block
 needs first-pass values that nobody kept. With `t=1` it answered correctly but slowly:
