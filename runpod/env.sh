@@ -1,6 +1,4 @@
-# Loads KEY=value lines from .env at the repo root into the environment.
-# A variable already set in the environment keeps its value. Sourced by the
-# runpod/ scripts after they cd to the repo root.
+# Exports KEY=value lines from the repo-root .env; variables already set keep their value.
 if [ -f .env ]; then
   while IFS='=' read -r key value; do
     case "$key" in ''|\#*) continue ;; esac

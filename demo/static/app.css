@@ -1,24 +1,3 @@
-/* app.css — the demo dressed as what it actually is: a measuring instrument.
- *
- * Three faces, three jobs. Condensed grotesque for engraved panel labels, a
- * monospace for every measured number (tabular, so figures don't dance as they
- * update), and an old-style serif for the prose — this repo explains itself in
- * paragraphs, and that voice belongs to a lab notebook, not to UI chrome.
- *
- * The two data hues are the validated categorical pair (blue slot 1, orange
- * slot 2): they clear CVD separation and 3:1 against every surface used here,
- * which the obvious green/red pair does not (ΔE 4.1 under deuteranopia). They
- * mean one thing throughout:
- *      blue   = served from fast memory
- *      orange = went to storage
- *
- * A third hue (aqua) joins them for provers that hold the data NOWHERE. Three is
- * the ceiling: no five-hue set drawn from this palette clears the normal-vision
- * floor with every pair on screen at once, so the five prover modes are told
- * apart by hue FAMILY plus a marker shape per mode, never by hue alone.
- * Chrome stays achromatic so the data hues are the only saturated colour.
- */
-
 :root {
   --face-label: "Avenir Next Condensed", "HelveticaNeue-CondensedBold",
                 "Roboto Condensed", "Arial Narrow", system-ui, sans-serif;
@@ -26,14 +5,6 @@
   --face-prose: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
 }
 
-/* Dark theme. The neutrals share the surfaces' cool hue (195) so the three
- * text levels read as one family, and each is set by contrast on --panel
- * rather than by eye: --ink 14:1, --ink-2 8:1, --muted 5.5:1. --muted carries
- * every label, tick, and legend at 9-11px, so it sits well above the 4.5:1
- * floor. The accents keep their hues and meanings but share a lightness
- * (~5.6:1), so none of them shouts. --critical is the exception on purpose:
- * rose and lighter (6.8:1), because it sits next to --slow in the residency
- * bar and at equal lightness red and orange blur together. */
 :root[data-theme="dark"] {
   color-scheme: dark;
   --plane:   #0e1214;
@@ -44,9 +15,9 @@
   --muted:   #839398;
   --hair:    #232b2e;
   --axis:    #2f393c;
-  --fast:    #5394e3;   /* holds it in fast memory */
-  --slow:    #dc6c2a;   /* reads it from storage */
-  --none:    #29a47b;   /* does not hold it at all */
+  --fast:    #5394e3;
+  --slow:    #dc6c2a;
+  --none:    #29a47b;
   --critical:#eb8293;
   --good:    #30a73a;
   --glow:    0 0 0 1px #232b2e, inset 0 1px 0 rgba(225,231,232,.04);
@@ -75,7 +46,6 @@ body {
   font-family: var(--face-prose); font-size: 14px; line-height: 1.55;
 }
 
-/* engraved labels: the instrument's silkscreen */
 .eyebrow, .lab, .chip, .go, select, th, .rail-name, .rail-role, .hero-lab, .state {
   font-family: var(--face-label);
   text-transform: uppercase;
@@ -89,11 +59,8 @@ body {
 .num { font-family: var(--face-num); font-variant-numeric: tabular-nums; }
 .prose { font-family: var(--face-prose); color: var(--ink-2); font-size: 12.5px; margin: 8px 0 0; }
 .prose.inline { display: inline; margin: 0; text-transform: none; letter-spacing: 0; }
-/* The page changed the generator on the operator's behalf: set it apart so it
- * reads as a notice, not as more description. */
 .prose.gen-note { color: var(--ink); border-left: 2px solid var(--slow); padding-left: 8px; }
 
-/* ── top rail ─────────────────────────────────────────────────────────── */
 .rail {
   display: flex; align-items: center; justify-content: space-between; gap: 16px;
   padding: 10px 18px; background: var(--panel);
@@ -113,7 +80,6 @@ body {
 .led.err  { background: var(--critical); box-shadow: 0 0 10px var(--critical), 0 0 0 3px var(--hair); }
 @keyframes blink { 50% { opacity: .3; } }
 
-/* ── layout ───────────────────────────────────────────────────────────── */
 main {
   display: grid; grid-template-columns: 268px minmax(0, 1fr);
   gap: 14px; padding: 14px 18px 36px; align-items: start;
@@ -124,8 +90,6 @@ main {
   padding: 13px 14px 15px;
 }
 .block-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px 14px; flex-wrap: wrap; }
-/* The legend must wrap inside the panel rather than run off its edge, so it has to
-   be allowed to shrink below its content width. */
 .block-head .legend { flex: 1 1 auto; min-width: 0; justify-content: flex-end; }
 .split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
 .hero { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(260px, .65fr); gap: 14px; }
@@ -134,7 +98,6 @@ main {
   .hero, .split { grid-template-columns: 1fr; }
 }
 
-/* ── controls ─────────────────────────────────────────────────────────── */
 .field { display: block; margin: 12px 0 0; }
 .field .lab { margin-bottom: 5px; }
 .field .lab b { color: var(--ink); letter-spacing: 0; font-size: 12px; }
@@ -153,14 +116,12 @@ button {
   background: var(--inset); color: var(--ink);
 }
 button.go { background: var(--fast); border-color: var(--fast); color: #fff; flex: 1; }
-/* White on the dark theme's lighter blue is 3.1:1; the page's own ink on it is 6.2:1. */
 :root[data-theme="dark"] button.go { color: var(--inset); }
 button.small { padding: 5px 9px; margin-top: 10px; }
 button:disabled { opacity: .4; cursor: default; }
 button:hover:not(:disabled) { filter: brightness(1.12); }
 :focus-visible { outline: 2px solid var(--fast); outline-offset: 2px; }
 
-/* ── the screen: signature element ────────────────────────────────────── */
 .screen-frame {
   margin: 0; padding: 13px 14px 14px; background: var(--panel);
   border: 1px solid var(--hair); border-radius: 4px;
@@ -172,21 +133,14 @@ button:hover:not(:disabled) { filter: brightness(1.12); }
   width: 100%; display: block; background: var(--inset);
   border: 1px solid var(--axis); border-radius: 2px; box-shadow: var(--glow);
 }
-/* Canvases MUST carry an explicit CSS height. With only a height attribute a
-   canvas lays out at its intrinsic 300xH ratio, so a full-width one becomes
-   absurdly tall and the page grows with it. */
 canvas { width: 100%; display: block; touch-action: none; }
 #pagemap  { height: 420px; }
 #latency  { height: 240px; }
 #collapse { height: 200px; }
-/* GPU page. A canvas with no CSS height falls back to its own bitmap height,
-   which is the thing the script is setting — so leaving these out lets the
-   element grow every frame. */
 #hbm      { height: 120px; }
 #split    { height: 200px; }
 @media (max-width: 1180px) { #pagemap { height: 340px; } }
 
-/* ── verdict ──────────────────────────────────────────────────────────── */
 .verdict {
   background: var(--panel); border: 1px solid var(--hair); border-radius: 4px;
   padding: 13px 14px 15px; display: flex; flex-direction: column;
@@ -213,7 +167,6 @@ canvas { width: 100%; display: block; touch-action: none; }
 .readouts dd.foot { font-size: 10px; color: var(--muted); font-family: var(--face-prose); }
 .readouts dd.alarm { color: var(--critical); }
 
-/* ── legends: identity is never colour alone ──────────────────────────── */
 .legend {
   display: flex; gap: 13px; flex-wrap: wrap; margin-top: 9px;
   font-family: var(--face-prose); font-size: 11.5px; color: var(--ink-2);
@@ -226,7 +179,6 @@ canvas { width: 100%; display: block; touch-action: none; }
   font-size: 10px; letter-spacing: .1em; text-transform: uppercase;
 }
 
-/* ── ledger ───────────────────────────────────────────────────────────── */
 .log-scroll { overflow: auto; max-height: 244px; margin-top: 2px; }
 table.ledger { width: 100%; border-collapse: collapse; font-family: var(--face-num); font-size: 11.5px; font-variant-numeric: tabular-nums; }
 table.ledger th {
@@ -241,7 +193,6 @@ table.ledger tr.warm td { color: var(--muted); }
 .v-ok::before { content: "✓ "; }
 .v-bad::before { content: "✕ "; }
 
-/* ── process output ───────────────────────────────────────────────────── */
 .log-panel summary { cursor: pointer; }
 .log-panel summary::marker { color: var(--muted); }
 #log {
@@ -249,7 +200,6 @@ table.ledger tr.warm td { color: var(--muted); }
   color: var(--ink-2); white-space: pre-wrap;
 }
 
-/* ── tooltip ──────────────────────────────────────────────────────────── */
 .tip {
   position: fixed; z-index: 20; pointer-events: none; font-size: 11.5px; line-height: 1.5;
   background: var(--panel); color: var(--ink); border: 1px solid var(--axis);

@@ -1,22 +1,7 @@
 #!/usr/bin/env bash
-# gpu_pod_setup.sh — the first command to run on a rented GPU box.
-#
-# Three jobs, in this order, because each one can make the next pointless:
-#
-#   1. Describe the machine, and record it. A trial without its machine record
-#      is not a measurement, it is a number. This writes results/machine.json
-#      next to the trial output.
-#   2. Refuse boxes whose results would be meaningless — no GPU, MIG slices
-#      instead of a whole card, or a compute capability this build cannot target.
-#   3. Build the GPU targets and run the known-answer gate, which is what says
-#      the CUDA kernel computes the same challenge as the CPU reference.
-#
-# It answers the RunPod-specific unknowns in the first few seconds rather than
-# after an hour of rental: whether clocks can be locked, and whether RDMA
-# devices exist at all.
-#
-# Usage:  bash runpod/gpu_pod_setup.sh [--device N] [--skip-build]
-# Exit:   0 everything passed, 1 the box is unusable, 2 the build or gate failed.
+# Records the pod's GPU profile in results/machine.json, refuses an unusable card, then builds the GPU targets and runs the known-answer gate.
+# Usage: bash runpod/gpu_pod_setup.sh [--device N] [--skip-build]
+# Exit: 0 everything passed, 1 the box is unusable, 2 the build or gate failed.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -36,7 +21,6 @@ say() { printf '\n== %s ==\n' "$1"; }
 
 fatal() { printf '\nFATAL: %s\n' "$1" >&2; exit 1; }
 
-# --- 1. is there a GPU at all ------------------------------------------------
 say "GPU"
 command -v nvidia-smi >/dev/null 2>&1 || fatal "nvidia-smi not found — no driver visible in this container"
 nvidia-smi --query-gpu=index,name,compute_cap,memory.total,driver_version,ecc.mode.current \
@@ -49,13 +33,10 @@ DRIVER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null
 GPU_COUNT=$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | wc -l | tr -d ' ')
 [ -n "$GPU_NAME" ] || fatal "device $DEVICE not present"
 
-# The Makefile ships cubins for 80/86/90 and a compute_75 PTX floor. Below 75
-# there is no fallback and the binary will not load.
 if [ -n "$GPU_CC" ] && [ "$GPU_CC" -lt 75 ] 2>/dev/null; then
   fatal "compute capability $GPU_CC is below the compute_75 PTX floor in the Makefile"
 fi
 
-# --- 2. is it a WHOLE card ---------------------------------------------------
 say "exclusivity"
 MIG=$(nvidia-smi -i "$DEVICE" --query-gpu=mig.mode.current --format=csv,noheader 2>/dev/null || echo "N/A")
 echo "MIG mode:        $MIG"
@@ -66,7 +47,6 @@ esac
 COMPUTE_MODE=$(nvidia-smi -i "$DEVICE" --query-gpu=compute_mode --format=csv,noheader 2>/dev/null)
 echo "compute mode:    $COMPUTE_MODE"
 
-# Other tenants on the card show up as processes you did not start.
 OTHER=$(nvidia-smi -i "$DEVICE" --query-compute-apps=pid,used_memory --format=csv,noheader 2>/dev/null)
 if [ -n "$OTHER" ]; then
   echo "WARNING: other processes already hold memory on this GPU:"
@@ -75,9 +55,6 @@ else
   echo "other tenants:   none visible"
 fi
 
-# vCPU per GPU infers whether you rented the whole node. Fractional rentals
-# share host DRAM and the PCIe root complex invisibly, which does not hurt HBM
-# numbers but does invalidate any host-DRAM or zero-copy adversary row.
 VCPU=$(nproc 2>/dev/null || echo "?")
 echo "vCPUs:           $VCPU  (for $GPU_COUNT visible GPU(s))"
 if [ "$GPU_COUNT" = "1" ]; then
@@ -86,7 +63,6 @@ if [ "$GPU_COUNT" = "1" ]; then
   echo "        adversary numbers from this box."
 fi
 
-# --- 3. the timing instrument ------------------------------------------------
 say "clocks and throttling"
 nvidia-smi -i "$DEVICE" --query-gpu=clocks.sm,clocks.mem,clocks.max.sm,temperature.gpu,power.draw,power.limit \
            --format=csv,noheader 2>/dev/null
@@ -106,7 +82,6 @@ fi
 echo "throttle reasons:"
 nvidia-smi -i "$DEVICE" -q -d PERFORMANCE 2>/dev/null | grep -A10 -i "clocks event reasons\|clocks throttle reasons" | sed 's/^/  /' | head -14
 
-# --- 4. topology and fabric --------------------------------------------------
 say "topology"
 nvidia-smi topo -m 2>/dev/null | head -20 || echo "topo unavailable"
 PCIE_GEN=$(nvidia-smi -i "$DEVICE" --query-gpu=pcie.link.gen.current,pcie.link.width.current --format=csv,noheader 2>/dev/null)
@@ -119,8 +94,7 @@ else
   HAS_NVLINK="no"
 fi
 
-# The 60-second answer to whether the RDMA experiments can run here at all.
-say "RDMA (settles whether the A1/A2b rows are possible on this provider)"
+say "RDMA"
 if [ -d /dev/infiniband ] && [ -n "$(ls -A /dev/infiniband 2>/dev/null)" ]; then
   echo "/dev/infiniband: present"
   ls /dev/infiniband | sed 's/^/  /'
@@ -134,7 +108,6 @@ else
 fi
 lsmod 2>/dev/null | grep -q nvidia_peermem && echo "nvidia_peermem:  loaded" || echo "nvidia_peermem:  not loaded"
 
-# --- 5. record the machine ---------------------------------------------------
 STAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 SESSION=$(date -u +%Y%m%dT%H%M%SZ)-$(hostname | tr -cd '[:alnum:]' | tail -c 8)
 cat > results/machine.json <<JSON
@@ -160,7 +133,6 @@ echo
 echo "Every trial from this box must carry this record. Absolute microseconds"
 echo "are not comparable to any other session; only within-session ratios are."
 
-# --- 6. build and gate -------------------------------------------------------
 if [ "$SKIP_BUILD" = "1" ]; then
   echo; echo "--skip-build given; stopping before the build."
   exit 0
@@ -172,24 +144,16 @@ nvcc --version | tail -1
 make gpu || { echo "BUILD FAILED" >&2; exit 2; }
 
 say "known-answer gate"
-echo "This is the port's correctness gate: the CUDA kernel must reproduce the"
-echo "constants pinned before any CUDA existed (ADR 0001)."
 hr
-if ./tests/known_answer_gpu --device "$DEVICE"; then
+if build/tests/gpu/answer_kat --device "$DEVICE"; then
   hr
-  echo "GATE PASSED — the GPU computes the frozen challenge math."
+  echo "GATE PASSED"
   echo
   echo "Next: start the prover and point the verifier at it."
   echo
-  echo "  ./prover_cuda --port 9099 --trace 10 &"
-  echo "  ./verifier --port 9099 --mb 4096 --k 262144 --lanes 16384 \\"
-  echo "             --n 200 --warmup 20 --json results/gpu_trial.json"
-  echo
-  echo "Why those numbers. lanes is one GPU thread each, so the CPU default of 32"
-  echo "leaves the card idle and measures launch overhead and nothing else; 16384"
-  echo "is enough threads to have the memory system working. The defended default"
-  echo "is --chain dependent, and the verifier refuses k/lanes < 16, so k has to"
-  echo "rise with lanes: 262144/16384 is exactly the floor of 16."
+  echo "  build/gpu/prover --port 9099 --trace 10 &"
+  echo "  build/verifier --port 9099 --mb 4096 --samples 262144 --lanes 16384 \\"
+  echo "                 --challenges 200 --warmup 20 --json results/gpu_trial.json"
   echo
   echo "Expect the useful-bytes bandwidth to look poor. An 8-byte probe drags a"
   echo "32-byte sector at minimum, so most of the traffic is thrown away. That is"

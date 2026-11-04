@@ -1,38 +1,8 @@
 #!/usr/bin/env python3
-"""bridge_gpu.py — web server for the GPU demo, run ON the GPU box.
+"""Web server for the GPU memory-challenge demo; run it on the GPU host.
 
-WHAT IT IS. The same idea as bridge.py: a thin bridge between a browser page
-and the real binaries, simulating nothing. Every number the page draws comes
-from a prover and a verifier actually running, plus nvidia-smi for the card's
-own view of itself.
-
-WHAT IS DIFFERENT from bridge.py, and why:
-
-  - No Docker. RunPod runs the container for you and you cannot nest another
-    one inside it, so the processes are spawned directly. That also removes the
-    container-teardown race bridge.py has to work around.
-  - No page map. The CPU demo colours pages blue or orange from mincore(),
-    which reports the kernel's own view of which pages are resident. There is
-    no GPU equivalent — the driver will not tell you which lines of HBM hold
-    what. The honest replacement is HBM occupancy from cudaMemGetInfo plus the
-    driver's own word on what backs the pointer.
-  - An HBM budget instead of a RAM budget. The CPU demo starves a prover with a
-    container memory limit. Here --leave-free reserves device memory so a
-    managed (UVM) buffer cannot fit.
-  - Clocks are recorded, not assumed. A container provider will almost
-    certainly refuse to let you lock clocks, so the page shows SM clock,
-    temperature, and any active throttle reason next to every measurement. A
-    timing result whose clock history you did not record is not a measurement.
-
-HOW TO RUN (on the pod, after runpod/gpu_pod_setup.sh passes):
-    python3 demo/bridge_gpu.py          # then tunnel 8777 and open it
-    PORT=9000 python3 demo/bridge_gpu.py
-
-Reach it with:  ssh -L 8777:127.0.0.1:8777 <pod>     (or RunPod's HTTP proxy)
-
-MEASUREMENT NOTE. Tracing happens after each response is sent, so it is outside
-the verifier's timed window, but it does space the challenges out. This is a
-demo. Headline numbers come from scripts/run_trials.py with tracing off.
+Usage: python3 demo/bridge_gpu.py, then tunnel port 8777 and open it.
+Environment: PORT, PROVER_PORT, DEVICE, SMI_INTERVAL.
 """
 import json
 import os
@@ -52,35 +22,26 @@ PROVER_PORT = int(os.environ.get("PROVER_PORT", "9700"))
 DEVICE = os.environ.get("DEVICE", "0")
 SMI_INTERVAL = float(os.environ.get("SMI_INTERVAL", "1.0"))
 
-# ── what the browser may ask for ─────────────────────────────────────────────
 MODES = ("honest", "fake", "uvm", "partial")
 GENS = ("argon2d", "chacha", "splitmix64")
 CHAINS = ("independent", "dependent")
 NONCES = ("sequential", "random")
-FOLDS = ("tree", "sequential")   # tree is the parallel Merkle fold
-LIMITS = {                    # field: (min, max, default)
-    "mb":     (1, 262144, 4096),      # may exceed HBM on purpose, for uvm
-    "k":      (1, 1 << 24, 262144),
-    "lanes":  (1, 1 << 18, 16384),
-    "n":      (1, 20000, 200),
-    "warmup": (0, 20000, 20),
-    "free":   (0, 262144, 0),         # MiB of HBM to leave free; 0 reserves nothing
-    "trace":  (0, 10000, 1),
-    "frac":   (0, 1, 0.5),
-    "offload": (0, 1, 0.1),   # partial: fraction kept off the card
-    "verify": (1, 1000, 10),   # check 1 answer in N. Checking costs ~100ns per
-                               # probe on the CPU, so at large k it dwarfs the
-                               # prover's own work and would make a demo crawl.
-    "gap":    (0, 100000, 0),  # us of idle after each challenge, outside the
-                               # timed window — for watching or recording a run
-                               # that would otherwise finish in a flicker
-    "build_p": (1, 64, 16),    # argon2d only: Argon2 build lanes, which is the
-                               # number of host threads per build. Not the
-                               # challenge's lanes.
+FOLDS = ("tree", "sequential")
+LIMITS = {
+    "mb":                (1, 262144, 4096),
+    "samples":           (1, 1 << 24, 262144),
+    "lanes":             (1, 1 << 18, 16384),
+    "challenges":        (1, 20000, 200),
+    "warmup":            (0, 20000, 20),
+    "free":              (0, 262144, 0),
+    "trace":             (0, 10000, 1),
+    "frac":              (0, 1, 0.5),
+    "offload":           (0, 1, 0.1),
+    "verify":            (1, 1000, 10),
+    "gap":               (0, 100000, 0),
+    "build_parallelism": (1, 64, 16),
 }
-# Argon2 passes over the matrix. Fixed at 2, the least that makes every block
-# depend on the whole matrix (ADR 0007).
-BUILD_T = 2
+BUILD_PASSES = 2
 DEFAULTS = {"mode": "honest", "gen": "argon2d", "chain": "dependent",
             "nonce": "random", "fold": "tree",
             **{k: v[2] for k, v in LIMITS.items()}}
@@ -98,11 +59,7 @@ def clamp(name, value):
 
 
 def validate(req):
-    """Whitelist the request. Anything unrecognized falls back to a default.
-
-    The page must not be able to talk the bridge into running something else,
-    so every process is spawned with an argument list and never a shell string.
-    """
+    """Return the whitelisted run config, with defaults for anything unrecognized."""
     out = {
         "mode":  req.get("mode")  if req.get("mode")  in MODES  else DEFAULTS["mode"],
         "gen":   req.get("gen")   if req.get("gen")   in GENS   else DEFAULTS["gen"],
@@ -112,15 +69,10 @@ def validate(req):
     }
     for name in LIMITS:
         out[name] = clamp(name, req.get(name, LIMITS[name][2]))
-
-    # The verifier refuses a dependent chain shallower than 16, so tell the page
-    # why rather than letting it watch the process exit non-zero.
-    depth = out["k"] // max(1, out["lanes"])
-    out["chain_depth"] = depth
+    out["chain_depth"] = out["samples"] // max(1, out["lanes"])
     return out
 
 
-# ── event hub (server-sent events) ───────────────────────────────────────────
 class Hub:
     def __init__(self):
         self.lock = threading.Lock()
@@ -186,14 +138,13 @@ class Hub:
 HUB = Hub()
 
 
-# ── the card's own view of itself ────────────────────────────────────────────
 SMI_FIELDS = ("clocks.sm", "clocks.mem", "temperature.gpu", "utilization.gpu",
               "memory.used", "memory.total", "power.draw",
               "clocks_throttle_reasons.active")
 
 
 def smi_sample():
-    """One nvidia-smi reading, or None if the tool is unavailable."""
+    """Return one nvidia-smi reading as an smi event, or None if unavailable."""
     if not shutil.which("nvidia-smi"):
         return None
     try:
@@ -233,18 +184,11 @@ def smi_loop():
         time.sleep(SMI_INTERVAL)
 
 
-# ── the run itself ───────────────────────────────────────────────────────────
 RUNS_DIR = ROOT / "results" / "demo_runs"
 
 
 class Run:
-    """One prover+verifier run. Owns both processes and kills them on stop().
-
-    Every event the run produces is also appended to
-    results/demo_runs/<timestamp>-<mode>.jsonl. The page keeps only the last
-    few thousand points in memory and loses them on reload, so without this
-    file a run that showed something interesting cannot be looked at again.
-    """
+    """One prover and verifier run; records every event to results/demo_runs/<stamp>-<mode>.jsonl."""
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -267,7 +211,7 @@ class Run:
         self.thread = threading.Thread(target=self._run, daemon=True)
 
     def _write(self, event):
-        """Append one event to the run file. Never let recording break a run."""
+        """Append one event to the run file, disabling recording on error."""
         if not self.record:
             return
         try:
@@ -304,12 +248,9 @@ class Run:
         HUB.publish(event)
 
     def _pump(self, stream, src):
-        """Forward one process's stdout: '@' lines are events, the rest are log."""
+        """Publish '@' lines from a process's stdout as events and the rest as log lines."""
         for raw in stream:
             line = raw.rstrip("\n")
-            # Keep the cause, not its echo: when the prover dies, the verifier
-            # then fails to send, and that later line would otherwise replace
-            # the one that says why.
             if "FATAL" in line:
                 self.last_failure = line.strip()
             elif "send fail" in line and self.last_failure is None:
@@ -327,11 +268,6 @@ class Run:
                     event["cfg"] = self.cfg
                 self._write(event)
                 HUB.publish(event)
-                # The verifier emits "run" once the buffer is generated,
-                # uploaded, and acknowledged, just before the first challenge.
-                # Without this the page said "uploading" for the whole run,
-                # which a slow mode like starved uvm made obvious, and a page
-                # reloaded mid-run was not sent the run it had missed.
                 if event.get("t") == "run":
                     self._status("running")
             elif line:
@@ -339,14 +275,12 @@ class Run:
 
     def _prover_cmd(self):
         c = self.cfg
-        # honest mode runs the honest binary, so the baseline really is the
-        # verify-and-refuse path rather than the cheat binary being polite.
         if c["mode"] == "honest":
-            return [str(ROOT / "prover_cuda"), "--port", str(PROVER_PORT),
+            return [str(ROOT / "build" / "gpu" / "prover"), "--port", str(PROVER_PORT),
                     "--device", DEVICE, "--trace", str(c["trace"]),
                     "--lane-cap", str(max(1, c["lanes"]))]
         reserve = ["--leave-free", str(c["free"])] if c["free"] > 0 else []
-        return [str(ROOT / "cheating_prover_cuda"), "--port", str(PROVER_PORT),
+        return [str(ROOT / "build" / "gpu" / "cheating_prover"), "--port", str(PROVER_PORT),
                 "--device", DEVICE, "--mode", c["mode"], "--frac", str(c["frac"]),
                 *reserve, "--offload", str(c["offload"]),
                 "--trace", str(c["trace"]),
@@ -354,14 +288,12 @@ class Run:
 
     def _verifier_cmd(self):
         c = self.cfg
-        # argon2d is build mode: the verifier sends a recipe, and the prover
-        # builds the buffer on its host CPU and copies it to the card.
-        build = (["--build-t", str(BUILD_T), "--build-p", str(c["build_p"])]
+        build = (["--build-passes", str(BUILD_PASSES), "--build-parallelism", str(c["build_parallelism"])]
                  if c["gen"] == "argon2d" else [])
-        return [str(ROOT / "verifier"), "--host", "127.0.0.1",
+        return [str(ROOT / "build" / "verifier"), "--host", "127.0.0.1",
                 "--port", str(PROVER_PORT),
-                "--mb", str(c["mb"]), "--k", str(c["k"]), "--lanes", str(c["lanes"]),
-                "--n", str(c["n"]), "--warmup", str(c["warmup"]),
+                "--mb", str(c["mb"]), "--samples", str(c["samples"]), "--lanes", str(c["lanes"]),
+                "--challenges", str(c["challenges"]), "--warmup", str(c["warmup"]),
                 "--gen", c["gen"], *build, "--chain", c["chain"], "--nonce", c["nonce"],
                 "--fold", c["fold"],
                 "--label", f"gpu-{c['mode']}",
@@ -373,8 +305,8 @@ class Run:
         try:
             c = self.cfg
             for binary in ("verifier",
-                           "prover_cuda" if c["mode"] == "honest" else "cheating_prover_cuda"):
-                if not (ROOT / binary).exists():
+                           "gpu/prover" if c["mode"] == "honest" else "gpu/cheating_prover"):
+                if not (ROOT / "build" / binary).exists():
                     return self._status("error",
                                         error=f"{binary} is not built. Run `make gpu` "
                                               f"(and `make` for the verifier) first.")
@@ -399,30 +331,20 @@ class Run:
             if self.stopping:
                 return self._status("stopped")
 
-            # Generating a multi-GB buffer and pushing it over the wire, or
-            # building it with Argon2d on both sides, takes seconds to tens of
-            # seconds, and until it finishes there is nothing to draw. Saying so
-            # beats looking hung. The phase is "uploading" for every generator;
-            # the page words it from cfg.gen.
             self._status("uploading", mb=c["mb"])
             self.verifier = subprocess.Popen(self._verifier_cmd(), stdout=subprocess.PIPE,
                                              stderr=subprocess.STDOUT, text=True, bufsize=1)
             self._pump(self.verifier.stdout, "verifier")
             rc = self.verifier.wait()
-            time.sleep(0.5)          # let the prover flush its closing lines
+            time.sleep(0.5)
             if self.stopping:
                 self._status("stopped", rc=rc)
             elif rc != 0 or not self.saw_end or (self.last_failure and "FATAL" in self.last_failure):
-                # A run that ends without a result is a failure, whatever the
-                # exit code. Reporting it as "done" made a prover that died
-                # before its first challenge look like a run that did nothing.
-                # So is one whose prover died mid-run: the verifier still
-                # prints a summary of the challenges it got, which set saw_end.
                 why = self.last_failure or f"the verifier exited {rc} without a result"
                 self._status("error", rc=rc, error=why)
             else:
                 self._status("done", rc=rc)
-        except Exception as exc:                  # a crashed run must not kill the server
+        except Exception as exc:
             self._status("error", error=f"{type(exc).__name__}: {exc}")
         finally:
             for p in (self.verifier, self.prover):
@@ -462,12 +384,7 @@ class Manager:
 MANAGER = Manager()
 
 class QuietServer(ThreadingHTTPServer):
-    """ThreadingHTTPServer that does not treat a dropped client as an incident.
-
-    Every closed browser tab resets an SSE connection, and the default handler
-    prints a full traceback for each one — which buries the output the operator
-    is actually reading.
-    """
+    """ThreadingHTTPServer that ignores errors from clients that disconnect."""
     daemon_threads = True
 
     def handle_error(self, request, client_address):
@@ -486,7 +403,7 @@ CONTENT_TYPES = {".html": "text/html; charset=utf-8",
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
-    def log_message(self, *a):            # keep the console for the run's own output
+    def log_message(self, *a):
         pass
 
     def _send(self, code, body, ctype="application/json"):
@@ -541,9 +458,6 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/run":
             cfg = validate(req if isinstance(req, dict) else {})
-            # The verifier refuses a dependent chain shallower than 16, so say so
-            # now with a number the operator can act on, rather than starting a
-            # prover and reporting a process exit.
             if cfg["chain"] == "dependent" and cfg["chain_depth"] < 16:
                 return self._send(400, json.dumps({
                     "error": f"chain depth k/lanes = {cfg['chain_depth']} is below the "
@@ -561,8 +475,8 @@ class Handler(BaseHTTPRequestHandler):
 
 def preflight():
     print(f"[bridge] repo root: {ROOT}", flush=True)
-    missing = [b for b in ("verifier", "prover_cuda", "cheating_prover_cuda")
-               if not (ROOT / b).exists()]
+    missing = [b for b in ("verifier", "gpu/prover", "gpu/cheating_prover")
+               if not (ROOT / "build" / b).exists()]
     if missing:
         print(f"[bridge] NOT BUILT: {', '.join(missing)}", flush=True)
         print("[bridge] run `make` and `make gpu` first, or the page will say so.", flush=True)
