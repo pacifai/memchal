@@ -6,7 +6,7 @@
 The stabilized detectors prove "you can't answer without *reading* the data." That is
 weaker than proof-of-retention: there are several ways to answer fast without
 genuinely holding the data, and each needs its own defense. Rather than assert the
-gap, we built each attack as a mode and each defense as a toggle, so the demo can flip
+gap, the project builds each attack as a mode and each defense as a toggle, so the demo can flip
 a defense on and watch the attack get caught. This ADR records the taxonomy;
 the numbers live in the investigations, the deeper framing in
 [NEXT_STEPS](../../NEXT_STEPS.md) and [ADR 0003](0003-timing-detector-scope-and-measurement.md).
@@ -63,7 +63,7 @@ specifically.
   `prefetch-needs-pattern`. The chain floor
   is a floor, not a cure (an attacker can still pipeline `samples/lanes` probes across lanes),
   and chaining costs the honest prover ~3–4× (pointer-chasing kills MLP).
-- **precompute** needs the verifier to give it offline time; our tight benchmark loop
+- **precompute** needs the verifier to give it offline time; a tight benchmark loop
   masks it, so `--gap-us` exists to model a realistic periodic verifier. Unpredictable
   nonces are cheap and close it outright.
 - All three (and all defenses) are measurable by the harness

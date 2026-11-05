@@ -70,7 +70,7 @@ verifier alike.
 ## Attacks and defenses
 
 A cheating prover has several ways to look like it's holding the data without
-actually holding it. `src/cpu/cheating_prover.cpp` implements each one as a mode, so the
+actually holding it. `src/attacks/cpu/cheating_prover.cpp` implements each one as a mode, so the
 defense is tested rather than asserted — run the attack, watch it win, turn the
 defense on, watch it lose. The first group is caught by the two built-in signals
 (a wrong answer, or a slow one). The last three are shortcuts that beat both signals
@@ -209,14 +209,15 @@ in `map_index`, which became `mulhi64()`. Three things were less obvious:
 - **`common.hpp` had to be split first.** It mixed the challenge math with
   `<sys/socket.h>` and `/proc` readers, so it could not be included from a `.cu`
   file at all. The math now lives in `src/shared/challenge.hpp`.
-- **The cross-lane fold cannot be a tree reduction.** It is a sequential chain,
+- **The sequential fold can't quietly become a tree reduction.** It's a chain,
   so a warp-shuffle reduction would produce a different hash while looking
-  perfectly reasonable.
+  perfectly reasonable. The tree fold is a separate challenge flag
+  (`--fold tree`), pinned by its own known-answer vectors.
 - **`mlock` has no GPU equivalent, and the gap matters.** `cudaMallocManaged`
   returns a pointer that looks identical to `cudaMalloc`'s and migrates silently
   under pressure. The prover asks the driver what backs its buffer and refuses to
   serve unless the answer is device memory
-  ([ADR 0008](docs/decisions/0008-gpu-residency-check-substitutes-for-mlock.md)).
+  ([ADR 0002](docs/decisions/0002-refuse-unless-resident.md)).
   Like `VmLck`, that is self-reported: it stops the honest prover publishing a
   bad baseline and proves nothing about a remote one.
 

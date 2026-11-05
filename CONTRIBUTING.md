@@ -14,20 +14,19 @@ includes headers by their path under `src/`, for example `"shared/challenge.hpp"
   and both cross-lane folds. It compiles for host and device, so it includes no
   POSIX headers. Frozen, and pinned by a known-answer test
   ([ADR 0001](docs/decisions/0001-challenge-math-frozen-pinned-by-known-answer.md)).
-- `chacha20.hpp` — ChaCha20 (RFC 8439), used to generate an uploaded buffer from
-  a random key.
+- `fill.hpp` — the buffer fills: ChaCha20 from a random key, split across the
+  machine's cores, and splitmix64 from a seed.
+- `chacha20.hpp` — ChaCha20 (RFC 8439), which the ChaCha20 fill uses.
 - `argon2d.hpp` — Argon2d (RFC 9106), the memory-hard generator for build mode:
   the verifier sends a short recipe and both sides build the buffer. Frozen like
   the challenge math, and pinned against RFC test vectors
   ([ADR 0007](docs/decisions/0007-buffer-generator-memory-hard-function.md)).
-- `argon2d_rebuild.hpp` — rebuilds one Argon2d block from a partial copy of the
-  matrix, for the recompute adversary.
 - `protocol.hpp` — the wire messages, the limits a prover enforces on them, and
   how a prover answers a challenge message.
 - `socket.hpp`, `server.hpp` — blocking socket I/O, and the parts every prover
   shares: the listener, the opening exchange, receiving or building the buffer,
   and the challenge loop.
-- `cli.hpp`, `json.hpp`, `random.hpp`, `thread_pool.hpp` — small utilities.
+- `cli.hpp`, `json.hpp`, `random.hpp` — small utilities.
 
 ### Programs
 
@@ -36,15 +35,18 @@ includes headers by their path under `src/`, for example `"shared/challenge.hpp"
   challenges, and `report.hpp` writes the latency profile, CSV, and JSON.
 - `src/cpu/` — `prover.cpp` is the honest CPU prover: it locks the buffer in RAM,
   confirms the lock through `VmLck`, and refuses to run unlocked
-  ([ADR 0002](docs/decisions/0002-verify-and-refuse-on-mlock.md)).
-  `cheating_prover.cpp` holds the CPU adversaries: `disk`, `partial`, `fake`,
-  `mmapdisk`, `recompute`, `prefetch`, and `precompute`.
+  ([ADR 0002](docs/decisions/0002-refuse-unless-resident.md)).
 - `src/gpu/` — `prover.cpp` is the honest GPU prover: it allocates with
   `cudaMalloc` and confirms the allocation type with `cudaPointerGetAttributes`
-  ([ADR 0008](docs/decisions/0008-gpu-residency-check-substitutes-for-mlock.md)).
-  `cheating_prover.cpp` holds the GPU adversaries: `fake`, `uvm`, `partial`, and
-  `recompute`. Only the `.cu` files go through `nvcc`; the headers use no CUDA
-  types, so the programs build with `g++`.
+  ([ADR 0002](docs/decisions/0002-refuse-unless-resident.md)). Only the `.cu`
+  files go through `nvcc`; the headers use no CUDA types, so the programs build
+  with `g++`.
+- `src/attacks/` — the adversaries that test the verifier, built separately from
+  the core. `cpu/cheating_prover.cpp` holds the CPU adversaries: `disk`,
+  `partial`, `fake`, `mmapdisk`, `recompute`, `prefetch`, and `precompute`.
+  `gpu/cheating_prover.cpp` holds the GPU adversaries: `fake`, `uvm`, `partial`,
+  and `recompute`. `argon2d_rebuild.hpp` rebuilds one Argon2d block from a partial
+  copy of the matrix, for the GPU recompute adversary.
 - `src/demo/` — the `@`-prefixed JSON events the browser demo reads. Nothing
   else depends on them.
 - `src/bench/build_cost.cpp` — measures what one 1 KiB Argon2d block costs to
@@ -62,7 +64,10 @@ includes headers by their path under `src/`, for example `"shared/challenge.hpp"
   releasing it.
 - `docs/decisions/` — the decision records behind the design and its claims.
 
-`make` writes every binary and object under `build/`.
+`make` writes every binary and object under `build/`. `make` builds the core,
+the CPU adversaries, and the benchmark; `make core` builds only the verifier and
+the CPU prover, and `make attacks` only the CPU adversaries. `make tests` builds
+the CPU tests.
 
 ## Build and test
 
@@ -92,7 +97,8 @@ docker/run.sh bash -c 'make && \
 ### GPU
 
 On a machine with the CUDA toolkit, `make gpu` builds `build/gpu/prover`,
-`build/gpu/cheating_prover`, and `build/tests/gpu/answer_kat`. Run
+`build/tests/gpu/answer_kat`, and `build/attacks/gpu/cheating_prover`;
+`make gpu-core` leaves out the adversaries. Run
 `build/tests/gpu/answer_kat` before trusting any GPU measurement.
 
 To rent a RunPod GPU instead, register an SSH key on your RunPod account, copy
@@ -104,16 +110,16 @@ releases the card.
 
 ### What the tests cover
 
-- `tests/shared/challenge_kat.cpp` — pins the challenge math and the ChaCha20
-  fill to fixed constants.
+- `tests/shared/challenge_kat.cpp` — pins the challenge math and the buffer
+  fills to fixed constants.
 - `tests/shared/argon2d_kat.cpp` — pins Argon2d against the RFC 7693 and RFC 9106
   test vectors.
 - `tests/shared/argon2d_differential.cpp` — compares Argon2d with the reference
   `libargon2` across many parameter combinations. Only this test links
   `libargon2`.
-- `tests/shared/argon2d_rebuild_test.cpp` — checks that every block the rebuild
+- `tests/attacks/argon2d_rebuild_test.cpp` — checks that every block the rebuild
   engine produces matches a full build.
-- `tests/cpu/seed_recovery_test.cpp` — checks the recompute adversary's
+- `tests/attacks/seed_recovery_test.cpp` — checks the CPU recompute adversary's
   splitmix64 seed recovery.
 - `tests/gpu/answer_kat.cpp` — checks the CUDA kernel against the same constants
   as `challenge_kat.cpp`, for both folds.
@@ -144,7 +150,8 @@ run-to-run variance, and ratios between modes within one session.
 - **Keep the math free of POSIX.** `challenge.hpp` must stay includable from a `.cu`
   file, so sockets and `/proc` stay out of it.
 - **Keep the parts apart.** Code one part needs goes in that part's folder; code
-  two parts need goes in `src/shared/`. Demo-only output goes in `src/demo/`.
+  two parts need goes in `src/shared/`. Code only the adversaries need goes in
+  `src/attacks/`, and demo-only output goes in `src/demo/`.
 - **Fold lane hashes only through the functions in `challenge.hpp`.** The
   sequential fold chains lanes in order, and the tree fold pairs them in a fixed
   order. Any other reduction, such as a warp shuffle, changes every answer.

@@ -83,7 +83,7 @@ floor on minimum defensiveness, not a cure — a determined attacker can still
 pipeline `chain_depth` probes per lane across `lanes` lanes.
 
 **Cost to the honest prover:** the chained path forces pointer-chasing, which
-serializes memory-level parallelism within each lane.  In our measurements this
+serializes memory-level parallelism within each lane.  In the measurements this
 costs the honest prover roughly **3–4× in throughput** relative to the independent
 path, because hardware prefetchers cannot predict the next address until the current
 read completes.  This is the honest cost of the defense.
