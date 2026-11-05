@@ -12,15 +12,21 @@ CUDA_LIBS ?= -L$(CUDA_HOME)/lib64 -lcudart
 BUILD := build
 DEPFLAGS = -MMD -MP
 
-CPU_BINS  := $(BUILD)/verifier $(BUILD)/cpu/prover $(BUILD)/cpu/cheating_prover $(BUILD)/bench/build_cost
-TEST_BINS := $(BUILD)/tests/shared/challenge_kat $(BUILD)/tests/shared/argon2d_kat \
-             $(BUILD)/tests/shared/argon2d_differential $(BUILD)/tests/shared/argon2d_rebuild_test \
-             $(BUILD)/tests/cpu/seed_recovery_test
-GPU_BINS  := $(BUILD)/gpu/prover $(BUILD)/gpu/cheating_prover $(BUILD)/tests/gpu/answer_kat
+CORE_BINS    := $(BUILD)/verifier $(BUILD)/cpu/prover
+ATTACK_BINS  := $(BUILD)/attacks/cpu/cheating_prover
+BENCH_BINS   := $(BUILD)/bench/build_cost
+TEST_BINS    := $(BUILD)/tests/shared/challenge_kat $(BUILD)/tests/shared/argon2d_kat \
+                $(BUILD)/tests/shared/argon2d_differential $(BUILD)/tests/attacks/argon2d_rebuild_test \
+                $(BUILD)/tests/attacks/seed_recovery_test
+GPU_CORE_BINS   := $(BUILD)/gpu/prover $(BUILD)/tests/gpu/answer_kat
+GPU_ATTACK_BINS := $(BUILD)/attacks/gpu/cheating_prover
 
-all: $(CPU_BINS)
+all: core attacks $(BENCH_BINS)
+core: $(CORE_BINS)
+attacks: $(ATTACK_BINS)
 tests: $(TEST_BINS)
-gpu: $(GPU_BINS)
+gpu: $(GPU_CORE_BINS) $(GPU_ATTACK_BINS)
+gpu-core: $(GPU_CORE_BINS)
 
 $(BUILD)/verifier: src/verifier/main.cpp
 	@mkdir -p $(@D)
@@ -42,7 +48,11 @@ $(BUILD)/tests/shared/%: tests/shared/%.cpp
 	@mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -Isrc -o $@ $<
 
-$(BUILD)/tests/cpu/%: tests/cpu/%.cpp
+$(BUILD)/attacks/cpu/%: src/attacks/cpu/%.cpp
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -Isrc -o $@ $<
+
+$(BUILD)/tests/attacks/%: tests/attacks/%.cpp
 	@mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -Isrc -o $@ $<
 
@@ -53,7 +63,12 @@ $(BUILD)/gpu/%.o: src/gpu/%.cu
 $(BUILD)/gpu/prover: src/gpu/prover.cpp $(BUILD)/gpu/answer.o
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -Isrc -o $@ $^ $(CUDA_LIBS)
 
-$(BUILD)/gpu/cheating_prover: src/gpu/cheating_prover.cpp $(BUILD)/gpu/answer.o $(BUILD)/gpu/adversary.o
+$(BUILD)/attacks/gpu/%.o: src/attacks/gpu/%.cu
+	@mkdir -p $(@D)
+	$(NVCC) $(NVCCFLAGS) $(DEPFLAGS) -Isrc -c $< -o $@
+
+$(BUILD)/attacks/gpu/cheating_prover: src/attacks/gpu/cheating_prover.cpp $(BUILD)/gpu/answer.o \
+                                      $(BUILD)/attacks/gpu/adversary.o
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -Isrc -o $@ $^ $(CUDA_LIBS)
 
 $(BUILD)/tests/gpu/answer_kat: tests/gpu/answer_kat.cpp $(BUILD)/gpu/answer.o
@@ -73,4 +88,4 @@ clean:
 
 -include $(shell find $(BUILD) -name '*.d' 2>/dev/null)
 
-.PHONY: all tests gpu gpu-check clean
+.PHONY: all core attacks tests gpu gpu-core gpu-check clean

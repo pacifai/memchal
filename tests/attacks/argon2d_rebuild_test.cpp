@@ -2,7 +2,7 @@
 #include <cstring>
 #include <random>
 #include <vector>
-#include "shared/argon2d_rebuild.hpp"
+#include "attacks/argon2d_rebuild.hpp"
 
 using namespace mc;
 

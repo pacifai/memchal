@@ -2,6 +2,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <mutex>
 #include <thread>
@@ -10,6 +11,7 @@
 namespace mc {
 
 // Threads that live across calls to run(). The calling thread works as worker 0.
+// If a job throws, run() rethrows the first exception after every worker stops.
 class ThreadPool {
 public:
     explicit ThreadPool(uint32_t workers) {
@@ -31,7 +33,7 @@ public:
         }
         {
             std::lock_guard<std::mutex> g(m_);
-            job_ = &job; items_ = items; next_ = 0;
+            job_ = &job; items_ = items; next_ = 0; error_ = nullptr;
             busy_ = (uint32_t)threads_.size();
             ++generation_;
         }
@@ -40,11 +42,18 @@ public:
         std::unique_lock<std::mutex> g(m_);
         done_.wait(g, [this] { return busy_ == 0; });
         job_ = nullptr;
+        if (error_) std::rethrow_exception(error_);
     }
 
 private:
     void work(uint32_t w) {
-        for (uint32_t i; (i = next_.fetch_add(1)) < items_;) (*job_)(w, i);
+        try {
+            for (uint32_t i; (i = next_.fetch_add(1)) < items_;) (*job_)(w, i);
+        } catch (...) {
+            std::lock_guard<std::mutex> g(m_);
+            if (!error_) error_ = std::current_exception();
+            next_ = items_;
+        }
     }
     void loop(uint32_t w) {
         uint64_t seen = 0;
@@ -68,6 +77,7 @@ private:
     std::atomic<uint32_t> next_{0};
     uint32_t items_ = 0, busy_ = 0;
     uint64_t generation_ = 0;
+    std::exception_ptr error_;
     bool stop_ = false;
 };
 

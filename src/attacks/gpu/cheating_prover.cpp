@@ -1,7 +1,8 @@
 #include <cstring>
 #include "demo/gpu_trace.hpp"
-#include "gpu/adversary.hpp"
-#include "gpu/recompute.hpp"
+#include "attacks/gpu/adversary.hpp"
+#include "attacks/gpu/recompute.hpp"
+#include "attacks/gpu/recompute_trace.hpp"
 #include "gpu/upload.hpp"
 #include "shared/cli.hpp"
 #include "shared/server.hpp"
@@ -12,7 +13,7 @@ enum Mode { FAKE, UVM, PARTIAL, RECOMPUTE };
 static const char* const kModeNames[] = { "fake", "uvm", "partial", "recompute", nullptr };
 
 static const char kUsage[] =
-    "usage: gpu/cheating_prover [--flag value]...\n"
+    "usage: attacks/gpu/cheating_prover [--flag value]...\n"
     "  --port N              listen port (default %u)\n"
     "  --mode MODE           fake, uvm, partial, or recompute (default uvm)\n"
     "  --frac F              fake: fraction held (default 0.5)\n"
@@ -33,13 +34,12 @@ static uint32_t         g_lane_cap       = 1u << 17;
 static uint32_t         g_trace_every    = 0;
 static RecomputeOptions g_recompute;
 
-// Answers challenges with the recompute cheat and prints its rebuild work.
+// Answers challenges with the recompute cheat.
 static void answer_recompute(int cfd, gpu::Adversary& p, RecomputeHost& h) {
     char err[512] = {0};
-    uint64_t rebuilt_total = 0, rounds_total = 0, gave_up_challenges = 0;
-    double rebuild_ms_total = 0, kernel_ms_total = 0;
     gpu::Timing t;
     gpu::RecomputeStats st;
+    RecomputeTrace trace(g_trace_every);
     const uint64_t served = answer_challenges(cfd, "cheat",
         [&](const Challenge& ch, uint64_t* hash) {
             if (gpu::answer_recompute(p, ch.nonce, ch.samples, ch.lanes, is_chained(ch), is_tree(ch),
@@ -49,43 +49,13 @@ static void answer_recompute(int cfd, gpu::Adversary& p, RecomputeHost& h) {
             return false;
         },
         [&](const Challenge& ch, uint64_t n) {
-            const uint64_t fills   = h.total(&Rebuilder::Stats::fills);
-            const uint64_t gave_up = h.total(&Rebuilder::Stats::gave_up);
-            printf("@{\"t\":\"rc\",\"served\":%llu,\"samples\":%u,\"lanes\":%u,\"rounds\":%u,"
-                   "\"rebuilt\":%u,\"fills\":%llu,\"gave_up\":%llu,\"rebuild_ms\":%.4f,"
-                   "\"kernel_ms\":%.4f,\"copy_ms\":%.4f,\"fold_ms\":%.4f}\n",
-                   (unsigned long long)n, ch.samples, ch.lanes, st.rounds, st.rebuilt,
-                   (unsigned long long)(fills - h.fills_before),
-                   (unsigned long long)(gave_up - h.gave_up_before),
-                   st.rebuild_ms, t.kernel_ms, t.copy_ms, t.fold_ms);
-            if (gave_up > h.gave_up_before) ++gave_up_challenges;
-            h.fills_before = fills;
-            h.gave_up_before = gave_up;
-            rebuilt_total += st.rebuilt;
-            rounds_total += st.rounds;
-            rebuild_ms_total += st.rebuild_ms;
-            kernel_ms_total += t.kernel_ms;
+            trace.after(ch, n, st, t, h);
             for (auto& r : h.rebuilders) r->begin_challenge();
             if (gpu::recompute_forget(p, err, sizeof err)) return true;
             fprintf(stderr, "[cheat] FATAL: %s\n", err);
             return false;
         });
-    const double n = served ? (double)served : 1.0;
-    printf("[cheat] served %llu challenges; %.1f blocks rebuilt, %.1f rounds, "
-           "%.3f ms rebuilding per challenge; %llu challenge(s) gave up\n",
-           (unsigned long long)served, rebuilt_total / n, rounds_total / n,
-           rebuild_ms_total / n, (unsigned long long)gave_up_challenges);
-    printf("@{\"t\":\"rc_summary\",\"served\":%llu,\"rebuilt_per_ch\":%.3f,"
-           "\"rounds_per_ch\":%.3f,\"rebuild_ms_per_ch\":%.4f,\"kernel_ms_per_ch\":%.4f,"
-           "\"fills\":%llu,\"seeds\":%llu,\"gave_up\":%llu,\"gave_up_challenges\":%llu,"
-           "\"memo_peak_mib\":%.2f}\n",
-           (unsigned long long)served, rebuilt_total / n, rounds_total / n,
-           rebuild_ms_total / n, kernel_ms_total / n,
-           (unsigned long long)h.total(&Rebuilder::Stats::fills),
-           (unsigned long long)h.total(&Rebuilder::Stats::seeds),
-           (unsigned long long)h.total(&Rebuilder::Stats::gave_up),
-           (unsigned long long)gave_up_challenges,
-           h.total(&Rebuilder::Stats::memo_peak) * a2::kBlockBytes / 1048576.0);
+    trace.finish(served, h);
 }
 
 static void serve_recompute(int cfd, const Setup& s) {
@@ -105,19 +75,11 @@ static void serve_recompute(int cfd, const Setup& s) {
         fprintf(stderr, "[cheat] FATAL: %s\n", err);
         return;
     }
-    size_t free_b = 0, total_b = 0;
-    gpu::mem_info(&free_b, &total_b);
     printf("[cheat] built in %.3f s; kept %u of %u blocks (%.2f%%) on the card, %u rebuild "
            "threads, budget %llu fills per thread per challenge\n",
            src.build_s, h.n_kept(), h.shape.blocks, 100.0 * h.n_kept() / h.shape.blocks,
            h.pool->size(), (unsigned long long)g_recompute.budget);
-    printf("@{\"t\":\"cheatinfo\",\"mode\":\"recompute\",\"keep\":%.6f,"
-           "\"kept_blocks\":%u,\"blocks\":%u,\"build_passes\":%u,\"build_parallelism\":%u,"
-           "\"threads\":%u,\"budget\":%llu,\"hbm_used\":%llu,\"hbm_total\":%llu,"
-           "\"build\":true,\"build_s\":%.4f}\n",
-           g_recompute.keep, h.n_kept(), h.shape.blocks, s.recipe.passes, s.recipe.parallelism,
-           h.pool->size(), (unsigned long long)g_recompute.budget,
-           (unsigned long long)(total_b - free_b), (unsigned long long)total_b, src.build_s);
+    print_recompute_info(h, g_recompute, s, src.build_s);
     if (send_ready(cfd, true)) answer_recompute(cfd, p, h);
     gpu::destroy(p);
 }

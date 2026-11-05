@@ -1,14 +1,16 @@
 #pragma once
+#include <cstdio>
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <random>
 #include <sched.h>
 #include <thread>
 #include <vector>
-#include "gpu/adversary.hpp"
-#include "shared/argon2d_rebuild.hpp"
+#include "attacks/gpu/adversary.hpp"
+#include "attacks/argon2d_rebuild.hpp"
 #include "shared/server.hpp"
-#include "shared/thread_pool.hpp"
+#include "attacks/thread_pool.hpp"
 
 namespace mc {
 
@@ -30,8 +32,6 @@ struct RecomputeHost {
     std::vector<uint64_t> kept;
     std::vector<std::unique_ptr<Rebuilder>> rebuilders;
     std::unique_ptr<ThreadPool> pool;
-    uint64_t fills_before   = 0;
-    uint64_t gave_up_before = 0;
 
     uint32_t n_kept() const { return (uint32_t)(kept.size() / a2::kBlockWords); }
 
@@ -78,13 +78,18 @@ static inline bool recompute_setup(RecomputeHost& h, const Setup& s, const uint6
 }
 
 // A gpu::RebuildFn over a RecomputeHost. A block that runs out of budget is
-// returned as zeros.
+// returned as zeros. Returns false if a rebuild throws.
 static inline bool rebuild_blocks(void* ctx, const uint32_t* ids, uint32_t n, uint64_t* out) {
     RecomputeHost& h = *(RecomputeHost*)ctx;
-    h.pool->run(n, [&](uint32_t w, uint32_t i) {
-        uint64_t* dst = out + (size_t)i * a2::kBlockWords;
-        if (!h.rebuilders[w]->rebuild(ids[i], dst)) memset(dst, 0, a2::kBlockBytes);
-    });
+    try {
+        h.pool->run(n, [&](uint32_t w, uint32_t i) {
+            uint64_t* dst = out + (size_t)i * a2::kBlockWords;
+            if (!h.rebuilders[w]->rebuild(ids[i], dst)) memset(dst, 0, a2::kBlockBytes);
+        });
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[cheat] rebuild failed: %s\n", e.what());
+        return false;
+    }
     return true;
 }
 
