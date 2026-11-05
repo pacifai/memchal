@@ -56,7 +56,7 @@ Two memchal-specific facts also shape the choice:
 
 - **Build-once vs rebuild-per-challenge.** The MHF's heavy cost lands once, at
   construction. The per-challenge answer stays cheap (`samples` random reads from resident
-  memory). We are not trying to make the honest build fast; we are trying to make the
+  memory). The goal isn't to make the honest build fast; it's to make the
   *attacker's on-demand rebuild during a timed challenge* intolerable. The steeper the
   per-block rebuild, the wider that gap. This is the same asymmetry the whole PoC relies
   on.
@@ -99,15 +99,15 @@ Side-channel resistance protects a **secret input from a watching attacker** —
 hashed where someone else can snoop. Memchal has neither half of that threat:
 
 - The "secret" is the seed, and the **prover already holds it** — the verifier handed over
-  the recipe. There is nothing to leak to the party we worry about.
-- The party we worry about *is* the builder, and its goal is not to learn the seed — it is
+  the recipe. There is nothing to leak to the party the design guards against.
+- That party *is* the builder, and its goal is not to learn the seed — it is
   to avoid renting floor space.
 
 So the usual reason to accept a weaker TMTO (buying side-channel safety) **does not apply
 here.** Memchal can take the data-dependent branch and its steep tradeoff essentially for
-free, because the downside it normally carries is irrelevant to us. Choosing a
+free, because the downside it normally carries is irrelevant here. Choosing a
 data-independent or hybrid variant would mean paying a real TMTO penalty for a property
-we have no use for.
+memchal has no use for.
 
 ## Options
 
@@ -116,9 +116,9 @@ we have no use for.
 | PBKDF2 / bcrypt | none (no big memory) | none — flat | ~free | n/a | The anti-pattern; equals today's O(1) rebuild. Rejected. |
 | scrypt (2009) | data-dependent | steep (area-time ~ N²) | cascade | present (moot here) | Baroque (Salsa20 + BlockMix + PBKDF2), single cost knob; in libsodium. Viable fallback. |
 | **Argon2d (2015)** | **data-dependent** | **steep** | **cascade** | present (moot here) | PHC winner; Blake2b core; separate `m`/`t`/`p` knobs. Best on the merits. |
-| Argon2i | data-independent | weaker (proven ceiling) | cheaper (pebbling) | resistant (unneeded) | Pays for a property we don't use. |
+| Argon2i | data-independent | weaker (proven ceiling) | cheaper (pebbling) | resistant (unneeded) | Pays for a property memchal doesn't use. |
 | Argon2id | hybrid | middle | middle | half-resistant | The password-hashing default — for a threat memchal lacks. |
-| Balloon (2016) | either | steep (dep.) / weaker (indep.) | cascade / pebbling | tunable | Argon2-like hardness on *any* standard hash; could reuse a primitive we already vendor. Less battle-tested. |
+| Balloon (2016) | either | steep (dep.) / weaker (indep.) | cascade / pebbling | tunable | Argon2-like hardness on *any* standard hash; could reuse a primitive the repo already vendors. Less battle-tested. |
 
 ## Decision (proposed)
 
@@ -184,15 +184,15 @@ The **frozen challenge math is untouched.** `answer_lane` / `answer_sequential` 
 
 ## What was decided at implementation, and why
 
-**Vendor Argon2d in full, not an Argon2d-shaped construction of our own.** The choice
-was between the real standard (Argon2d's dependency graph *and* its Blake2b core, so our
+**Vendor Argon2d in full, not an Argon2d-shaped construction of the project's own.** The choice
+was between the real standard (Argon2d's dependency graph *and* its Blake2b core, so the
 bytes match every other Argon2d implementation) and the same graph over the ChaCha20
 already vendored here (~150 lines instead of ~700, but bytes nobody else can check).
 
 The memory-hardness argument rests on the graph, so both options inherit it. What the
-full standard buys is **provenance**: `tests/shared/argon2d_kat.cpp` checks us against
+full standard buys is **provenance**: `tests/shared/argon2d_kat.cpp` checks the implementation against
 RFC 7693 and RFC 9106 vectors — values this codebase did not produce — so a reviewer can
-verify the generator without reading our index arithmetic. [ADR 0006](0006-chacha20-vendored-vs-dependency.md)'s
+verify the generator without reading its index arithmetic. [ADR 0006](0006-chacha20-vendored-vs-dependency.md)'s
 revisit clause named this exact trigger and asked for external provenance when it fired.
 Runtime cost of the choice is nil (Blake2b's round function is no slower than ChaCha's,
 and `G` dominates either way); the cost is implementation size, paid once.
@@ -226,7 +226,7 @@ nobody should turn invites turning it.
 dependency graph rebuilding missing ancestors, reporting real microseconds. It needs a
 give-up cap, which is faithful rather than a distortion — a real cheat is also capped,
 by the verifier's stopwatch, and a probe needing thousands of rebuilds is already caught
-whether or not it is allowed to finish. Two limits to state when the numbers land: our
+whether or not it is allowed to finish. Two limits to state when the numbers land: the
 cheat keeps a *random* fraction, where a real one would study the graph offline and keep
 the blocks that are costliest to rebuild; and partial-recompute is the attack this design
 *introduces*, not the likeliest one in the wild (time-slicing and host-RAM residency are
@@ -234,7 +234,7 @@ cheaper, and are the existing `partial` / `mmapdisk` story).
 
 ## Implementation status
 
-Landed: `src/argon2d.hpp` (the generator, with `mc::build_buffer()` handing back the
+Landed: `src/shared/argon2d.hpp` (the generator, with `mc::build_buffer()` handing back the
 matrix as the challenge buffer), `tests/shared/argon2d_kat.cpp` (RFC-pinned),
 `tests/shared/argon2d_differential.cpp` (swept against `libargon2`), `src/bench/build_cost.cpp`
 (build cost), and the recipe handshake: `--gen argon2d` sends a 92-byte `RecipeMsg`
@@ -247,7 +247,7 @@ still caught by timing. That the two independent builds agree on every answer is
 byte-equality check on the generator across two processes.
 
 The partial-recompute adversary runs on the GPU as
-`build/gpu/cheating_prover --mode recompute`.
+`build/attacks/gpu/cheating_prover --mode recompute`.
 
 ### Build-time memory
 

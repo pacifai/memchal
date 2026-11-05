@@ -1,20 +1,32 @@
 #pragma once
 #include <cstdint>
 #include <cstdio>
+#include "demo/event.hpp"
 #include "gpu/answer.hpp"
-#include "shared/json.hpp"
 #include "shared/protocol.hpp"
 
 namespace mc {
 namespace demo {
 
+struct HbmUse {
+    uint64_t used  = 0;
+    uint64_t total = 0;
+};
+
+static inline HbmUse hbm_use() {
+    size_t free_b = 0, total_b = 0;
+    gpu::mem_info(&free_b, &total_b);
+    return HbmUse{total_b - free_b, total_b};
+}
+
 static inline void print_gpu_info(int device, const char* name) {
     size_t free_b = 0, total_b = 0;
     gpu::mem_info(&free_b, &total_b);
-    printf("@{\"t\":\"gpuinfo\",\"device\":%d,\"name\":", device);
-    json_str(stdout, name);
-    printf(",\"hbm_free\":%llu,\"hbm_total\":%llu}\n",
-           (unsigned long long)free_b, (unsigned long long)total_b);
+    Event(stdout, "gpuinfo")
+        .integer("device", device)
+        .str("name", name)
+        .uint("hbm_free", free_b)
+        .uint("hbm_total", total_b);
 }
 
 // Describes the prover's buffer once it holds it.
@@ -22,33 +34,36 @@ static inline void print_gpu_info(int device, const char* name) {
 static inline void print_buffer_info(const char* event, const char* mode, const char* backing,
                                      bool is_device, double resident_frac, bool build,
                                      double build_s) {
-    size_t free_b = 0, total_b = 0;
-    gpu::mem_info(&free_b, &total_b);
-    printf("@{\"t\":\"%s\",\"mode\":", event);
-    json_str(stdout, mode);
-    printf(",\"backing\":");
-    json_str(stdout, backing);
-    printf(",\"device_backed\":%s,\"resident_frac\":%.4f,\"hbm_used\":%llu,\"hbm_total\":%llu,"
-           "\"build\":%s,\"build_s\":%.4f}\n",
-           is_device ? "true" : "false", resident_frac,
-           (unsigned long long)(total_b - free_b), (unsigned long long)total_b,
-           build ? "true" : "false", build_s);
+    const HbmUse hbm = hbm_use();
+    Event(stdout, event)
+        .str("mode", mode)
+        .str("backing", backing)
+        .boolean("device_backed", is_device)
+        .num("resident_frac", resident_frac)
+        .uint("hbm_used", hbm.used)
+        .uint("hbm_total", hbm.total)
+        .boolean("build", build)
+        .num("build_s", build_s);
 }
 
 static inline void print_timing(const char* mode, const Challenge& ch, uint64_t served,
                                 const gpu::Timing& t, double resident_frac, bool is_device) {
-    size_t free_b = 0, total_b = 0;
-    gpu::mem_info(&free_b, &total_b);
-    printf("@{\"t\":\"g\",\"mode\":");
-    json_str(stdout, mode);
-    printf(",\"served\":%llu,\"samples\":%u,\"lanes\":%u,\"chained\":%s,\"tree\":%s,"
-           "\"kernel_ms\":%.4f,\"copy_ms\":%.4f,\"fold_ms\":%.4f,\"probe_gbps\":%.3f,"
-           "\"hbm_used\":%llu,\"hbm_total\":%llu,\"resident_frac\":%.4f,\"device\":%s}\n",
-           (unsigned long long)served, ch.samples, ch.lanes,
-           is_chained(ch) ? "true" : "false", is_tree(ch) ? "true" : "false",
-           t.kernel_ms, t.copy_ms, t.fold_ms, gpu::probe_gbps(ch.samples, t.kernel_ms),
-           (unsigned long long)(total_b - free_b), (unsigned long long)total_b,
-           resident_frac, is_device ? "true" : "false");
+    const HbmUse hbm = hbm_use();
+    Event(stdout, "g")
+        .str("mode", mode)
+        .uint("served", served)
+        .uint("samples", ch.samples)
+        .uint("lanes", ch.lanes)
+        .boolean("chained", is_chained(ch))
+        .boolean("tree", is_tree(ch))
+        .num("kernel_ms", t.kernel_ms)
+        .num("copy_ms", t.copy_ms)
+        .num("fold_ms", t.fold_ms)
+        .num("probe_gbps", gpu::probe_gbps(ch.samples, t.kernel_ms), "%.3f")
+        .uint("hbm_used", hbm.used)
+        .uint("hbm_total", hbm.total)
+        .num("resident_frac", resident_frac)
+        .boolean("device", is_device);
 }
 
 } // namespace demo

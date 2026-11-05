@@ -15,12 +15,11 @@ static constexpr uint32_t kMinChainDepth = 16;
 
 int main(int argc, char** argv) {
     const Args a = parse_args(argc, argv);
-    if (a.lanes > kMaxLanes) {
-        fprintf(stderr, "[verifier] ERROR: --lanes %u is above the provers' limit of %u\n",
-                a.lanes, kMaxLanes);
+    if (a.lanes < 1 || a.lanes > kMaxLanes) {
+        fprintf(stderr, "[verifier] ERROR: --lanes %u is outside 1 to %u\n", a.lanes, kMaxLanes);
         return 2;
     }
-    const uint32_t chain_depth = a.lanes ? a.samples / a.lanes : a.samples;
+    const uint32_t chain_depth = a.samples / a.lanes;
     if (a.chained && chain_depth < kMinChainDepth) {
         fprintf(stderr, "[verifier] ERROR: samples per lane is %u, below the minimum of %u for "
                         "--chain dependent; raise --samples, lower --lanes, or pass "
@@ -70,31 +69,37 @@ int main(int argc, char** argv) {
     Session session(fd, a, ref, stream.active() ? &stream : nullptr);
     std::vector<double> latencies;
     latencies.reserve(a.challenges);
-    uint64_t warmup_errors = 0, errors = 0;
-    if (!session.run(a.warmup, "w", nullptr, &warmup_errors) ||
-        !session.run(a.challenges, "r", &latencies, &errors)) {
+    if (!session.run(a.warmup, "w", nullptr) || !session.run(a.challenges, "r", &latencies)) {
         fprintf(stderr, "[verifier] ERROR: connection lost after %zu of %u measured challenges; "
                         "no results written\n", latencies.size(), a.challenges);
         return 1;
     }
 
-    const Profile profile(latencies, errors, session.checked());
-    print_profile(profile, a.samples);
-    if (write_csv(a.csv, latencies)) printf("[verifier] wrote %s\n", a.csv);
-    if (a.json) {
-        if (write_json(a.json, a, profile, ready.locked, ref.bytes, upload_s))
-            printf("[verifier] wrote %s\n", a.json);
-        else
-            fprintf(stderr, "[verifier] WARNING: could not write JSON to %s\n", a.json);
-    }
-    if (stream.active()) {
-        stream.end(profile.count(), errors, session.checked(), profile.at(50), profile.at(99),
-                   profile.at(0), profile.at(100), profile.mean_us);
-        stream.close();
-    }
-
     session.terminate();
     close(fd);
     free(ref.words);
-    return 0;
+
+    const Profile profile(latencies, session.errors(), session.checked());
+    print_profile(profile, a.samples);
+    int rc = 0;
+    if (write_csv(a.csv, latencies)) {
+        printf("[verifier] wrote %s\n", a.csv);
+    } else {
+        fprintf(stderr, "[verifier] ERROR: could not write CSV to %s\n", a.csv);
+        rc = 1;
+    }
+    if (a.json) {
+        if (write_json(a.json, a, profile, ready.locked, ref.bytes, upload_s)) {
+            printf("[verifier] wrote %s\n", a.json);
+        } else {
+            fprintf(stderr, "[verifier] ERROR: could not write JSON to %s\n", a.json);
+            rc = 1;
+        }
+    }
+    if (stream.active()) {
+        stream.end(profile.count(), profile.errors, profile.checked, profile.at(50), profile.at(99),
+                   profile.at(0), profile.at(100), profile.mean_us);
+        stream.close();
+    }
+    return rc;
 }

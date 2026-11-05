@@ -20,7 +20,6 @@ struct RecomputeState {
     uint8_t*  d_done       = nullptr;
     uint32_t* h_need       = nullptr;
     uint64_t* h_rebuilt    = nullptr;
-    uint32_t  need_cap     = 0;
 };
 
 struct Adversary {

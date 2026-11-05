@@ -11,22 +11,22 @@
 ## Context
 
 The crypto buffer generator (`--gen chacha`) uses a small vendored ChaCha20 in
-`src/chacha20.hpp` — about 120 lines, RFC 8439, table-free, pinned by a known-answer
+`src/shared/chacha20.hpp` — about 120 lines, RFC 8439, table-free, pinned by a known-answer
 test. During review of PR #1 the question came up: should this be an off-the-shelf
-implementation instead of our own bytes?
+implementation instead of the project's own bytes?
 
 The tension is provenance versus footprint. An audited library is bytes many people
 have reviewed, but it adds a build and link dependency and isn't portable to the GPU
 answer path the project is heading toward. The vendored file is dependency-free and
-GPU-portable, but it's code we maintain and vouch for ourselves.
+GPU-portable, but the project maintains and vouches for it alone.
 
 ## Options
 
 - **Keep the vendored implementation (today's default).** Dependency-free,
-  GPU-portable, and pinned by a known-answer test. Cost: we own ~120 lines of crypto.
+  GPU-portable, and pinned by a known-answer test. Cost: the project owns ~120 lines of crypto.
 - **Vendor a public-domain single-file implementation** (DJB's reference `chacha.c`,
   or the ChaCha core from Monocypher). Gains external provenance with still no build
-  dependency, but pulls in more code than we need.
+  dependency, but pulls in more code than the project needs.
 - **Depend on libsodium or OpenSSL.** Audited and maintained, but adds a link
   dependency, isn't header-only, and isn't GPU-portable — which conflicts with the
   repo's "g++ + standard library only" rule and the GPU-shaped answer path.
@@ -51,6 +51,6 @@ the dependency.
 
 ## Consequences
 
-- The vendored `src/chacha20.hpp` stays as the crypto buffer generator, pinned by its
+- The vendored `src/shared/chacha20.hpp` stays as the crypto buffer generator, pinned by its
   known-answer test. If this decision is reversed, this ADR records the swap and the
   test that must accompany it.

@@ -1,4 +1,4 @@
-#include "gpu/adversary.hpp"
+#include "attacks/gpu/adversary.hpp"
 #include "gpu/kernels.cuh"
 #include <algorithm>
 #include <cstring>
@@ -104,14 +104,7 @@ bool prefetch_managed(Adversary& a, char* err, size_t errlen) {
     return true;
 }
 
-bool grow_need(RecomputeState& r, uint32_t lanes, char* err, size_t errlen) {
-    if (lanes <= r.need_cap) return true;
-    if (r.d_need)    cudaFree(r.d_need);
-    if (r.d_done)    cudaFree(r.d_done);
-    if (r.h_need)    cudaFreeHost(r.h_need);
-    if (r.h_rebuilt) cudaFreeHost(r.h_rebuilt);
-    r.d_need = nullptr; r.d_done = nullptr; r.h_need = nullptr; r.h_rebuilt = nullptr;
-    r.need_cap = 0;
+bool alloc_need(RecomputeState& r, uint32_t lanes, char* err, size_t errlen) {
     cudaError_t e;
     if ((e = cudaMalloc((void**)&r.d_need, (size_t)lanes * 4)) != cudaSuccess) {
         fail(err, errlen, "cudaMalloc(need list)", e); return false;
@@ -124,7 +117,6 @@ bool grow_need(RecomputeState& r, uint32_t lanes, char* err, size_t errlen) {
     }
     e = cudaHostAlloc((void**)&r.h_rebuilt, (size_t)lanes * kBlockBytes, cudaHostAllocDefault);
     if (e != cudaSuccess) { fail(err, errlen, "cudaHostAlloc(rebuilt blocks)", e); return false; }
-    r.need_cap = lanes;
     return true;
 }
 
@@ -231,6 +223,7 @@ bool create_recompute(Adversary& a, uint32_t n_blocks, const int32_t* slot,
         return failed(a, err, errlen, "cudaMemcpy(slot table)", e);
     if ((e = cudaMalloc((void**)&a.rc.d_nneed, 4)) != cudaSuccess)
         return failed(a, err, errlen, "cudaMalloc(need count)", e);
+    if (!alloc_need(a.rc, lane_cap, err, errlen)) { destroy(a); return false; }
     return finish_create(a, lane_cap, err, errlen);
 }
 
@@ -281,9 +274,8 @@ bool answer_recompute(Adversary& a, uint64_t nonce, uint32_t samples, uint32_t l
                       bool tree, RebuildFn rebuild, void* ctx, uint64_t* out_hash, Timing* t,
                       RecomputeStats* st, char* err, size_t errlen) {
     if (a.cheat != Cheat::Recompute) { failmsg(err, errlen, "not a recompute buffer"); return false; }
-    if (lanes == 0) lanes = 1;
     RecomputeState& r = a.rc;
-    if (!lanes_grow(a.lanes, lanes, err, errlen) || !grow_need(r, lanes, err, errlen)) return false;
+    if (!lanes_fit(a.lanes, lanes, err, errlen)) return false;
     *st = RecomputeStats{};
 
     auto t0 = std::chrono::steady_clock::now();

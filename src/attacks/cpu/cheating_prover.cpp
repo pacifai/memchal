@@ -8,7 +8,7 @@
 #include <vector>
 #include "cpu/pinned.hpp"
 #include "cpu/proc_stats.hpp"
-#include "cpu/seed_recovery.hpp"
+#include "attacks/cpu/seed_recovery.hpp"
 #include "demo/cpu_trace.hpp"
 #include "shared/cli.hpp"
 #include "shared/server.hpp"
@@ -33,8 +33,6 @@ static double      g_frac        = 0.5;
 static const char* g_datafile    = "/tmp/memchal_cheat.bin";
 static uint32_t    g_trace_every = 0;
 static size_t      g_page        = 4096;
-static uint64_t    g_preads      = 0;
-static uint64_t    g_probes      = 0;
 
 static bool write_all(int fd, const void* p, size_t n) {
     const char* c = (const char*)p;
@@ -46,9 +44,9 @@ static bool write_all(int fd, const void* p, size_t n) {
     return true;
 }
 
-static uint64_t disk_word(int fd, uint64_t idx) {
+static uint64_t disk_word(int fd, uint64_t idx, uint64_t* preads) {
     uint64_t w = 0;
-    ++g_preads;
+    ++*preads;
     ssize_t got = pread(fd, &w, sizeof(w), (off_t)(idx * 8));
     if (got != (ssize_t)sizeof(w)) {
         fprintf(stderr, "[cheat:disk] pread error at idx=%llu: got=%zd errno=%d\n",
@@ -85,7 +83,6 @@ template <typename Answer>
 static void run(int cfd, demo::ResidencyTrace& trace, Answer&& answer) {
     const uint64_t served = answer_challenges(cfd, "cheat",
         [&](const Challenge& ch, uint64_t* hash) {
-            g_probes += ch.samples;
             *hash = answer(ch);
             return true;
         },
@@ -183,10 +180,11 @@ static void serve_prefix(int cfd, const Setup& s, Source& src) {
                 return idx < held ? words[idx] : mix64(idx * kGoldenGamma + 1);
             });
         } else {
-            run_with(cfd, s, trace, [words, held, fd](uint64_t idx) {
-                return idx < held ? words[idx] : disk_word(fd, idx);
+            uint64_t preads = 0;
+            run_with(cfd, s, trace, [words, held, fd, &preads](uint64_t idx) {
+                return idx < held ? words[idx] : disk_word(fd, idx, &preads);
             });
-            report_io(name, g_preads, io0, io_read_bytes(), mf0, major_faults());
+            report_io(name, preads, io0, io_read_bytes(), mf0, major_faults());
         }
     }
     unpin(ram);
@@ -203,7 +201,7 @@ static void serve_mmapdisk(int cfd, const Setup& s, Source& src) {
         const size_t io0 = io_read_bytes(), mf0 = major_faults();
         demo::ResidencyTrace trace(g_trace_every, "mmapdisk", "mmap", map, s.bytes, s.bytes);
         run_with(cfd, s, trace, BufferLoad{map});
-        report_io("mmapdisk", g_probes, io0, io_read_bytes(), mf0, major_faults());
+        report_io("mmapdisk", trace.probes(), io0, io_read_bytes(), mf0, major_faults());
     }
     if (map) munmap((void*)map, s.bytes);
     close(fd); unlink(g_datafile);
@@ -232,7 +230,7 @@ static void serve_prefetch(int cfd, const Setup& s, Source& src) {
             for (char* pg : pages) madvise(pg, g_page, MADV_WILLNEED);
             return answer(BufferLoad{map}, s.num_words, ch, scratch);
         });
-        report_io("prefetch", g_probes, io0, io_read_bytes(), mf0, major_faults());
+        report_io("prefetch", trace.probes(), io0, io_read_bytes(), mf0, major_faults());
     }
     if (map) munmap((void*)map, s.bytes);
     close(fd); unlink(g_datafile);

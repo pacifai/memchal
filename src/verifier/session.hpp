@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <vector>
 #include "demo/verifier_stream.hpp"
+#include "shared/chacha20.hpp"
 #include "shared/protocol.hpp"
 #include "shared/random.hpp"
 #include "shared/socket.hpp"
@@ -68,7 +69,7 @@ public:
     // Runs `count` challenges. Returns false if the connection drops.
     //   phase: "w" for warmup or "r" for measured, as the demo stream labels them.
     //   latencies_ns: when set, receives each round trip.
-    bool run(uint32_t count, const char* phase, std::vector<double>* latencies_ns, uint64_t* errors) {
+    bool run(uint32_t count, const char* phase, std::vector<double>* latencies_ns) {
         std::vector<uint64_t> scratch;
         for (uint32_t i = 0; i < count; ++i) {
             Challenge ch{};
@@ -94,7 +95,7 @@ public:
 
             const bool ok = !check || r.hash == expect;
             if (check) ++checked_;
-            if (!ok) ++*errors;
+            if (!ok) ++errors_;
             if (latencies_ns) latencies_ns->push_back(ns);
             if (stream_) stream_->challenge(seq, phase, ns / 1000.0, ch.nonce, r.hash, expect, ok,
                                             check, map);
@@ -104,6 +105,7 @@ public:
     }
 
     uint64_t checked() const { return checked_; }
+    uint64_t errors() const { return errors_; }
 
     void terminate() {
         Challenge stop{};
@@ -127,6 +129,7 @@ private:
     uint64_t              next_nonce_ = 0;
     uint64_t              seq_        = 0;
     uint64_t              checked_    = 0;
+    uint64_t              errors_     = 0;
     std::mt19937_64       gap_rng_{std::random_device{}()};
 };
 

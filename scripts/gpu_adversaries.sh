@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs the honest GPU prover and each GPU cheat in interleaved cycles against one verifier setting and prints p50 ratios.
+# Runs the honest GPU prover and each GPU cheat in interleaved cycles against one verifier setting and prints p50 ratios with their propagated error.
 # Usage: bash scripts/gpu_adversaries.sh [--mb 4096] [--samples 262144] [--lanes 16384] [--challenges 50] [--warmup 10]
 #          [--leave-free 2048] [--offload 1.0] [--cycles 2] [--port 9099] [--fold tree|sequential]
 #   --leave-free  MiB of HBM the uvm cheat leaves free
@@ -31,7 +31,7 @@ STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 OUT="results/adversaries/$STAMP"
 mkdir -p "$OUT"
 
-kill_provers() { pkill -f build/gpu/prover >/dev/null 2>&1; pkill -f build/gpu/cheating_prover >/dev/null 2>&1; sleep 1; }
+kill_provers() { pkill -f build/gpu/prover >/dev/null 2>&1; pkill -f build/attacks/gpu/cheating_prover >/dev/null 2>&1; sleep 1; }
 trap kill_provers EXIT
 
 # Waits up to 60 s for a prover to listen on $PORT.
@@ -60,7 +60,7 @@ run_one() {
       uvm)     extra=(--leave-free "$LEAVE_FREE") ;;
       partial) extra=(--offload "$OFFLOAD") ;;
     esac
-    nohup build/gpu/cheating_prover --port "$PORT" --mode "$mode" "${extra[@]}" \
+    nohup build/attacks/gpu/cheating_prover --port "$PORT" --mode "$mode" "${extra[@]}" \
       --trace 10 --lane-cap "$LANES" \
       > "$OUT/prover-$tag.log" 2>&1 &
   fi

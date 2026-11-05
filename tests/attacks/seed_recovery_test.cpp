@@ -1,5 +1,6 @@
 #include <cstdio>
-#include "cpu/seed_recovery.hpp"
+#include "attacks/cpu/seed_recovery.hpp"
+#include "shared/fill.hpp"
 
 using namespace mc;
 

@@ -109,7 +109,8 @@ fi
 { echo "POD_ID=$POD_ID"; echo "LPORT=$LPORT"; echo "SSH_KEY=$SSH_KEY";
   echo "CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)"; } > "$STATE"
 echo "pod $POD_ID  (recorded in .gpu_demo_state)"
-trap 'echo; echo "Bring-up failed. The pod is still rented — run runpod/gpu_demo_down.sh"; ' ERR
+UP=0
+trap '[ "$UP" -eq 1 ] || echo "Pod $POD_ID is still rented and billing. Release it: bash runpod/gpu_demo_down.sh" >&2' EXIT
 
 say "waiting for ssh"
 HOST=""; PORT=""
@@ -163,7 +164,7 @@ sleep 3
 CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$LPORT/")
 [ "$CODE" = "200" ] || die "the page did not answer on http://127.0.0.1:$LPORT (got $CODE)" 3
 
-trap - ERR
+UP=1
 say "up"
 $SSH 'nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv,noheader' 2>/dev/null
 cat <<EOF

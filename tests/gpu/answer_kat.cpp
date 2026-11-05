@@ -3,11 +3,14 @@
 #include <cstring>
 #include <vector>
 #include "gpu/answer.hpp"
+#include "gpu/upload.hpp"
 #include "shared/challenge.hpp"
+#include "shared/fill.hpp"
 
 static const uint64_t kBytes    = 1ULL * 1024 * 1024;
 static const uint64_t kNumWords = kBytes / 8;
 static const uint64_t kSeed     = 0xABCDEF0123456789ULL;
+static const uint32_t kLaneCap  = 16384;
 
 struct Vec { uint64_t nonce; uint32_t samples; uint32_t lanes; };
 static const Vec kVecs[3] = {
@@ -129,7 +132,7 @@ int main(int argc, char** argv) {
 
     {
         mc::gpu::Prover p;
-        if (!mc::gpu::create(p, kNumWords, 64, err, sizeof err)) {
+        if (!mc::gpu::create(p, kNumWords, kLaneCap, err, sizeof err)) {
             fprintf(stderr, "GPU KAT: create failed: %s\n", err);
             return 1;
         }
@@ -138,16 +141,11 @@ int main(int argc, char** argv) {
         printf("GPU KAT: backing = %s\n", backing);
         if (!is_dev) { fprintf(stderr, "GPU KAT: buffer is not device-resident\n"); ++failed; }
 
-        const unsigned char* src = (const unsigned char*)host.data();
-        size_t left = kBytes;
-        while (left) {
-            size_t chunk = left < p.stage.cap ? left : p.stage.cap;
-            memcpy(p.stage.h, src, chunk);
-            if (!mc::gpu::push(p, chunk, err, sizeof err)) {
-                fprintf(stderr, "GPU KAT: push failed: %s\n", err);
-                return 1;
-            }
-            src += chunk; left -= chunk;
+        mc::Source src;
+        src.built = host.data();
+        if (!mc::upload(p, src, kBytes, err, sizeof err)) {
+            fprintf(stderr, "GPU KAT: upload failed: %s\n", err);
+            return 1;
         }
         printf("\n=== GPU KAT: pinned vectors, uploaded buffer ===\n");
         failed += run_vectors(p, "uploaded");
@@ -159,7 +157,7 @@ int main(int argc, char** argv) {
 
     {
         mc::gpu::Prover p;
-        if (!mc::gpu::create(p, kNumWords, 64, err, sizeof err)) {
+        if (!mc::gpu::create(p, kNumWords, kLaneCap, err, sizeof err)) {
             fprintf(stderr, "GPU KAT: create failed: %s\n", err);
             return 1;
         }

@@ -27,6 +27,15 @@ static void serve(int cfd) {
     Pinned buf;
     if (!pin(buf, s.bytes)) return;
     mlockall(MCL_CURRENT | MCL_FUTURE);
+    if (!buf.locked) {
+        if (!g_allow_unlocked) {
+            fprintf(stderr, "[prover] refusing: memory not locked (need CAP_IPC_LOCK / `ulimit -l`, "
+                            "or pass --allow-unlocked)\n");
+            unpin(buf);
+            return;
+        }
+        fprintf(stderr, "[prover] WARNING: running unlocked; reporting locked=false\n");
+    }
 
     if (s.build) {
         const auto t0 = std::chrono::steady_clock::now();
@@ -40,15 +49,6 @@ static void serve(int cfd) {
         fprintf(stderr, "[prover] short data\n"); unpin(buf); return;
     }
     printf("[prover] buffer resident; memory %s\n", buf.locked ? "locked" : "NOT locked");
-
-    if (!buf.locked) {
-        if (!g_allow_unlocked) {
-            fprintf(stderr, "[prover] FATAL: memory not locked (need CAP_IPC_LOCK / `ulimit -l`, "
-                            "or pass --allow-unlocked)\n");
-            exit(1);
-        }
-        fprintf(stderr, "[prover] WARNING: running unlocked; reporting locked=false\n");
-    }
     if (!send_ready(cfd, buf.locked)) { unpin(buf); return; }
 
     demo::ResidencyTrace trace(g_trace_every, "honest", "ram", buf.words, s.bytes, s.bytes);

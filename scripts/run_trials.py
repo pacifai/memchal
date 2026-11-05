@@ -82,7 +82,7 @@ def build_server_cmd(mode: str, port: int, args) -> list[str]:
     if cfg["server"] == "prover":
         return ["build/cpu/prover", "--port", str(port)]
     else:
-        cmd = ["build/cpu/cheating_prover", "--port", str(port), "--mode", cfg["cheat_mode"]]
+        cmd = ["build/attacks/cpu/cheating_prover", "--port", str(port), "--mode", cfg["cheat_mode"]]
         if cfg["cheat_mode"] in ("partial", "fake"):
             cmd += ["--frac", "0.5"]
         return cmd
@@ -320,8 +320,7 @@ def main():
     print()
     print("--- memory-time (honest−floor, paired by cycle) ---")
     if memory_time_diff is not None:
-        tag = "" if memory_time_diff.separable else "  [NOT SEPARABLE]"
-        print(f"  honest−floor: {memory_time_diff}{tag}")
+        print(f"  honest−floor: {memory_time_diff}")
     else:
         print("  (need both 'honest' and 'floor' modes)")
 
