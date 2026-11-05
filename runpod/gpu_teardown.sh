@@ -20,14 +20,14 @@ say "processes"
 if [ "$KEEP" -eq 1 ]; then
   echo "--keep-running: leaving the bridge and any provers alone"
 else
-  for pat in bridge_gpu.py build/gpu/prover build/gpu/cheating_prover; do
+  for pat in bridge_gpu.py build/gpu/prover build/attacks/gpu/cheating_prover; do
     if pgrep -f "$pat" >/dev/null 2>&1; then
       pkill -f "$pat" >/dev/null 2>&1
       echo "stopped: $pat"
     fi
   done
   sleep 2
-  for pat in bridge_gpu.py build/gpu/prover build/gpu/cheating_prover; do
+  for pat in bridge_gpu.py build/gpu/prover build/attacks/gpu/cheating_prover; do
     if pgrep -f "$pat" >/dev/null 2>&1; then
       pkill -9 -f "$pat" >/dev/null 2>&1
       echo "killed:  $pat"
@@ -36,7 +36,7 @@ else
   sleep 1
 fi
 
-LEFT=$(pgrep -af 'bridge_gpu.py|build/gpu/prover|build/gpu/cheating_prover' 2>/dev/null | grep -v pgrep)
+LEFT=$(pgrep -af 'bridge_gpu.py|build/gpu/prover|build/attacks/gpu/cheating_prover' 2>/dev/null | grep -v pgrep)
 if [ -n "$LEFT" ]; then
   echo "STILL RUNNING (a process stuck in the GPU driver cannot be killed):"; echo "$LEFT"
   STATUS=1

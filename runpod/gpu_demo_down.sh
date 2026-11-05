@@ -26,7 +26,14 @@ done
 say() { printf '\n== %s ==\n' "$1"; }
 API="https://api.runpod.io/v2"
 # Runs a command and kills it with SIGALRM after N seconds: deadline N CMD...
-deadline() { local s="$1"; shift; perl -e 'alarm shift; exec @ARGV' "$s" "$@"; }
+deadline() {
+  local s="$1"; shift
+  "$@" & local pid=$!
+  ( sleep "$s"; kill -ALRM "$pid" ) 2>/dev/null & local timer=$!
+  { wait "$pid"; } 2>/dev/null; local rc=$?
+  { kill "$timer"; wait "$timer"; } 2>/dev/null
+  return "$rc"
+}
 
 if [ ! -f "$STATE" ]; then
   echo "No demo recorded in .gpu_demo_state — nothing of mine is up."
@@ -64,12 +71,13 @@ REACHED=0
 if [ -n "$SSH" ] && deadline 30 $SSH true 2>/dev/null; then
   REACHED=1
   say "teardown on the pod"
-  ( deadline 180 $SSH 'cd /root/memchal && bash runpod/gpu_teardown.sh' 2>&1 ) 2>/dev/null | sed 's/^/  /'
-  TD_RC=${PIPESTATUS[0]}
+  TD_OUT=$(deadline 180 $SSH 'cd /root/memchal && bash runpod/gpu_teardown.sh' 2>&1 | tr -d '\r')
+  TD_RC=$?
+  printf '%s\n' "$TD_OUT" | sed 's/^/  /'
   [ "$TD_RC" -eq 142 ] && echo "  teardown did not finish in 180 s — the card is probably wedged"
 
   say "pulling results back"
-  ARCHIVE=$(deadline 30 $SSH 'ls -t /root/memchal-results-*.tar.gz 2>/dev/null | head -1' 2>/dev/null | tr -d '\r')
+  ARCHIVE=$(printf '%s\n' "$TD_OUT" | sed -n 's/^packed: \([^ ]*\).*/\1/p' | tail -1)
   if [ -n "$ARCHIVE" ]; then
     mkdir -p "$ROOT/results"
     if deadline 300 scp -q -i "$SSH_KEY" -o IdentitiesOnly=yes \
@@ -81,12 +89,12 @@ if [ -n "$SSH" ] && deadline 30 $SSH true 2>/dev/null; then
         && echo "  unpacked into results/"
     else
       echo "  COULD NOT COPY THE ARCHIVE — not releasing the pod."
-      echo "  Pull it by hand, then rerun:"
+      echo "  Pull it by hand and rerun, or rerun with --force to release it and lose what is on it:"
       echo "    scp -P $SSH_PORT root@$SSH_HOST:$ARCHIVE results/"
-      exit 2
+      [ "$FORCE" -eq 1 ] || exit 2
     fi
   else
-    echo "  no results archive on the pod — copying results/ directly"
+    echo "  teardown packed no archive (exit $TD_RC) — copying results/ directly"
     DEST="$ROOT/results/pod-$POD_ID"
     mkdir -p "$DEST"
     if deadline 300 rsync -az -e "ssh -i $SSH_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p $SSH_PORT" \

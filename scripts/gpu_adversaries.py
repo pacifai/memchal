@@ -7,8 +7,9 @@
 import glob
 import json
 import os
-import statistics
 import sys
+
+import mc_stats as ms
 
 
 def p50(path):
@@ -32,15 +33,15 @@ def summary(out):
         by[mode]["p50"].append(v)
         by[mode]["err"] += int(r.get("errors") or 0)
 
-    base = statistics.median(by["honest"]["p50"]) if "honest" in by else None
-    print(f"{'mode':<10} {'p50 us':>10} {'x honest':>10} {'errors':>8}")
+    base = ms.aggregate(by["honest"]["p50"]) if "honest" in by else None
+    print(f"{'mode':<10} {'p50 us (mean ± sd)':>22} {'x honest':>16} {'errors':>8}")
     for m in ("honest", "fake", "uvm", "partial"):
         if m not in by:
-            print(f"{m:<10} {'did not run':>10}")
+            print(f"{m:<10} {'did not run':>22}")
             continue
-        p = statistics.median(by[m]["p50"])
-        r = f"{p / base:.2f}x" if base else "-"
-        print(f"{m:<10} {p:>10.1f} {r:>10} {by[m]['err']:>8}")
+        agg = ms.aggregate(by[m]["p50"])
+        r = str(ms.ratio(agg, base)) if base else "-"
+        print(f"{m:<10} {f'{agg.mean:.1f} ± {agg.sd:.1f}':>22} {r:>16} {by[m]['err']:>8}")
     print()
     print("fake is meant to be FAST and WRONG: judge it by the error column, not p50.")
     print("uvm with HBM taken away, and partial, are meant to be SLOW and RIGHT.")

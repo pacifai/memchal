@@ -56,34 +56,41 @@ def aggregate(values) -> Agg:
 
 @dataclass
 class Diff:
-    """A difference with its propagated standard error; separable when it exceeds the sigma threshold."""
+    """A difference with its propagated standard error; separable when it exceeds the sigma threshold.
+
+    insufficient is set when the error is zero, which happens with a single sample or no spread.
+    """
     value: float
     error: float
     sigmas_observed: float
     separable: bool
+    insufficient: bool = False
 
     def __str__(self) -> str:
+        if self.insufficient:
+            return f"{self.value:+.1f}  NOT SEPARABLE: no spread to measure at this n"
         tag = "" if self.separable else "  NOT SEPARABLE at this n"
         return f"{self.value:+.1f} ± {self.error:.1f}  ({self.sigmas_observed:.1f}σ){tag}"
 
 
+def _diff(value: float, error: float, sigmas: float) -> Diff:
+    if error <= 0:
+        return Diff(value, 0.0, 0.0, False, True)
+    obs = abs(value) / error
+    return Diff(value, error, obs, obs >= sigmas)
+
+
 def diff(a: Agg, b: Agg, sigmas: float = 2.0) -> Diff:
     """a - b with error propagated from the standard errors of the means."""
-    value = a.mean - b.mean
-    error = math.hypot(a.sem, b.sem)
-    obs = abs(value) / error if error > 0 else float("inf")
-    return Diff(value, error, obs, obs >= sigmas)
+    return _diff(a.mean - b.mean, math.hypot(a.sem, b.sem), sigmas)
 
 
 def paired_diff(a_list: list, b_list: list, sigmas: float = 2.0) -> Diff:
     """Aggregates a_list[i] - b_list[i]; both lists must be equal length and ordered by cycle."""
     if len(a_list) != len(b_list):
         raise ValueError(f"paired_diff: lists must be equal length ({len(a_list)} vs {len(b_list)})")
-    diffs = [float(a) - float(b) for a, b in zip(a_list, b_list)]
-    agg = aggregate(diffs)
-    error = agg.sem if agg.n > 1 else 0.0
-    obs = abs(agg.mean) / error if error > 0 else float("inf")
-    return Diff(agg.mean, error, obs, obs >= sigmas)
+    agg = aggregate([float(a) - float(b) for a, b in zip(a_list, b_list)])
+    return _diff(agg.mean, agg.sem, sigmas)
 
 
 @dataclass
@@ -119,8 +126,8 @@ def trend(values: list) -> dict:
     third = max(1, n // 3)
     first_agg = aggregate(vals[:third])
     last_agg = aggregate(vals[n - third:])
-    insufficient = first_agg.n < 2 or last_agg.n < 2
     d = diff(last_agg, first_agg)
+    insufficient = first_agg.n < 2 or last_agg.n < 2 or d.insufficient
     drifted = d.separable and not insufficient
     return {"first": first_agg.__dict__, "last": last_agg.__dict__,
             "diff": d.__dict__, "drifted": drifted,
