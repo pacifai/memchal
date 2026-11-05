@@ -6,7 +6,7 @@
 #include <unistd.h>
 #include <vector>
 #include "demo/bitmap.hpp"
-#include "shared/json.hpp"
+#include "demo/event.hpp"
 
 namespace mc {
 namespace demo {
@@ -50,37 +50,47 @@ public:
 
     void run(const char* label, double mib, uint32_t samples, uint32_t lanes, uint32_t challenges,
              uint32_t warmup, bool locked, const char* gen, double gen_s, double upload_s) {
-        fprintf(f_, "@{\"t\":\"run\",\"label\":");
-        json_str(f_, label);
-        fprintf(f_, ",\"mb\":%.6g,\"samples\":%u,\"lanes\":%u,\"challenges\":%u,\"warmup\":%u,"
-                    "\"pages\":%llu,\"page_bytes\":%ld,\"locked\":%s,\"gen\":\"%s\","
-                    "\"gen_s\":%.4f,\"upload_s\":%.4f,\"map_every\":%u}\n",
-                mib, samples, lanes, challenges, warmup, (unsigned long long)num_pages_,
-                page_bytes_, locked ? "true" : "false", gen, gen_s, upload_s, map_every_);
+        Event(f_, "run")
+            .str("label", label)
+            .num("mb", mib, "%.6g")
+            .uint("samples", samples)
+            .uint("lanes", lanes)
+            .uint("challenges", challenges)
+            .uint("warmup", warmup)
+            .uint("pages", num_pages_)
+            .integer("page_bytes", page_bytes_)
+            .boolean("locked", locked)
+            .str("gen", gen)
+            .num("gen_s", gen_s)
+            .num("upload_s", upload_s)
+            .uint("map_every", map_every_);
     }
 
     void challenge(uint64_t seq, const char* phase, double us, uint64_t nonce, uint64_t hash,
                    uint64_t expect, bool ok, bool checked, bool with_map) {
-        fprintf(f_, "@{\"t\":\"c\",\"i\":%llu,\"ph\":\"%s\",\"us\":%.3f,"
-                    "\"nonce\":\"0x%016llx\",\"hash\":\"0x%016llx\",\"exp\":\"0x%016llx\","
-                    "\"ok\":%s,\"checked\":%s",
-                (unsigned long long)seq, phase, us, (unsigned long long)nonce,
-                (unsigned long long)hash, (unsigned long long)expect,
-                ok ? "true" : "false", checked ? "true" : "false");
-        if (with_map) {
-            fputs(",\"map\":\"", f_);
-            base64_bitmap(f_, pages_.data(), pages_.size());
-            fputc('"', f_);
-        }
-        fputs("}\n", f_);
+        Event e(f_, "c");
+        e.uint("i", seq)
+            .str("ph", phase)
+            .num("us", us, "%.3f")
+            .hex("nonce", nonce)
+            .hex("hash", hash)
+            .hex("exp", expect)
+            .boolean("ok", ok)
+            .boolean("checked", checked);
+        if (with_map) e.str("map", base64_bitmap(pages_.data(), pages_.size()).c_str());
     }
 
     void end(size_t challenges, uint64_t errors, uint64_t checked, double p50_us, double p99_us,
              double min_us, double max_us, double mean_us) {
-        fprintf(f_, "@{\"t\":\"end\",\"challenges\":%zu,\"errors\":%llu,\"checked\":%llu,"
-                    "\"p50\":%.3f,\"p99\":%.3f,\"min\":%.3f,\"max\":%.3f,\"mean\":%.3f}\n",
-                challenges, (unsigned long long)errors, (unsigned long long)checked,
-                p50_us, p99_us, min_us, max_us, mean_us);
+        Event(f_, "end")
+            .uint("challenges", challenges)
+            .uint("errors", errors)
+            .uint("checked", checked)
+            .num("p50", p50_us, "%.3f")
+            .num("p99", p99_us, "%.3f")
+            .num("min", min_us, "%.3f")
+            .num("max", max_us, "%.3f")
+            .num("mean", mean_us, "%.3f");
     }
 
     void close() {

@@ -85,8 +85,8 @@ static inline bool recipe_ok(const Recipe& r, char* err, size_t n) {
 }
 
 static inline bool challenge_ok(const Challenge& c, char* err, size_t n) {
-    if (c.lanes > kMaxLanes) {
-        snprintf(err, n, "challenge lanes %u is above %u", c.lanes, kMaxLanes);
+    if (c.lanes < 1 || c.lanes > kMaxLanes) {
+        snprintf(err, n, "challenge lanes %u is outside 1 to %u", c.lanes, kMaxLanes);
         return false;
     }
     return true;
@@ -96,15 +96,15 @@ static inline bool is_chained(const Challenge& ch) { return (ch.flags & kChallen
 static inline bool is_tree(const Challenge& ch)    { return (ch.flags & kChallengeTreeFold) != 0; }
 
 // The answer to `ch`, reading words through `load`.
-//   scratch: lane hashes for the tree fold; grown as needed.
+//   scratch: space for the tree fold's lane hashes; grown as needed.
 template <typename Load>
 static inline uint64_t answer(Load&& load, uint64_t num_words, const Challenge& ch,
                               std::vector<uint64_t>& scratch) {
     if (!is_tree(ch))
         return answer_sequential(load, num_words, ch.nonce, ch.samples, ch.lanes, is_chained(ch));
-    const uint32_t lanes = ch.lanes ? ch.lanes : 1u;
-    if (scratch.size() < lanes) scratch.resize(lanes);
-    return answer_tree(load, num_words, ch.nonce, ch.samples, lanes, is_chained(ch), scratch.data());
+    if (scratch.size() < ch.lanes) scratch.resize(ch.lanes);
+    return answer_tree(load, num_words, ch.nonce, ch.samples, ch.lanes, is_chained(ch),
+                       scratch.data());
 }
 
 } // namespace mc

@@ -6,6 +6,7 @@
 #include <vector>
 #include "cpu/proc_stats.hpp"
 #include "demo/bitmap.hpp"
+#include "demo/event.hpp"
 #include "shared/protocol.hpp"
 
 namespace mc {
@@ -36,9 +37,11 @@ public:
         if (every_) emit(served);
     }
 
+    uint64_t probes() const { return probes_; }
+
 private:
     void emit(uint64_t served) {
-        const size_t pages = region_bytes_ / page_;
+        const size_t pages = (region_bytes_ + page_ - 1) / page_;
         size_t resident = 0;
         bool have_map = false;
         if (region_ && pages) {
@@ -49,18 +52,17 @@ private:
             }
         }
         const size_t rb = io_read_bytes(), mf = major_faults();
-        printf("@{\"t\":\"p\",\"served\":%llu,\"mode\":\"%s\",\"reader\":\"%s\","
-               "\"pages\":%zu,\"pages_total\":%zu,\"read_bytes\":%lld,\"majflt\":%lld,"
-               "\"probes\":%llu,\"res_pages\":%zu",
-               (unsigned long long)served, mode_, reader_, pages, buffer_bytes_ / page_,
-               rb == kUnavailable ? -1LL : (long long)rb, mf == kUnavailable ? -1LL : (long long)mf,
-               (unsigned long long)probes_, resident);
-        if (have_map) {
-            fputs(",\"res\":\"", stdout);
-            base64_bitmap(stdout, vec_.data(), pages);
-            putchar('"');
-        }
-        puts("}");
+        Event e(stdout, "p");
+        e.uint("served", served)
+            .str("mode", mode_)
+            .str("reader", reader_)
+            .uint("pages", pages)
+            .uint("pages_total", (buffer_bytes_ + page_ - 1) / page_)
+            .integer("read_bytes", rb == kUnavailable ? -1 : (int64_t)rb)
+            .integer("majflt", mf == kUnavailable ? -1 : (int64_t)mf)
+            .uint("probes", probes_)
+            .uint("res_pages", resident);
+        if (have_map) e.str("res", base64_bitmap(vec_.data(), pages).c_str());
     }
 
     uint32_t                   every_;

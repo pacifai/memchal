@@ -1,4 +1,15 @@
 #pragma once
+// Argon2d, the memory-hard hash from RFC 9106 (https://www.rfc-editor.org/rfc/rfc9106),
+// with the BLAKE2b hash it is built on (RFC 7693). In build mode the verifier
+// sends Argon2d parameters instead of the buffer, and the prover runs Argon2d to
+// fill the buffer itself. Each block depends on earlier blocks, so a prover that
+// drops part of the buffer has to recompute long chains of blocks to get it back.
+//
+// The code lives in the repo so the verifier and the provers build with no
+// dependencies. It follows the RFC directly and keeps the whole block matrix,
+// since that matrix is the buffer. tests/shared/argon2d_kat.cpp checks it
+// against the RFC's test vectors, and tests/shared/argon2d_differential.cpp
+// compares its tags with the reference library, libargon2.
 #include <cstdint>
 #include <cstddef>
 #include <cstring>

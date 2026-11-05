@@ -1,4 +1,12 @@
 #pragma once
+// The ChaCha20 stream cipher from RFC 8439 (https://www.rfc-editor.org/rfc/rfc8439).
+// The verifier fills the default buffer with ChaCha20 keystream under a fresh
+// random key, so the prover can't predict or compress the contents, and draws
+// its challenge nonces from it.
+//
+// The code lives in the repo so the verifier and the provers build with no
+// dependencies; only the keystream is needed, not encryption.
+// tests/shared/challenge_kat.cpp checks a block against RFC 8439's test vector.
 #include <cstdint>
 #include <cstddef>
 #include <cstring>

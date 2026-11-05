@@ -57,7 +57,7 @@ private:
 };
 
 static inline void print_profile(const Profile& pr, uint32_t samples) {
-    printf("\n=== latency profile (%zu challenges, %llu errors in %llu checked) ===\n",
+    printf("\n=== latency profile (%zu challenges; %llu errors in %llu checked, warmup included) ===\n",
            pr.count(), (unsigned long long)pr.errors, (unsigned long long)pr.checked);
     for (const Percentile& q : kPercentiles)
         printf("  %-6s %10.2f us   [tail n=%zu]%s\n", q.name, pr.at(q.p), pr.tail(q.p),
@@ -80,36 +80,55 @@ static inline bool write_json(const char* path, const Args& a, const Profile& pr
                               size_t bytes, double upload_s) {
     FILE* f = fopen(path, "w");
     if (!f) return false;
-    fprintf(f, "{\n  \"schema\": \"memchal.verifier.v2\",\n  \"label\": ");
-    json_str(f, a.label);
-    fprintf(f, ",\n  \"env\": {\"page_size\": %ld, \"online_cpus\": %ld, \"clock\": \"steady_clock\"},\n",
-            sysconf(_SC_PAGESIZE), sysconf(_SC_NPROCESSORS_ONLN));
-    fprintf(f, "  \"params\": {\"mb\": %.6g, \"samples\": %u, \"lanes\": %u, \"challenges\": %u, "
-               "\"warmup\": %u, \"seed\": \"0x%llx\", \"host\": \"%s\", \"port\": %u, "
-               "\"gen\": \"%s\", \"chain\": \"%s\", \"fold\": \"%s\", \"nonce\": \"%s\", "
-               "\"gap_us\": %u, \"gap_dist\": \"%s\"",
-            a.mib, a.samples, a.lanes, a.challenges, a.warmup, (unsigned long long)a.seed, a.host,
-            a.port, generator_name(a.gen), a.chained ? "dependent" : "independent",
-            a.tree ? "tree" : "sequential", a.random_nonces ? "random" : "sequential", a.gap_us,
-            a.gap_exponential ? "exp" : "fixed");
-    if (a.chained) fprintf(f, ", \"chain_depth\": %u", a.lanes ? a.samples / a.lanes : a.samples);
-    fprintf(f, "},\n  \"prover\": {\"locked\": %s},\n", locked ? "true" : "false");
-    fprintf(f, "  \"upload\": {\"bytes\": %zu, \"seconds\": %.6f, \"gib_per_s\": %.4f},\n",
-            bytes, upload_s, upload_s > 0 ? bytes / 1073741824.0 / upload_s : 0.0);
-    fprintf(f, "  \"result\": {\n    \"challenges\": %zu,\n    \"errors\": %llu,\n"
-               "    \"mean_us\": %.4f,\n    \"stddev_us\": %.4f,\n"
-               "    \"throughput_probes_per_us\": %.4f,\n    \"percentiles_us\": {",
-            pr.count(), (unsigned long long)pr.errors, pr.mean_us, pr.stddev_us,
-            pr.mean_us > 0 ? a.samples / pr.mean_us : 0.0);
-    bool first = true;
-    for (const Percentile& q : kPercentiles) {
-        fprintf(f, "%s\n      \"%s\": {\"value\": %.4f, \"tail_n\": %zu, \"reliable\": %s}",
-                first ? "" : ",", q.name, pr.at(q.p), pr.tail(q.p), pr.reliable(q.p) ? "true" : "false");
-        first = false;
-    }
-    fprintf(f, "\n    }\n  }\n}\n");
-    fclose(f);
-    return true;
+    JsonWriter j(f, true);
+    j.begin_object()
+        .str("schema", "memchal.verifier.v3")
+        .str("label", a.label);
+    j.begin_object("env")
+        .integer("page_size", sysconf(_SC_PAGESIZE))
+        .integer("online_cpus", sysconf(_SC_NPROCESSORS_ONLN))
+        .str("clock", "steady_clock")
+        .end_object();
+    j.begin_object("params")
+        .num("mb", a.mib, "%.6g")
+        .uint("samples", a.samples)
+        .uint("lanes", a.lanes)
+        .uint("challenges", a.challenges)
+        .uint("warmup", a.warmup)
+        .uint("verify_every", a.verify_every)
+        .hex("seed", a.seed)
+        .str("host", a.host)
+        .uint("port", a.port)
+        .str("gen", generator_name(a.gen))
+        .str("chain", a.chained ? "dependent" : "independent")
+        .str("fold", a.tree ? "tree" : "sequential")
+        .str("nonce", a.random_nonces ? "random" : "sequential")
+        .uint("gap_us", a.gap_us)
+        .str("gap_dist", a.gap_exponential ? "exp" : "fixed");
+    if (a.chained) j.uint("chain_depth", a.samples / a.lanes);
+    j.end_object();
+    j.begin_object("prover").boolean("locked", locked).end_object();
+    j.begin_object("upload")
+        .uint("bytes", bytes)
+        .num("seconds", upload_s, "%.6f")
+        .num("gib_per_s", upload_s > 0 ? bytes / 1073741824.0 / upload_s : 0.0)
+        .end_object();
+    j.begin_object("result")
+        .uint("challenges", pr.count())
+        .uint("checked", pr.checked)
+        .uint("errors", pr.errors)
+        .num("mean_us", pr.mean_us)
+        .num("stddev_us", pr.stddev_us)
+        .num("throughput_probes_per_us", pr.mean_us > 0 ? a.samples / pr.mean_us : 0.0);
+    j.begin_object("percentiles_us");
+    for (const Percentile& q : kPercentiles)
+        j.begin_object(q.name)
+            .num("value", pr.at(q.p))
+            .uint("tail_n", pr.tail(q.p))
+            .boolean("reliable", pr.reliable(q.p))
+            .end_object();
+    j.end_object().end_object().end_object();
+    return fclose(f) == 0;
 }
 
 } // namespace mc

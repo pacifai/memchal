@@ -7,6 +7,7 @@
 #include <random>
 #include <sys/mman.h>
 #include "shared/argon2d.hpp"
+#include "shared/json.hpp"
 #include "shared/random.hpp"
 
 using namespace mc;
@@ -128,18 +129,23 @@ int main(int argc, char** argv) {
     if (json) {
         FILE* f = fopen(json, "w");
         if (!f) { perror("[bench] open json"); return 1; }
-        fprintf(f, "{\n  \"generator\": \"argon2d\",\n");
-        fprintf(f, "  \"note\": \"absolute times are session-local; compare within one run only\",\n");
-        fprintf(f, "  \"rebuild_us_per_block_hot\": %.6f,\n", rebuild_us);
-        fprintf(f, "  \"rows\": [\n");
-        for (size_t i = 0; i < rows.size(); ++i) {
-            const Row& r = rows[i];
-            fprintf(f, "    {\"mb\": %.3f, \"passes\": %u, \"parallelism\": %u, \"blocks\": %u, "
-                       "\"build_s\": %.6f, \"mib_per_s\": %.3f, \"us_per_block\": %.6f}%s\n",
-                    r.mb, r.passes, r.parallelism, r.blocks, r.build_s, r.mib_per_s, r.us_per_block,
-                    i + 1 < rows.size() ? "," : "");
-        }
-        fprintf(f, "  ]\n}\n");
+        JsonWriter j(f, true);
+        j.begin_object()
+            .str("generator", "argon2d")
+            .str("note", "absolute times are session-local; compare within one run only")
+            .num("rebuild_us_per_block_hot", rebuild_us, "%.6f");
+        j.begin_array("rows");
+        for (const Row& r : rows)
+            j.begin_object()
+                .num("mb", r.mb, "%.3f")
+                .uint("passes", r.passes)
+                .uint("parallelism", r.parallelism)
+                .uint("blocks", r.blocks)
+                .num("build_s", r.build_s, "%.6f")
+                .num("mib_per_s", r.mib_per_s, "%.3f")
+                .num("us_per_block", r.us_per_block, "%.6f")
+                .end_object();
+        j.end_array().end_object();
         fclose(f);
         printf("\n[bench] wrote %s\n", json);
     }

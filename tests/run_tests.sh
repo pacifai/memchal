@@ -35,11 +35,10 @@ make all tests
 run_unit "challenge known-answer test"    build/tests/shared/challenge_kat
 run_unit "Argon2d known-answer test"      build/tests/shared/argon2d_kat
 run_unit "Argon2d differential test"      build/tests/shared/argon2d_differential
-run_unit "Argon2d rebuild test"           build/tests/shared/argon2d_rebuild_test
-run_unit "splitmix64 seed recovery test"  build/tests/cpu/seed_recovery_test
+run_unit "Argon2d rebuild test"           build/tests/attacks/argon2d_rebuild_test
+run_unit "splitmix64 seed recovery test"  build/tests/attacks/seed_recovery_test
 
 VERIFIER_ARGS="--mb 8 --samples 2048 --lanes 16 --challenges 100 --warmup 20 --csv /dev/null --chain independent"
-JSON=/tmp/inv.json
 
 # Runs a prover and a verifier against it.
 #   expect: "correct" (no errors) or "all_wrong" (every answer wrong).
@@ -54,8 +53,10 @@ run_invariant() {
     local srv_pid=$!
     wait_for_port "$port"
 
+    local json="/tmp/inv_${name}.json"
+    rm -f "$json"
     local verifier_ok=1
-    build/verifier --port "$port" $VERIFIER_ARGS ${VERIFIER_EXTRA:-} --json "$JSON" \
+    build/verifier --port "$port" $VERIFIER_ARGS ${VERIFIER_EXTRA:-} --json "$json" \
         >"/tmp/inv_verifier_${name}.log" 2>&1 || verifier_ok=0
     kill -9 "$srv_pid" 2>/dev/null || true
     wait "$srv_pid" 2>/dev/null || true
@@ -67,25 +68,25 @@ run_invariant() {
         return
     fi
 
-    local errors challenges
+    local errors checked
     local result
-    result=$(python3 tests/verifier_result.py "$JSON") || { fail "INVARIANT $name (json parse error)"; return; }
-    read -r errors challenges <<< "$result"
+    result=$(python3 tests/verifier_result.py "$json") || { fail "INVARIANT $name (json parse error)"; return; }
+    read -r errors checked <<< "$result"
 
     local ok=0
     case "$expect" in
-        correct)   [ "$challenges" -gt 0 ] && [ "$errors" -eq 0 ] && ok=1 ;;
-        all_wrong) [ "$challenges" -gt 0 ] && [ "$errors" -eq "$challenges" ] && ok=1 ;;
+        correct)   [ "$checked" -gt 0 ] && [ "$errors" -eq 0 ] && ok=1 ;;
+        all_wrong) [ "$checked" -gt 0 ] && [ "$errors" -eq "$checked" ] && ok=1 ;;
     esac
     if [ "$ok" = "1" ]; then
-        pass "INVARIANT $name (errors=$errors/challenges=$challenges)"
+        pass "INVARIANT $name (errors=$errors/checked=$checked)"
     else
-        fail "INVARIANT $name (errors=$errors/challenges=$challenges, expected $expect)"
+        fail "INVARIANT $name (errors=$errors/checked=$checked, expected $expect)"
     fi
 }
 
 PROVER=build/cpu/prover
-CHEAT=build/cpu/cheating_prover
+CHEAT=build/attacks/cpu/cheating_prover
 
 echo ""
 echo "=== INVARIANT TESTS ==="

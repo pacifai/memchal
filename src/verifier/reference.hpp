@@ -1,11 +1,8 @@
 #pragma once
-#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
-#include <thread>
-#include <vector>
-#include "shared/challenge.hpp"
+#include "shared/fill.hpp"
 #include "shared/protocol.hpp"
 #include "shared/random.hpp"
 #include "verifier/args.hpp"
@@ -20,24 +17,6 @@ struct Reference {
     Recipe    recipe;
     double    gen_s     = 0.0;
 };
-
-// fill_chacha() split across the machine's cores.
-static inline void fill_chacha_parallel(uint64_t* buf, uint64_t num_words, const uint8_t key[32]) {
-    const size_t nbytes = (size_t)num_words * 8;
-    const size_t blocks = (nbytes + 63) / 64;
-    unsigned threads = std::min(std::max(std::thread::hardware_concurrency(), 1u), 64u);
-    if (blocks < (size_t)threads * 1024) threads = 1;
-    const size_t per = (blocks + threads - 1) / threads;
-    std::vector<std::thread> pool;
-    for (unsigned i = 0; i < threads; ++i) {
-        const size_t b0 = (size_t)i * per;
-        if (b0 >= blocks) break;
-        const size_t off = b0 * 64;
-        const size_t len = std::min(nbytes - off, per * 64);
-        pool.emplace_back([=] { chacha20_fill((uint8_t*)buf + off, len, key, b0); });
-    }
-    for (auto& t : pool) t.join();
-}
 
 // Sizes and fills the reference buffer as `a` asks. Returns false with a
 // message in err on bad parameters or allocation failure.
@@ -72,7 +51,7 @@ static inline bool make_reference(const Args& a, Reference& ref, char* err, size
         case Generator::ChaCha: {
             uint8_t key[32];
             random_bytes(key, sizeof key);
-            fill_chacha_parallel(ref.words, ref.num_words, key);
+            fill_chacha(ref.words, ref.num_words, key);
             break;
         }
         case Generator::Splitmix64:

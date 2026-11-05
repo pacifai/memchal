@@ -34,7 +34,8 @@ static inline double ms_since(std::chrono::steady_clock::time_point t0) {
 
 bool lanes_create(Lanes& l, uint32_t cap, char* err, size_t errlen);
 void lanes_destroy(Lanes& l);
-bool lanes_grow(Lanes& l, uint32_t lanes, char* err, size_t errlen);
+// False, with a message in err, when a challenge has more lanes than l was created for.
+bool lanes_fit(const Lanes& l, uint32_t lanes, char* err, size_t errlen);
 bool staging_create(Staging& s, char* err, size_t errlen);
 void staging_destroy(Staging& s);
 
@@ -65,8 +66,7 @@ template <typename Load>
 bool answer_with(Lanes& l, Load load, uint64_t num_words, uint64_t nonce, uint32_t samples,
                  uint32_t lanes, bool chained, bool tree, uint64_t* out_hash, Timing* t,
                  char* err, size_t errlen) {
-    if (lanes == 0) lanes = 1;
-    if (!lanes_grow(l, lanes, err, errlen)) return false;
+    if (!lanes_fit(l, lanes, err, errlen)) return false;
     cudaEvent_t start = (cudaEvent_t)l.ev_start, stop = (cudaEvent_t)l.ev_stop;
     cudaError_t e = cudaEventRecord(start);
     if (e != cudaSuccess) { fail(err, errlen, "cudaEventRecord(start)", e); return false; }

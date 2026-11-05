@@ -36,7 +36,6 @@ void free_hashes(Lanes& l) {
 }
 
 bool alloc_hashes(Lanes& l, uint32_t n, char* err, size_t errlen) {
-    free_hashes(l);
     cudaError_t e;
     if ((e = cudaMalloc((void**)&l.d_hash, (size_t)n * 8)) != cudaSuccess) {
         fail(err, errlen, "cudaMalloc(lane hashes)", e); return false;
@@ -91,7 +90,7 @@ double probe_gbps(uint32_t samples, double kernel_ms) {
 }
 
 bool lanes_create(Lanes& l, uint32_t cap, char* err, size_t errlen) {
-    if (!alloc_hashes(l, cap ? cap : 1, err, errlen)) return false;
+    if (!alloc_hashes(l, cap, err, errlen)) return false;
     cudaEvent_t ev = nullptr;
     cudaError_t e = cudaEventCreate(&ev);
     if (e != cudaSuccess) { fail(err, errlen, "cudaEventCreate", e); return false; }
@@ -108,8 +107,10 @@ void lanes_destroy(Lanes& l) {
     l = Lanes{};
 }
 
-bool lanes_grow(Lanes& l, uint32_t lanes, char* err, size_t errlen) {
-    return lanes <= l.cap || alloc_hashes(l, lanes, err, errlen);
+bool lanes_fit(const Lanes& l, uint32_t lanes, char* err, size_t errlen) {
+    if (lanes <= l.cap) return true;
+    if (err && errlen) snprintf(err, errlen, "challenge has %u lanes, above the lane cap of %u", lanes, l.cap);
+    return false;
 }
 
 bool staging_create(Staging& s, char* err, size_t errlen) {

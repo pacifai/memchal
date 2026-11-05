@@ -11,7 +11,8 @@ static const char kUsage[] =
     "usage: gpu/prover [--flag value]...\n"
     "  --port N           listen port (default %u)\n"
     "  --device N         CUDA device (default 0)\n"
-    "  --lane-cap N       most lanes a challenge may use (default 131072)\n"
+    "  --lane-cap N       most lanes a challenge may use; wider ones end the session\n"
+    "                     (default 131072)\n"
     "  --trace N          print a timing event every N challenges\n"
     "  --allow-unlocked   run even if the buffer is not in device memory\n";
 
@@ -41,6 +42,17 @@ static void serve(int cfd) {
         fprintf(stderr, "[gpu] FATAL: %s\n", err);
         return;
     }
+    bool is_device = false;
+    const char* backing = gpu::residency(p, &is_device);
+    if (!is_device) {
+        if (!g_allow_unlocked) {
+            fprintf(stderr, "[gpu] refusing: buffer is not device-resident (%s); "
+                            "pass --allow-unlocked to run anyway\n", backing);
+            gpu::destroy(p);
+            return;
+        }
+        fprintf(stderr, "[gpu] WARNING: running on non-device memory; reporting locked=false\n");
+    }
     Source src{cfd};
     bool ok = !s.build || build_on_host(src, s, err, sizeof err);
     if (ok && s.build) printf("[gpu] built on the host in %.3f s; copying to the card\n", src.build_s);
@@ -52,21 +64,10 @@ static void serve(int cfd) {
         return;
     }
 
-    bool is_device = false;
-    const char* backing = gpu::residency(p, &is_device);
     printf("[gpu] buffer %s; backing = %s\n", s.build ? "built and copied" : "uploaded", backing);
     report_hbm("after upload");
     demo::print_buffer_info("proverinfo", "honest", backing, is_device, 1.0, s.build, src.build_s);
 
-    if (!is_device) {
-        if (!g_allow_unlocked) {
-            fprintf(stderr, "[gpu] FATAL: buffer is not device-resident (%s); "
-                            "pass --allow-unlocked to run anyway\n", backing);
-            gpu::destroy(p);
-            exit(1);
-        }
-        fprintf(stderr, "[gpu] WARNING: running on non-device memory; reporting locked=false\n");
-    }
     if (!send_ready(cfd, is_device)) { gpu::destroy(p); return; }
 
     gpu::Timing t;

@@ -2,7 +2,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include "shared/chacha20.hpp"
 #include "shared/challenge.hpp"
+#include "shared/fill.hpp"
 
 using namespace mc;
 
