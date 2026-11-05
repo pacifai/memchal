@@ -652,6 +652,9 @@ function tick() {
   state.dirty = {};
   requestAnimationFrame(tick);
 }
+const post = (path, body) => fetch(path, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+
 function connect() {
   const src = new EventSource('/events');
   src.onmessage = (m) => { try { state.pending.push(JSON.parse(m.data)); } catch (_) {} };
@@ -670,11 +673,11 @@ el.runBtn.addEventListener('click', async () => {
     frac: (+el.frac.value) / 100, offload: (+el.offload.value) / 100,
   };
   try {
-    const r = await fetch('/run', { method: 'POST', body: JSON.stringify(body) });
+    const r = await post('/run', body);
     if (!r.ok) log((await r.json()).error || 'refused', 'bridge');
   } catch (err) { log(String(err), 'bridge'); }
 });
-el.stopBtn.addEventListener('click', () => fetch('/stop', { method: 'POST' }).catch(() => {}));
+el.stopBtn.addEventListener('click', () => post('/stop', {}).catch(() => {}));
 el.themeBtn.addEventListener('click', () => {
   const d = document.documentElement.dataset;
   d.theme = d.theme === 'dark' ? 'light' : 'dark';

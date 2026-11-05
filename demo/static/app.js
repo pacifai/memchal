@@ -179,6 +179,9 @@ function finishRun(endEv) {
 
 const memMiB = (mem) => (mem.endsWith('g') ? parseInt(mem, 10) * 1024 : parseInt(mem, 10));
 
+const post = (path, body) => fetch(path, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+
 function connect() {
   const es = new EventSource('/events');
   es.onmessage = (msg) => {
@@ -819,11 +822,14 @@ el.runBtn.addEventListener('click', async () => {
   el.runBtn.disabled = true;
   setStatus('busy', 'starting');
   try {
-    await fetch('/run', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify(cfg) });
+    const r = await post('/run', cfg);
+    if (!r.ok) {
+      const why = (await r.json()).error || 'refused';
+      setStatus('err', why); appendLog(`[bridge] ${why}`); el.runBtn.disabled = false;
+    }
   } catch { setStatus('err', 'could not reach the bridge'); el.runBtn.disabled = false; }
 });
-el.stopBtn.addEventListener('click', () => fetch('/stop', { method: 'POST' }).catch(() => {}));
+el.stopBtn.addEventListener('click', () => post('/stop', {}).catch(() => {}));
 el.clearBtn.addEventListener('click', () => {
   state.collapse = []; state.prev = null; state.baseline = null;
   state.dirty.collapse = state.dirty.lat = true;
