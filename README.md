@@ -22,7 +22,9 @@ serving are doing, including the memory they leave spare, which a hidden
 training job could use.
 
 If a verifier fills that spare memory with its own data and keeps checking that
-the data stays there, nothing else fits. memchal is that check.
+the data stays there, nothing else fits. memchal is that check. The buffer can
+also start with the model's weights, so the memory they take up is accounted
+for, too.
 
 memchal is a research prototype. It measures how far apart an honest prover and
 a cheating one are. A rule that turns those measurements into a pass or fail
@@ -58,14 +60,20 @@ NVIDIA H100, builds memchal there, runs the honest prover and four attacks,
 saves the session to `results/sessions/`, and terminates the pod, which ends
 the billing. It terminates the pod when a step fails, too.
 
+To start the buffer with a model's weights, add `--model`, for example
+`--model Qwen/Qwen2.5-7B-Instruct`. The pod downloads the model, and the session
+records the weights attacks instead.
+
 To replay the session, open the
 [demo site](https://pacifai.github.io/compute-verification-demo/), select
 **Custom run**, and add the session file.
 
 ## How it works
 
-1. The verifier and the prover agree on a buffer. The verifier either uploads
-   it or sends a short recipe that both sides build it from.
+1. The verifier and the prover agree on a buffer. It can start with model
+   weights that both sides already hold, listed in a manifest. The verifier
+   either uploads the rest, called filler, or sends a short recipe that both
+   sides build it from.
 2. The verifier sends a challenge: a random number, called a nonce.
 3. From the nonce, the prover derives the places to read, reads them, and
    combines what it read into one value.
@@ -89,6 +97,7 @@ test shows how the verifier catches it.
 | `mmapdisk` (CPU) | Memory-maps the data from disk | Timing, once RAM is too small to cache the data |
 | `partial` (GPU) | Keeps part of the data in the server's main memory | Timing |
 | `uvm` (GPU) | Lets the driver move data on and off the chip | Timing, once the chip is too full to hold the data |
+| `compress` (GPU) | Keeps the model weights compressed and decompresses each word it reads | Unknown: no GPU session has run it yet |
 | `recompute` | Discards the data and regenerates it from its seed | A buffer made from a random key, or built with Argon2d |
 | `prefetch` (CPU) | Works out the places to read ahead of time | Dependent chains |
 | `precompute` (CPU) | Guesses the next nonce and answers early | Random nonces |
@@ -103,7 +112,8 @@ The verifier's flags set the buffer, the challenge, and the defenses. Run
 
 | Flag | What it sets | Default |
 |---|---|---|
-| `--mb` | Buffer size in MiB | |
+| `--mb` | Filler size in MiB | |
+| `--weights` | A weights manifest from `scripts/weights_manifest.py`. The buffer starts with these weights, and the prover must be started with the same manifest | |
 | `--samples`, `--lanes` | Reads per challenge, and how many parallel chains they split into | |
 | `--challenges`, `--warmup` | Measured and unmeasured challenges | |
 | `--gen` | How the buffer is made: `chacha`, `argon2d`, or `splitmix64` | `chacha` |

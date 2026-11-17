@@ -4,6 +4,13 @@ Open work, most important first. Each item says what is open and why it
 matters. When an item is done, delete it here and record the result in the
 README or a decision record.
 
+- [ ] **Measure the `compress` attack on a GPU.** Weights compress, so a prover
+  that stores them compressed holds less memory than it claims. The `compress`
+  attack keeps them at about 76% of their size and decodes any word directly.
+  Open questions: whether timing catches it, how much less memory the best
+  compressor can hold while answering in time, and so how much the weights
+  should count for.
+
 - [ ] **Find out why small amounts of off-chip data go unnoticed.** A GPU prover
   that keeps about 5% of the buffer in the server's main memory answers about
   as fast as an honest one, so the timing check passes it. That 5% is on-chip
@@ -41,12 +48,6 @@ README or a decision record.
   the buffer at random. A real cheater could work out which pieces are cheapest
   to rebuild and discard those. The open question is whether it still fails.
 
-- [ ] **Measure a cheater that stores the buffer compressed.** The buffer is
-  random today, so it can't be compressed. Model weights often can. If the
-  buffer is ever derived from weights, a prover could keep it compressed and
-  decompress only what each challenge reads. Measure how much memory that saves
-  and whether the timing check notices.
-
 - [ ] **Decide how to handle a neighboring GPU.** On a server with several
   GPUs, a prover could keep part of the buffer in another GPU's memory, which
   it reaches over a direct GPU-to-GPU link. That is much closer to on-chip
@@ -63,10 +64,12 @@ README or a decision record.
   could check only those. Checking would be cheaper and the answer harder to
   guess.
 
-- [ ] **Tie the buffer to the model weights.** Today the prover shows that it
-  holds random data from the verifier. The goal is to show that it holds data
-  tied to the workload it declared, while model providers keep working as they
-  do today.
+- [ ] **Challenge the weights where vLLM holds them.** Today each prover reads
+  the weights into its own buffer. Inside an inference engine, each tensor is a
+  separate allocation, and a copy would cost the model's size again. Open
+  questions: whether vLLM keeps each bf16 tensor's checkpoint bytes, and
+  whether answering from a thread in the engine's process slows inference or
+  the answers.
 
 - [ ] **Run the CPU version on a real machine with a buffer larger than RAM.**
   The CPU numbers come from Docker on a Mac, where storage is virtualized. This

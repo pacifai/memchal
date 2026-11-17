@@ -15,7 +15,7 @@ keep results trustworthy. For what memchal is, start with the
 | `src/record/` | The events that the provers and the verifier print into a session file |
 | `src/bench/` | A benchmark for the cost of building the buffer |
 | `tests/` | The tests, in folders that mirror `src/`, and `run_tests.sh` |
-| `scripts/` | The trial harness and its plots, and the GPU session recorder |
+| `scripts/` | The trial harness and its plots, the GPU session recorder, and the weights manifest and model download |
 | `runpod/` | Renting a RunPod GPU, preparing it, recording a session there, and releasing it |
 | `docker/` | The toolchain image, and `run.sh`, which runs a command in it |
 | `docs/decisions/` | The decision records behind the design and its claims |
@@ -63,7 +63,8 @@ To rent a GPU instead, see
   Argon2d to fixed values, so a change to any of them fails.
 - **End-to-end tests** run a verifier against the honest prover and each
   attack, and check that every answer is right or every answer is wrong, as
-  expected.
+  expected. The weights tests use a small synthetic checkpoint that
+  `tests/weights/make_checkpoint.py` writes.
 
 CI runs these on every pull request and compiles the GPU code. The GPU
 known-answer test needs a card, so it runs when a pod is prepared.
