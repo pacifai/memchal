@@ -79,7 +79,7 @@ static inline bool write_csv(const char* path, const std::vector<double>& latenc
 }
 
 static inline bool write_json(const char* path, const Args& a, const Profile& pr, bool locked,
-                              size_t bytes, double upload_s) {
+                              size_t bytes, size_t weight_bytes, double upload_s) {
     FILE* f = fopen(path, "w");
     if (!f) return false;
     JsonWriter j(f, true);
@@ -93,6 +93,7 @@ static inline bool write_json(const char* path, const Args& a, const Profile& pr
         .end_object();
     j.begin_object("params")
         .num("mb", a.mib, "%.6g")
+        .uint("weight_bytes", weight_bytes)
         .uint("samples", a.samples)
         .uint("lanes", a.lanes)
         .uint("challenges", a.challenges)
@@ -109,11 +110,12 @@ static inline bool write_json(const char* path, const Args& a, const Profile& pr
     if (a.chained) j.uint("chain_depth", a.samples / a.lanes);
     j.end_object();
     j.begin_object("prover").boolean("locked", locked).end_object();
+    const size_t sent = bytes - weight_bytes;
     if (!a.build())
         j.begin_object("upload")
-            .uint("bytes", bytes)
+            .uint("bytes", sent)
             .num("seconds", upload_s, "%.6f")
-            .num("gib_per_s", upload_s > 0 ? bytes / 1073741824.0 / upload_s : 0.0)
+            .num("gib_per_s", upload_s > 0 ? sent / 1073741824.0 / upload_s : 0.0)
             .end_object();
     j.begin_object("result")
         .uint("challenges", pr.count())

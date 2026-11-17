@@ -1,10 +1,11 @@
 #pragma once
+#include "attacks/weights_codec.hpp"
 #include "gpu/answer.hpp"
 
 namespace mc {
 namespace gpu {
 
-enum class Cheat { Fake, Managed, Partial, Recompute };
+enum class Cheat { Fake, Managed, Partial, Recompute, Compress };
 
 static constexpr uint32_t kRecomputeBlockWords = 128;
 
@@ -22,6 +23,15 @@ struct RecomputeState {
     uint64_t* h_rebuilt    = nullptr;
 };
 
+// The weights, compressed on the host as they arrive and then copied to the card.
+struct CompressState {
+    uint64_t    weight_words = 0;
+    CodecWriter writer;
+    uint64_t*   d_head  = nullptr;
+    uint32_t*   d_bytes = nullptr;
+    uint64_t*   d_exps  = nullptr;
+};
+
 struct Adversary {
     Cheat     cheat     = Cheat::Fake;
     uint64_t  num_words = 0;
@@ -32,6 +42,7 @@ struct Adversary {
     Lanes     lanes;
     Staging   stage;
     RecomputeState rc;
+    CompressState* cw = nullptr;
 };
 
 // Holds held_fraction of the buffer on the card and invents the rest.
@@ -42,6 +53,11 @@ bool create_managed(Adversary& a, uint64_t num_words, uint32_t lane_cap, char* e
 // Holds offload_fraction of the buffer in pinned host memory and the rest on the card.
 bool create_partial(Adversary& a, uint64_t num_words, double offload_fraction, uint32_t lane_cap,
                     char* err, size_t errlen);
+
+// Holds the first weight_words words compressed on the card, and the filler after
+// them as is.
+bool create_compressed(Adversary& a, uint64_t num_words, uint64_t weight_words, uint32_t lane_cap,
+                       char* err, size_t errlen);
 
 // Holds the kept Argon2d blocks on the card and rebuilds the rest on demand.
 //   slot: for each of n_blocks blocks, its index in kept_words, or -1 if discarded.
@@ -80,7 +96,7 @@ bool recompute_forget(Adversary& a, char* err, size_t errlen);
 
 Residency residency(const Adversary& a);
 
-// The fraction of the buffer allocated in device memory. Managed reports 1.0.
+// Device memory held, as a fraction of the buffer's size. Managed reports 1.0.
 double resident_fraction(const Adversary& a);
 
 // Allocates `bytes` of device memory and leaves it unused.

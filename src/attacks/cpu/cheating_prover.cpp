@@ -23,17 +23,19 @@ static const char kUsage[] =
     "                      or precompute (default disk)\n"
     "  --frac F            partial and fake: fraction held in RAM (default 0.5)\n"
     "  --datafile PATH     where disk-backed modes write the buffer\n"
-    "  --trace N           print a residency event every N challenges\n";
+    "  --trace N           print a residency event every N challenges\n"
+    "  --weights PATH      hold the model weights this manifest lists\n";
 
 enum Mode { DISK, PARTIAL, FAKE, MMAP_DISK, RECOMPUTE, PREFETCH, PRECOMPUTE };
 static const char* const kModeNames[] = {
     "disk", "partial", "fake", "mmapdisk", "recompute", "prefetch", "precompute", nullptr };
 
-static Mode        g_mode        = DISK;
-static double      g_frac        = 0.5;
-static const char* g_datafile    = "/tmp/memchal_cheat.bin";
-static uint32_t    g_trace_every = 0;
-static size_t      g_page        = 4096;
+static Mode            g_mode        = DISK;
+static double          g_frac        = 0.5;
+static const char*     g_datafile    = "/tmp/memchal_cheat.bin";
+static uint32_t        g_trace_every = 0;
+static size_t          g_page        = 4096;
+static const Manifest* g_weights     = nullptr;
 
 static bool write_all(int fd, const void* p, size_t n) {
     const char* c = (const char*)p;
@@ -348,9 +350,13 @@ static void serve_precompute(int cfd, const Setup& s, Source& src) {
 static void serve(int cfd) {
     Setup s;
     char err[256];
-    if (!read_setup(cfd, s, err, sizeof err)) { fprintf(stderr, "[cheat] refusing: %s\n", err); return; }
+    if (!read_setup(cfd, g_weights, s, err, sizeof err)) { fprintf(stderr, "[cheat] refusing: %s\n", err); return; }
+    if (g_mode == RECOMPUTE && s.weights) {
+        fprintf(stderr, "[cheat] refusing: recompute regenerates filler, and this buffer starts with weights\n");
+        return;
+    }
     Source src{cfd};
-    if (s.build && !build_on_host(src, s, err, sizeof err)) { fprintf(stderr, "[cheat] %s\n", err); return; }
+    if (!open_source(src, s, err, sizeof err)) { fprintf(stderr, "[cheat] %s\n", err); return; }
     switch (g_mode) {
         case RECOMPUTE:  serve_recompute(cfd, s, src); break;
         case DISK:
@@ -377,6 +383,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--frac"))     g_frac = cli.number(a, v, 0.0, 1.0);
         else if (!strcmp(a, "--datafile")) g_datafile = v;
         else if (!strcmp(a, "--trace"))    g_trace_every = cli.u32(a, v);
+        else if (!strcmp(a, "--weights"))  g_weights = held_weights(v, "cheat");
         else cli.error("unknown flag: %s", a);
     }
     printf("[cheat] mode=%s frac=%.2f\n", kModeNames[g_mode], g_frac);

@@ -44,14 +44,14 @@ int main(int argc, char** argv) {
         fprintf(stderr, "[verifier] ERROR: %s\n", err);
         return 1;
     }
-    printf("[verifier] buffer=%.1f MiB samples=%u lanes=%u challenges=%u warmup=%u host=%s:%u "
-           "gen=%s chain=%s fold=%s nonce=%s gap_us=%u verify_every=%u\n",
-           ref.bytes / 1048576.0, a.samples, a.lanes, a.challenges, a.warmup, a.host, a.port,
+    printf("[verifier] buffer=%.1f MiB weights=%.1f MiB samples=%u lanes=%u challenges=%u "
+           "warmup=%u host=%s:%u gen=%s chain=%s fold=%s nonce=%s gap_us=%u verify_every=%u\n",
+           ref.bytes / 1048576.0, ref.weight_bytes / 1048576.0, a.samples, a.lanes, a.challenges,
+           a.warmup, a.host, a.port,
            generator_name(a.gen), a.chained ? "dependent" : "independent",
            a.tree ? "tree" : "sequential", a.random_nonces ? "random" : "sequential", a.gap_us,
            a.verify_every);
-    printf("[verifier] generated in %.3f s (%.2f GiB/s)\n", ref.gen_s,
-           ref.bytes / 1073741824.0 / ref.gen_s);
+    printf("[verifier] read the weights and generated the filler in %.3f s\n", ref.gen_s);
 
     const int fd = connect_to(a.host, a.port);
     Ready ready{};
@@ -61,18 +61,19 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (a.build())
-        printf("[verifier] sent a %zu-byte recipe in place of %.1f MiB\n",
-               sizeof(RecipeMsg), ref.bytes / 1048576.0);
+        printf("[verifier] sent a %zu-byte recipe in place of %.1f MiB of filler\n",
+               sizeof(RecipeMsg), ref.filler_bytes() / 1048576.0);
     else
-        printf("[verifier] uploaded in %.3f s (%.2f GiB/s)\n", upload_s,
-               ref.bytes / 1073741824.0 / upload_s);
+        printf("[verifier] uploaded %.1f MiB of filler in %.3f s\n",
+               ref.filler_bytes() / 1048576.0, upload_s);
     printf("[verifier] prover memory %s\n", ready.locked ? "LOCKED" : "not locked");
 
     record::VerifierStream stream;
     if (a.stream) {
         if (stream.open(a.stream, a.probe_map_every, ref.num_words))
-            stream.run(a.label, a.mib, a.samples, a.lanes, a.challenges, a.warmup, ready.locked,
-                       generator_name(a.gen), ref.gen_s, upload_s);
+            stream.run(a.label, ref.bytes / 1048576.0, ref.weight_bytes / 1048576.0, a.samples,
+                       a.lanes, a.challenges, a.warmup, ready.locked, generator_name(a.gen),
+                       ref.gen_s, upload_s);
         else
             fprintf(stderr, "[verifier] WARNING: could not open stream %s\n", a.stream);
     }
@@ -102,7 +103,7 @@ int main(int argc, char** argv) {
         rc = 1;
     }
     if (a.json) {
-        if (write_json(a.json, a, profile, ready.locked, ref.bytes, upload_s)) {
+        if (write_json(a.json, a, profile, ready.locked, ref.bytes, ref.weight_bytes, upload_s)) {
             printf("[verifier] wrote %s\n", a.json);
         } else {
             fprintf(stderr, "[verifier] ERROR: could not write JSON to %s\n", a.json);

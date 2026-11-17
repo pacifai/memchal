@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <random>
 #include <unistd.h>
 #include <vector>
@@ -36,24 +37,32 @@ private:
     unsigned used_    = 64;
 };
 
-// Sends the hello and then the buffer or its recipe, and waits for the
-// prover's ready message.
-//   upload_s: time spent sending the buffer or recipe.
+// Sends the hello, the weights message, and then the filler or its recipe, and
+// waits for the prover's ready message. The prover already holds the weights.
+//   upload_s: time spent sending the filler or recipe.
 static inline bool hand_over(int fd, const Reference& ref, bool build, Ready* ready,
                              double* upload_s, char* err, size_t errlen) {
-    Hello hello{ kMagic, (uint64_t)ref.bytes, kWireVersion, build ? kHelloBuild : 0u };
+    uint32_t flags = build ? kHelloBuild : 0u;
+    if (ref.has_weights()) flags |= kHelloWeights;
+    Hello hello{ kMagic, (uint64_t)ref.bytes, kWireVersion, flags };
     if (!send_all(fd, &hello, sizeof hello)) { snprintf(err, errlen, "hello send failed"); return false; }
+    if (ref.has_weights()) {
+        WeightsMsg w{};
+        memcpy(w.digest, ref.weights.digest, sizeof w.digest);
+        w.bytes = ref.weight_bytes;
+        if (!send_all(fd, &w, sizeof w)) { snprintf(err, errlen, "weights message send failed"); return false; }
+    }
     const auto t0 = std::chrono::steady_clock::now();
     if (build) {
         RecipeMsg msg = msg_from_recipe(ref.recipe);
         if (!send_all(fd, &msg, sizeof msg)) { snprintf(err, errlen, "recipe send failed"); return false; }
-    } else if (!send_all(fd, ref.words, ref.bytes)) {
-        snprintf(err, errlen, "buffer send failed");
+    } else if (!send_all(fd, ref.filler(), ref.filler_bytes())) {
+        snprintf(err, errlen, "filler send failed");
         return false;
     }
     *upload_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     if (!recv_all(fd, ready, sizeof *ready) || ready->magic != kMagic) {
-        snprintf(err, errlen, "no valid ready message");
+        snprintf(err, errlen, "no valid ready message; the prover's log says why");
         return false;
     }
     return true;

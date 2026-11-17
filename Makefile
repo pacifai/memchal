@@ -18,7 +18,7 @@ BENCH_BINS   := $(BUILD)/bench/build_cost
 TEST_BINS    := $(BUILD)/tests/shared/challenge_kat $(BUILD)/tests/shared/argon2d_kat \
                 $(BUILD)/tests/shared/chain_test \
                 $(BUILD)/tests/shared/argon2d_differential $(BUILD)/tests/attacks/argon2d_rebuild_test \
-                $(BUILD)/tests/attacks/seed_recovery_test
+                $(BUILD)/tests/attacks/seed_recovery_test $(BUILD)/tests/attacks/weights_codec_test
 GPU_CORE_BINS   := $(BUILD)/gpu/prover $(BUILD)/tests/gpu/answer_kat
 GPU_ATTACK_BINS := $(BUILD)/attacks/gpu/cheating_prover
 

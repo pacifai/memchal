@@ -49,11 +49,13 @@ run_unit "dependent chain test"           build/tests/shared/chain_test
 run_unit "Argon2d differential test"      build/tests/shared/argon2d_differential
 run_unit "Argon2d rebuild test"           build/tests/attacks/argon2d_rebuild_test
 run_unit "splitmix64 seed recovery test"  build/tests/attacks/seed_recovery_test
+run_unit "weights codec test"             build/tests/attacks/weights_codec_test
 
 VERIFIER_ARGS="--mb 8 --samples 2048 --lanes 16 --challenges 100 --warmup 20 --csv /dev/null --chain independent"
 
 # Runs a prover and a verifier against it.
-#   expect: "correct" (no errors) or "all_wrong" (every answer wrong).
+#   expect: "correct" (no errors), "all_wrong" (every answer wrong), or
+#           "refused" (the prover turns the verifier away).
 #   VERIFIER_EXTRA: verifier flags for this case only.
 #   LOG_DONE: the prover's last log line for a session (default "served").
 run_invariant() {
@@ -81,6 +83,10 @@ run_invariant() {
     kill -9 "$srv_pid" 2>/dev/null || true
     wait "$srv_pid" 2>/dev/null || true
 
+    if [ "$expect" = "refused" ]; then
+        if [ "$verifier_ok" -eq 0 ]; then pass "INVARIANT $name (refused)"; else fail "INVARIANT $name (not refused)"; fi
+        return
+    fi
     if [ "$verifier_ok" -ne 1 ]; then
         echo "  Verifier failed. Server log:"
         cat "/tmp/inv_server_${name}.log" || true
@@ -176,6 +182,25 @@ VERIFIER_EXTRA="--fold tree" run_invariant tree_disk   9302 correct \
     $CHEAT --port 9302 --mode disk --datafile /tmp/memchal_test_tree_disk.bin
 VERIFIER_EXTRA="--fold tree" run_invariant tree_fake   9303 all_wrong \
     $CHEAT --port 9303 --mode fake --frac 0.5 --datafile /tmp/memchal_test_tree_fake.bin
+
+echo ""
+echo "=== WEIGHTS ==="
+WDIR=$(mktemp -d /tmp/memchal_weights_XXXXXX)
+python3 tests/weights/make_checkpoint.py "$WDIR/model"
+python3 tests/weights/make_checkpoint.py "$WDIR/other" --seed 8
+python3 scripts/weights_manifest.py "$WDIR/model/model.weights" "$WDIR"/model/*.safetensors
+cp "$WDIR/model/model.weights" "$WDIR/other/model.weights"
+run_unit "weights manifest" python3 tests/weights/check_manifest.py "$WDIR/model/model.weights"
+MODEL="--weights $WDIR/model/model.weights"
+OTHER="--weights $WDIR/other/model.weights"
+VERIFIER_EXTRA="$MODEL" run_invariant weights_honest 9401 correct $PROVER --port 9401 $MODEL
+VERIFIER_EXTRA="$MODEL --mb 0" run_invariant weights_only 9402 correct $PROVER --port 9402 $MODEL
+VERIFIER_EXTRA="$MODEL --gen argon2d" run_invariant weights_build 9403 correct $PROVER --port 9403 $MODEL
+VERIFIER_EXTRA="$MODEL" run_invariant weights_other_model 9404 all_wrong $PROVER --port 9404 $OTHER
+VERIFIER_EXTRA="$MODEL" run_invariant weights_none_held 9405 refused $PROVER --port 9405
+VERIFIER_EXTRA="$MODEL" run_invariant weights_disk 9406 correct \
+    $CHEAT --port 9406 --mode disk --datafile /tmp/memchal_test_weights_disk.bin $MODEL
+rm -rf "$WDIR"
 
 echo ""
 echo "=== SESSION EVENT STREAM ==="

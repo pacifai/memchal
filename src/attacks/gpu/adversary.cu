@@ -25,6 +25,15 @@ struct LoadPartial {
     }
 };
 
+struct LoadCompressed {
+    CodecView codec;
+    uint64_t weight_words;
+    const uint64_t* __restrict__ filler;
+    __device__ __forceinline__ uint64_t operator()(uint64_t idx) const {
+        return idx < weight_words ? codec(idx) : filler[idx - weight_words];
+    }
+};
+
 // Reads a kept or rebuilt block. On a missing block, records it in `need` and
 // returns zeros for the rest of the lane.
 struct LoadRecompute {
@@ -146,6 +155,34 @@ bool grow_scratch(RecomputeState& r, uint32_t need, char* err, size_t errlen) {
     return true;
 }
 
+template <typename T>
+bool to_device(T** dst, const std::vector<T>& src, const char* what, char* err, size_t errlen) {
+    cudaError_t e = cudaMalloc((void**)dst, (src.empty() ? 1 : src.size()) * sizeof(T));
+    if (e == cudaSuccess && !src.empty())
+        e = cudaMemcpy(*dst, src.data(), src.size() * sizeof(T), cudaMemcpyHostToDevice);
+    if (e != cudaSuccess) { fail(err, errlen, what, e); return false; }
+    return true;
+}
+
+// Compresses the weight part of a push, and copies the result to the card once
+// the last weight word has arrived.
+bool push_weights(Adversary& a, const unsigned char* src, size_t bytes, char* err, size_t errlen) {
+    CompressState& c = *a.cw;
+    c.writer.append((const uint64_t*)src, bytes / 8);
+    if (c.writer.words() < c.weight_words) return true;
+    c.writer.finish();
+    if (!to_device(&c.d_head, c.writer.head(), "cudaMalloc(codec headers)", err, errlen) ||
+        !to_device(&c.d_bytes, c.writer.bytes(), "cudaMalloc(codec bytes)", err, errlen) ||
+        !to_device(&c.d_exps, c.writer.exps(), "cudaMalloc(codec exponents)", err, errlen))
+        return false;
+    a.dev_words = (a.num_words - c.weight_words) + c.writer.compressed_bytes() / 8;
+    printf("[cheat] compressed %.2f MiB of weights to %.2f MiB on the card (%.1f%%)\n",
+           c.weight_words * 8 / 1048576.0, c.writer.compressed_bytes() / 1048576.0,
+           100.0 * c.writer.compressed_bytes() / (c.weight_words * 8.0));
+    c.writer = CodecWriter{};
+    return true;
+}
+
 } // namespace
 
 void destroy(Adversary& a) {
@@ -158,6 +195,12 @@ void destroy(Adversary& a) {
     if (r.d_done)       cudaFree(r.d_done);
     if (r.h_need)       cudaFreeHost(r.h_need);
     if (r.h_rebuilt)    cudaFreeHost(r.h_rebuilt);
+    if (a.cw) {
+        if (a.cw->d_head)  cudaFree(a.cw->d_head);
+        if (a.cw->d_bytes) cudaFree(a.cw->d_bytes);
+        if (a.cw->d_exps)  cudaFree(a.cw->d_exps);
+        delete a.cw;
+    }
     if (a.d_buf)  cudaFree(a.d_buf);
     if (a.h_host) cudaFreeHost(a.h_host);
     lanes_destroy(a.lanes);
@@ -204,6 +247,19 @@ bool create_partial(Adversary& a, uint64_t num_words, double offload_fraction, u
     return finish_create(a, lane_cap, err, errlen);
 }
 
+bool create_compressed(Adversary& a, uint64_t num_words, uint64_t weight_words, uint32_t lane_cap,
+                       char* err, size_t errlen) {
+    destroy(a);
+    a.cheat = Cheat::Compress;
+    a.num_words = num_words;
+    a.cw = new CompressState;
+    a.cw->weight_words = weight_words;
+    a.cw->writer.reserve(weight_words);
+    cudaError_t e = cudaMalloc((void**)&a.d_buf, words_bytes(num_words - weight_words));
+    if (e != cudaSuccess) return failed(a, err, errlen, "cudaMalloc(filler)", e);
+    return finish_create(a, lane_cap, err, errlen);
+}
+
 bool create_recompute(Adversary& a, uint32_t n_blocks, const int32_t* slot,
                       const uint64_t* kept_words, uint32_t n_kept, uint32_t lane_cap,
                       char* err, size_t errlen) {
@@ -235,6 +291,18 @@ bool push(Adversary& a, size_t bytes, char* err, size_t errlen) {
     const size_t at = a.stage.cursor, seam = a.dev_words * 8, end = a.num_words * 8;
     if (at + bytes > end) { failmsg(err, errlen, "push past the end of the buffer"); return false; }
 
+    if (a.cheat == Cheat::Compress) {
+        const size_t weights_end = a.cw->weight_words * 8;
+        const size_t w = at < weights_end ? std::min(bytes, weights_end - at) : 0;
+        if (w && !push_weights(a, a.stage.h, w, err, errlen)) return false;
+        if (bytes > w) {
+            cudaError_t e = cudaMemcpy((unsigned char*)a.d_buf + (at + w - weights_end), a.stage.h + w,
+                                       bytes - w, cudaMemcpyHostToDevice);
+            if (e != cudaSuccess) { fail(err, errlen, "cudaMemcpy(filler)", e); return false; }
+        }
+        a.stage.cursor += bytes;
+        return true;
+    }
     const size_t dev = at < seam ? std::min(bytes, seam - at) : 0;
     unsigned char* dst = (unsigned char*)a.d_buf + at;
     if (dev && a.cheat == Cheat::Managed) {
@@ -263,6 +331,13 @@ bool answer(Adversary& a, uint64_t nonce, uint32_t samples, uint32_t lanes, bool
         case Cheat::Partial:
             return answer_with(a.lanes, LoadPartial{a.d_buf, a.d_host, a.dev_words}, a.num_words,
                                nonce, samples, lanes, chained, tree, out_hash, t, err, errlen);
+        case Cheat::Compress: {
+            const CompressState& c = *a.cw;
+            return answer_with(a.lanes, LoadCompressed{CodecView{c.d_head, c.d_bytes, c.d_exps},
+                                                       c.weight_words, a.d_buf},
+                               a.num_words, nonce, samples, lanes, chained, tree, out_hash, t,
+                               err, errlen);
+        }
         case Cheat::Recompute:
             break;
     }
@@ -338,6 +413,8 @@ bool recompute_forget(Adversary& a, char* err, size_t errlen) {
 Residency residency(const Adversary& a) {
     if (a.cheat == Cheat::Recompute)
         return {"recompute — some blocks on the card, the rest rebuilt on demand", false};
+    if (a.cheat == Cheat::Compress)
+        return {"compressed — the weights compressed on the card, the filler as is", true};
     if (a.d_buf && a.h_host) return {"split — part on the card, the rest in host memory over PCIe", false};
     return residency_of(a.d_buf ? (const void*)a.d_buf : a.h_host);
 }

@@ -31,6 +31,7 @@ struct Args {
     const char* label             = "";
     const char* stream            = nullptr;
     uint32_t    probe_map_every   = 0;
+    const char* weights           = nullptr;
 
     bool build() const { return gen == Generator::Argon2d; }
 };
@@ -38,7 +39,9 @@ struct Args {
 static const char kUsage[] =
     "usage: verifier [--flag value]...\n"
     "  --host ADDR --port N          prover address (default 127.0.0.1:%u)\n"
-    "  --mb MIB                      buffer size\n"
+    "  --mb MIB                      filler size; the whole buffer without --weights\n"
+    "  --weights PATH                start the buffer with the model weights this\n"
+    "                                manifest lists, which the prover already holds\n"
     "  --samples N --lanes N         probes per challenge, and parallel lanes\n"
     "  --challenges N --warmup N     measured and unmeasured challenges\n"
     "  --gen chacha|splitmix64|argon2d   buffer generator (default chacha)\n"
@@ -61,7 +64,7 @@ static Args parse_args(int argc, char** argv) {
         const char* v = cli.value(argc, argv, &i);
         if      (!strcmp(flag, "--host"))       a.host = v;
         else if (!strcmp(flag, "--port"))       a.port = cli.port(flag, v);
-        else if (!strcmp(flag, "--mb"))         a.mib = cli.number(flag, v, 1e-9, 1 << 20);
+        else if (!strcmp(flag, "--mb"))         a.mib = cli.number(flag, v, 0, 1 << 20);
         else if (!strcmp(flag, "--samples"))    a.samples = cli.u32(flag, v);
         else if (!strcmp(flag, "--lanes"))      a.lanes = cli.u32(flag, v);
         else if (!strcmp(flag, "--challenges")) a.challenges = cli.u32(flag, v);
@@ -70,6 +73,7 @@ static Args parse_args(int argc, char** argv) {
         else if (!strcmp(flag, "--json"))       a.json = v;
         else if (!strcmp(flag, "--label"))      a.label = v;
         else if (!strcmp(flag, "--seed"))       a.seed = cli.uint(flag, v);
+        else if (!strcmp(flag, "--weights"))    a.weights = v;
         else if (!strcmp(flag, "--gen")) {
             static const char* const names[] = {"chacha", "splitmix64", "argon2d", nullptr};
             a.gen = (Generator)cli.choice(flag, v, names);

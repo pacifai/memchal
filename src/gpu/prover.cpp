@@ -12,19 +12,22 @@ static const char kUsage[] =
     "  --lane-cap N       most lanes a challenge may use; wider ones end the session\n"
     "                     (default 131072)\n"
     "  --trace N          print a timing event every N challenges\n"
+    "  --weights PATH     hold the model weights this manifest lists\n"
     "  --allow-unlocked   run even if the buffer is not in device memory\n";
 
-static bool     g_allow_unlocked = false;
-static int      g_device         = 0;
-static uint32_t g_lane_cap       = 1u << 17;
-static uint32_t g_trace_every    = 0;
+static bool            g_allow_unlocked = false;
+static int             g_device         = 0;
+static uint32_t        g_lane_cap       = 1u << 17;
+static uint32_t        g_trace_every    = 0;
+static const Manifest* g_weights        = nullptr;
 
 static void serve(int cfd) {
     Setup s;
     char err[512] = {0};
-    if (!read_setup(cfd, s, err, sizeof err)) { fprintf(stderr, "[gpu] refusing: %s\n", err); return; }
-    printf("[gpu] %s %.2f MiB (%llu words)\n", s.build ? "building" : "receiving",
-           s.bytes / 1048576.0, (unsigned long long)s.num_words);
+    if (!read_setup(cfd, g_weights, s, err, sizeof err)) { fprintf(stderr, "[gpu] refusing: %s\n", err); return; }
+    printf("[gpu] %.2f MiB (%llu words): %.2f MiB of weights, then %s the filler\n",
+           s.bytes / 1048576.0, (unsigned long long)s.num_words, s.weight_bytes / 1048576.0,
+           s.build ? "building" : "receiving");
 
     gpu::Prover p;
     if (!gpu::create(p, s.num_words, g_lane_cap, err, sizeof err)) {
@@ -41,7 +44,7 @@ static void serve(int cfd) {
         }
         fprintf(stderr, "[gpu] WARNING: running on non-device memory; reporting locked=false\n");
     }
-    gpu::serve_buffer(cfd, s, p, "gpu", {"proverinfo", "honest", where, 1.0, where.on_device},
+    gpu::serve_buffer(cfd, s, p, "gpu", {"proverinfo", "honest", where, where.on_device},
                       g_trace_every);
     gpu::destroy(p);
     gpu::report_hbm("gpu", "after release");
@@ -59,6 +62,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--device"))   g_device = (int)cli.u32(a, cli.value(argc, argv, &i));
         else if (!strcmp(a, "--lane-cap")) g_lane_cap = cli.u32(a, cli.value(argc, argv, &i));
         else if (!strcmp(a, "--trace"))    g_trace_every = cli.u32(a, cli.value(argc, argv, &i));
+        else if (!strcmp(a, "--weights"))  g_weights = held_weights(cli.value(argc, argv, &i), "gpu");
         else cli.error("unknown flag: %s", a);
     }
 
