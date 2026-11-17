@@ -1,7 +1,7 @@
 # ADR 0008: The buffer can start with the model's weights
 
-**Status:** proposed. The CPU path is built and tested. The GPU path compiles,
-and no GPU session has run it yet.
+**Status:** proposed. Built and tested on the CPU, and run in one H100 session
+with Qwen2.5-7B-Instruct.
 
 ## Context
 
@@ -57,9 +57,15 @@ original size (`tests/attacks/weights_codec_test.cpp`). Lossless bf16
 compressors reach about 70% on real models, but they decode in long runs, which
 costs a cheat more per read.
 
-Until a session shows whether timing catches `compress`, count the weights
-only at the size the best attack has reached, and the remainder as memory that
-isn't accounted for.
+In one H100 session with Qwen2.5-7B-Instruct, `compress` held its 14.2 GiB of
+weights in 76.4% of their size and answered in a median of 205 µs, against
+163 µs for the honest prover. The honest answers ranged widely, with a 95th
+percentile of 343 µs, so the comparison of medians against that percentile
+passes it. Its fastest answers were slower than the honest prover's fastest,
+126 µs against 99 µs, so a rule that compares the fast end might catch it.
+
+Until a rule catches `compress`, count the weights only at the size the best
+attack has reached, and the remainder as memory that isn't accounted for.
 
 ## What comes next
 

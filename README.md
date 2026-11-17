@@ -97,7 +97,7 @@ test shows how the verifier catches it.
 | `mmapdisk` (CPU) | Memory-maps the data from disk | Timing, once RAM is too small to cache the data |
 | `partial` (GPU) | Keeps part of the data in the server's main memory | Timing |
 | `uvm` (GPU) | Lets the driver move data on and off the chip | Timing, once the chip is too full to hold the data |
-| `compress` (GPU) | Keeps the model weights compressed and decompresses each word it reads | Unknown: no GPU session has run it yet |
+| `compress` (GPU) | Keeps the model weights compressed and decompresses each word it reads | Not caught yet: it answers within the honest prover's spread |
 | `recompute` | Discards the data and regenerates it from its seed | A buffer made from a random key, or built with Argon2d |
 | `prefetch` (CPU) | Works out the places to read ahead of time | Dependent chains |
 | `precompute` (CPU) | Guesses the next nonce and answers early | Random nonces |
@@ -154,6 +154,18 @@ chains, tree fold.
 | `partial`, all data in main memory | 5.95 ms | 28.6x | 0 | Timing |
 | `uvm`, chip full | 3.49 s | 16,786x | 0 | Timing |
 | `uvm`, chip has room (NVIDIA A40) | 653 µs | 1.04x | 0 | Passes: the data is on the chip |
+
+**GPU with model weights, one NVIDIA H100 session.** The 14.2 GiB of bf16
+weights of Qwen2.5-7B-Instruct, then 4096 MiB of Argon2d filler. 262,144 reads
+in 16,384 chains, tree fold.
+
+| Prover | Median answer | Against honest | Wrong answers | Memory held | Caught by |
+|---|---:|---:|---:|---:|---|
+| Honest | 163 µs | 1.00x | 0 | 100% | |
+| `fake` | 157 µs | 0.96x | 18 of 18 | 50% | Correctness |
+| `partial`, 5% in main memory | 385 µs | 2.4x | 0 | 95% | Timing |
+| `partial`, 10% in main memory | 763 µs | 4.7x | 0 | 90% | Timing |
+| `compress` | 205 µs | 1.26x | 0 | 82% | Not caught: the honest run's 95th percentile is 343 µs |
 
 **CPU, Docker on Apple Silicon.** 64 MiB buffer, 4096 reads in 32 chains.
 

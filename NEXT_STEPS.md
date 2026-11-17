@@ -4,12 +4,13 @@ Open work, most important first. Each item says what is open and why it
 matters. When an item is done, delete it here and record the result in the
 README or a decision record.
 
-- [ ] **Measure the `compress` attack on a GPU.** Weights compress, so a prover
-  that stores them compressed holds less memory than it claims. The `compress`
-  attack keeps them at about 76% of their size and decodes any word directly.
-  Open questions: whether timing catches it, how much less memory the best
-  compressor can hold while answering in time, and so how much the weights
-  should count for.
+- [ ] **Catch the `compress` attack.** Weights compress, so a prover that stores
+  them compressed holds less memory than it claims. In one H100 session,
+  `compress` kept Qwen2.5-7B-Instruct's weights at 76.4% of their size and
+  answered 1.26x slower than the honest prover, which the honest run's spread
+  hides. Open questions: whether a rule that compares the fastest answers, or a
+  quieter honest baseline, catches it; how small a better compressor gets while
+  answering in time; and so how much the weights should count for.
 
 - [ ] **Find out why small amounts of off-chip data go unnoticed.** A GPU prover
   that keeps about 5% of the buffer in the server's main memory answers about
@@ -18,7 +19,9 @@ README or a decision record.
   this gap comes from noise in the measurement setup and how much from the
   method itself, why filling a whole card is hard to account for, how much data
   a cheater could realistically keep elsewhere for a given card, buffer size,
-  and number of reads, and what the freed memory is worth to it. A first step
+  and number of reads, and what the freed memory is worth to it. In one session
+  with an 18.2 GiB buffer of weights and filler, 5% in main memory made the
+  median answer 2.4x slower, so the buffer's size may matter. A first step
   could be to measure the gap while changing one variable at a time.
 
 - [ ] **Make combining the answer cheaper.** A challenge splits its reads into
