@@ -139,7 +139,8 @@ def record(args):
         ship(conn)
         prepare(conn, args)
         say("recording")
-        recorded = conn.run(f"python3 {POD_REPO}/scripts/gpu_record.py --out {POD_SESSION}",
+        model = f" --model {args.model}" if args.model else ""
+        recorded = conn.run(f"python3 {POD_REPO}/scripts/gpu_record.py --out {POD_SESSION}{model}",
                             warn=True, timeout=RECORD_TIMEOUT_S)
         SESSIONS.mkdir(parents=True, exist_ok=True)
         dest = SESSIONS / f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}.jsonl"
@@ -176,6 +177,8 @@ def main():
                    help="SSH private key registered on the account (default: MEMCHAL_SSH_KEY)")
     p.add_argument("--idle-min", type=int, default=90, help="the pod terminates itself after this many idle minutes")
     p.add_argument("--max-hours", type=float, default=6, help="the pod terminates itself this long after it starts")
+    p.add_argument("--model", help="start the buffer with this Hugging Face model's weights, "
+                                   "such as Qwen/Qwen2.5-7B-Instruct")
     p.add_argument("--yes", "-y", action="store_true", help="rent without asking")
     args = p.parse_args()
 
