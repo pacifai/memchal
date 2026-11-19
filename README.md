@@ -68,6 +68,24 @@ To replay the session, open the
 [demo site](https://pacifai.github.io/compute-verification-demo/), select
 **Custom run**, and add the session file.
 
+### Start the buffer with model weights
+
+The verifier and the prover each read the weights from their own copy of the
+model, in the order a manifest lists them. To download a model from Hugging
+Face and write its manifest, `models/qwen/model.weights`:
+
+```bash
+python3 scripts/model_weights.py fetch Qwen/Qwen2.5-7B-Instruct models/qwen
+```
+
+To write a manifest for safetensors files you already have:
+
+```bash
+python3 scripts/model_weights.py manifest models/qwen.weights models/qwen/*.safetensors
+```
+
+Then start the verifier and the prover with `--weights` and the manifest.
+
 ## How it works
 
 1. The verifier and the prover agree on a buffer. It can start with model
@@ -113,7 +131,7 @@ The verifier's flags set the buffer, the challenge, and the defenses. Run
 | Flag | What it sets | Default |
 |---|---|---|
 | `--mb` | Filler size in MiB | |
-| `--weights` | A weights manifest from `scripts/weights_manifest.py`. The buffer starts with these weights, and the prover must be started with the same manifest | |
+| `--weights` | A weights manifest from `scripts/model_weights.py`. The buffer starts with these weights, and the prover must be started with the same manifest | |
 | `--samples`, `--lanes` | Reads per challenge, and how many parallel chains they split into | |
 | `--challenges`, `--warmup` | Measured and unmeasured challenges | |
 | `--gen` | How the buffer is made: `chacha`, `argon2d`, or `splitmix64` | `chacha` |

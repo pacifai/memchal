@@ -193,7 +193,7 @@ echo "=== WEIGHTS ==="
 WDIR=$(mktemp -d /tmp/memchal_weights_XXXXXX)
 python3 tests/weights/make_checkpoint.py "$WDIR/model"
 python3 tests/weights/make_checkpoint.py "$WDIR/other" --seed 8
-python3 scripts/weights_manifest.py "$WDIR/model/model.weights" "$WDIR"/model/*.safetensors
+python3 scripts/model_weights.py manifest "$WDIR/model/model.weights" "$WDIR"/model/*.safetensors
 cp "$WDIR/model/model.weights" "$WDIR/other/model.weights"
 run_unit "weights manifest" python3 tests/weights/check_manifest.py "$WDIR/model/model.weights"
 MODEL="--weights $WDIR/model/model.weights"

@@ -20,7 +20,7 @@ struct Piece {
     std::string tensor;
 };
 
-// The model weights at the start of the buffer, as scripts/weights_manifest.py
+// The model weights at the start of the buffer, as scripts/model_weights.py
 // lists them:
 //
 //   memchal-weights 1

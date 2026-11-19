@@ -22,7 +22,7 @@ from anywhere in the whole buffer, so the weights and the filler are checked
 at the same moment. A prover can't move the filler out while the weights are
 being checked, or the other way around.
 
-- A manifest lists the weights. `scripts/weights_manifest.py` reads a
+- A manifest lists the weights. `scripts/model_weights.py` reads a
   safetensors checkpoint's headers and lists the byte range of each 2-D tensor,
   in name order. Both sides read the weights from their own copy of the
   checkpoint in that order.

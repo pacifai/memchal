@@ -2,11 +2,18 @@
 # /// script
 # requires-python = ">=3.9"
 # ///
-"""Writes a weights manifest: the byte ranges of a safetensors checkpoint that start the challenge buffer.
+"""Prepares a model's weights to start the challenge buffer.
 
-The buffer starts with the model's 2-D weight tensors laid end to end, in name
-order. The script reads only the file headers to find where each tensor's
-bytes sit, plus each tensor once to find duplicates.
+Two commands:
+
+  fetch     Downloads a Hugging Face model's safetensors files and writes their
+            manifest. Works only for models that need no login.
+  manifest  Writes the manifest for safetensors files you already have.
+
+A manifest lists the byte ranges of a checkpoint that start the buffer: the
+model's 2-D weight tensors laid end to end, in name order. Writing one reads
+only the file headers, plus the tensors whose size another tensor shares, to
+find duplicates.
 
 It leaves out tensors whose bytes a prover could answer from without storing
 them: 1-D tensors such as norms, which are small and often close to constant,
@@ -18,8 +25,14 @@ gate and up into gate_up_proj. A row-major stack is the parts' bytes end to
 end, so the manifest lists a stacked tensor as several pieces under one name,
 in the order vLLM holds them. `--fuse none` turns this off.
 
-Example:
-    python3 scripts/weights_manifest.py models/qwen.weights models/qwen/*.safetensors
+`fetch` takes the files vLLM loads: the top-level ones, and only those the
+index lists when there is one. It pins them to the repository's current
+commit, which it records in the folder as `revision`, and keeps a file already
+present with the right size.
+
+Examples:
+    python3 scripts/model_weights.py fetch Qwen/Qwen2.5-7B-Instruct models/qwen
+    python3 scripts/model_weights.py manifest models/qwen.weights models/qwen/*.safetensors
 """
 from __future__ import annotations
 
@@ -30,7 +43,9 @@ import os
 import re
 import struct
 import sys
+import urllib.request
 from collections import Counter
+from pathlib import Path
 
 FUSE_VLLM = {
     "self_attn.qkv_proj": ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
@@ -39,6 +54,10 @@ FUSE_VLLM = {
 LAYER = re.compile(r"^(.*\.layers\.\d+)\.(.+)\.weight$")
 HASH_CHUNK = 1 << 24
 WORD = 8
+HUB = "https://huggingface.co"
+DOWNLOAD_CHUNK = 1 << 24
+MANIFEST = "model.weights"
+INDEX = "model.safetensors.index.json"
 
 
 def read_header(path):
@@ -132,26 +151,82 @@ def write_manifest(out_path, paths, segments):
     return total
 
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("out", help="the manifest to write")
-    p.add_argument("checkpoint", nargs="+", help="the checkpoint's safetensors files")
-    p.add_argument("--dtype", action="append", help="a safetensors dtype to include; repeatable (default BF16)")
-    p.add_argument("--fuse", choices=["vllm", "none"], default="vllm", help="stack projections as vLLM does")
-    args = p.parse_args()
-
-    dtypes = set(args.dtype or ["BF16"])
-    try:
-        tensors, dropped = drop_duplicates(args.checkpoint, collect(args.checkpoint, dtypes))
-        segments = stack(tensors, FUSE_VLLM if args.fuse == "vllm" else {})
-        if not segments:
-            raise ValueError(f"no 2-D tensors of dtype {', '.join(sorted(dtypes))}")
-        total = write_manifest(args.out, args.checkpoint, segments)
-    except (ValueError, KeyError, OSError) as e:
-        sys.exit(f"weights_manifest: {e}")
+def make_manifest(out, checkpoint, dtypes=("BF16",), fuse="vllm"):
+    """Writes the manifest for the checkpoint's files and prints what it left out."""
+    tensors, dropped = drop_duplicates(checkpoint, collect(checkpoint, set(dtypes)))
+    segments = stack(tensors, FUSE_VLLM if fuse == "vllm" else {})
+    if not segments:
+        raise ValueError(f"no 2-D tensors of dtype {', '.join(sorted(dtypes))}")
+    total = write_manifest(out, checkpoint, segments)
     for name in dropped:
         print(f"left out {name}: its bytes repeat another tensor's")
-    print(f"wrote {args.out}: {len(segments)} tensors, {total / 2**30:.3f} GiB")
+    print(f"wrote {out}: {len(segments)} tensors, {total / 2**30:.3f} GiB")
+
+
+def hub_files(repo):
+    """The commit and (name, size) of each safetensors file vLLM loads at the repository's head."""
+    with urllib.request.urlopen(f"{HUB}/api/models/{repo}?blobs=true") as r:
+        info = json.load(r)
+    names = {s["rfilename"] for s in info["siblings"]}
+    found = [(s["rfilename"], s["size"]) for s in info["siblings"]
+             if s["rfilename"].endswith(".safetensors") and "/" not in s["rfilename"]]
+    if INDEX in names:
+        with urllib.request.urlopen(f"{HUB}/{repo}/resolve/{info['sha']}/{INDEX}") as r:
+            listed = set(json.load(r)["weight_map"].values())
+        found = [(name, size) for name, size in found if name in listed]
+    if not found:
+        raise ValueError(f"{repo} has no safetensors files")
+    return info["sha"], sorted(found)
+
+
+def download(repo, sha, name, size, dest):
+    if dest.exists() and dest.stat().st_size == size:
+        print(f"have {name}")
+        return
+    print(f"downloading {name} ({size / 2**30:.2f} GiB)", flush=True)
+    part = dest.with_suffix(".part")
+    with urllib.request.urlopen(f"{HUB}/{repo}/resolve/{sha}/{name}") as r, part.open("wb") as f:
+        while chunk := r.read(DOWNLOAD_CHUNK):
+            f.write(chunk)
+    if part.stat().st_size != size:
+        raise ValueError(f"{name}: got {part.stat().st_size} bytes, expected {size}")
+    part.rename(dest)
+
+
+def fetch(repo, folder):
+    """Downloads the model into folder, writes its manifest there, and returns the manifest's path."""
+    folder = Path(folder)
+    sha, found = hub_files(repo)
+    folder.mkdir(parents=True, exist_ok=True)
+    print(f"{repo} at commit {sha}")
+    for name, size in found:
+        download(repo, sha, name, size, folder / name)
+    (folder / "revision").write_text(f"{repo} {sha}\n")
+    out = folder / MANIFEST
+    make_manifest(str(out), [str(folder / name) for name, _ in found])
+    return out
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="command", required=True)
+    f = sub.add_parser("fetch", help="download a Hugging Face model and write its manifest")
+    f.add_argument("repo", help="the model's repository, such as Qwen/Qwen2.5-7B-Instruct")
+    f.add_argument("dir", type=Path, help=f"the folder to download into; the manifest is <dir>/{MANIFEST}")
+    m = sub.add_parser("manifest", help="write the manifest for safetensors files you already have")
+    m.add_argument("out", help="the manifest to write")
+    m.add_argument("checkpoint", nargs="+", help="the checkpoint's safetensors files")
+    m.add_argument("--dtype", action="append", help="a safetensors dtype to include; repeatable (default BF16)")
+    m.add_argument("--fuse", choices=["vllm", "none"], default="vllm", help="stack projections as vLLM does")
+    args = p.parse_args()
+
+    try:
+        if args.command == "fetch":
+            fetch(args.repo, args.dir)
+        else:
+            make_manifest(args.out, args.checkpoint, args.dtype or ["BF16"], args.fuse)
+    except (ValueError, KeyError, OSError) as e:
+        sys.exit(f"model_weights: {e}")
 
 
 if __name__ == "__main__":

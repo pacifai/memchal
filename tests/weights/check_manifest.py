@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Checks the manifest weights_manifest.py writes for the synthetic checkpoint.
+"""Checks the manifest model_weights.py writes for the synthetic checkpoint.
 
 Usage: check_manifest.py MANIFEST
 """
