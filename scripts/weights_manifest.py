@@ -30,6 +30,7 @@ import os
 import re
 import struct
 import sys
+from collections import Counter
 
 FUSE_VLLM = {
     "self_attn.qkv_proj": ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
@@ -83,9 +84,13 @@ def digest(path, t):
 
 def drop_duplicates(paths, tensors):
     """Keeps the first tensor, in name order, of each set with identical bytes."""
+    sizes = Counter(t["bytes"] for t in tensors.values())
     seen, kept, dropped = set(), {}, []
     for name in sorted(tensors):
         t = tensors[name]
+        if sizes[t["bytes"]] == 1:
+            kept[name] = t
+            continue
         d = digest(paths[t["file"]], t)
         if d in seen:
             dropped.append(name)
