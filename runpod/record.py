@@ -70,7 +70,7 @@ def confirm_price(args):
 def rent(args):
     """Creates the pod and returns its id. A pod created despite an error is found by name and terminated."""
     say("renting")
-    name = f"memchal-record-{datetime.now(timezone.utc):%Y%m%dT%H%M%S}-{secrets.token_hex(3)}"
+    name = f"{args.name}-{datetime.now(timezone.utc):%Y%m%dT%H%M%S}-{secrets.token_hex(3)}"
     try:
         return runpod.create_pod(name, image_name=args.image, gpu_type_id=args.gpu, cloud_type=args.cloud,
                                  container_disk_in_gb=args.disk, ports="22/tcp")["id"]
@@ -179,6 +179,7 @@ def main():
     p.add_argument("--max-hours", type=float, default=6, help="the pod terminates itself this long after it starts")
     p.add_argument("--model", help="start the buffer with this Hugging Face model's weights, "
                                    "such as Qwen/Qwen2.5-7B-Instruct")
+    p.add_argument("--name", default="memchal-record", help="the start of the pod's name, which ends with the time")
     p.add_argument("--yes", "-y", action="store_true", help="rent without asking")
     args = p.parse_args()
 
