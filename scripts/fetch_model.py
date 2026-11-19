@@ -21,13 +21,24 @@ from pathlib import Path
 HUB = "https://huggingface.co"
 CHUNK = 1 << 24
 MANIFEST = "model.weights"
+INDEX = "model.safetensors.index.json"
 
 
 def files(repo):
-    """The commit and (name, size) of each safetensors file at the repository's head."""
+    """The commit and (name, size) of each safetensors file vLLM loads at the repository's head.
+
+    Like vLLM, it takes the top-level files, and only those the index lists when
+    there is one, so a second copy of the weights in another format is left out.
+    """
     with urllib.request.urlopen(f"{HUB}/api/models/{repo}?blobs=true") as r:
         info = json.load(r)
-    found = [(s["rfilename"], s["size"]) for s in info["siblings"] if s["rfilename"].endswith(".safetensors")]
+    names = {s["rfilename"] for s in info["siblings"]}
+    found = [(s["rfilename"], s["size"]) for s in info["siblings"]
+             if s["rfilename"].endswith(".safetensors") and "/" not in s["rfilename"]]
+    if INDEX in names:
+        with urllib.request.urlopen(f"{HUB}/{repo}/resolve/{info['sha']}/{INDEX}") as r:
+            listed = set(json.load(r)["weight_map"].values())
+        found = [(name, size) for name, size in found if name in listed]
     if not found:
         raise ValueError(f"{repo} has no safetensors files")
     return info["sha"], sorted(found)
