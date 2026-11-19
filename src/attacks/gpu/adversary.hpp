@@ -42,7 +42,7 @@ struct Adversary {
     Lanes     lanes;
     Staging   stage;
     RecomputeState rc;
-    CompressState* cw = nullptr;
+    CompressState  cw;
 };
 
 // Holds held_fraction of the buffer on the card and invents the rest.

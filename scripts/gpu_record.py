@@ -20,6 +20,8 @@ import threading
 import time
 from pathlib import Path
 
+import model_weights
+
 BUILD = Path(__file__).resolve().parent.parent / "build"
 VERIFIER = BUILD / "verifier"
 HONEST_PROVER = BUILD / "gpu" / "prover"
@@ -138,14 +140,6 @@ def label(run):
     return " ".join([run["mode"], *(f"{key}={run[key]}" for key in ATTACK_FLAGS if key in run)])
 
 
-def fetch(repo):
-    """Downloads the model and returns its weights manifest."""
-    folder = MODELS / repo.replace("/", "--")
-    subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "fetch_model.py"), repo, str(folder)],
-                   check=True)
-    return str(folder / "model.weights")
-
-
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--out", type=Path, required=True, help="the session file to write")
@@ -157,7 +151,11 @@ def main():
 
     settings, runs = SETTINGS, RUNS
     if args.model:
-        settings, runs = {**SETTINGS, "model": args.model, "weights": fetch(args.model)}, WEIGHTS_RUNS
+        try:
+            weights = model_weights.fetch(args.model, MODELS / args.model.replace("/", "--"))
+        except (ValueError, KeyError, OSError) as e:
+            sys.exit(f"cannot fetch {args.model}: {e}")
+        settings, runs = {**SETTINGS, "model": args.model, "weights": str(weights)}, WEIGHTS_RUNS
     args.out.parent.mkdir(parents=True, exist_ok=True)
     failed = False
     with args.out.open("w") as out:

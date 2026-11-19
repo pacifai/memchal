@@ -48,12 +48,13 @@ public:
         return PageRecorder{buf, pages_.data(), page_words_};
     }
 
-    void run(const char* label, double mib, double weights_mib, uint32_t samples, uint32_t lanes, uint32_t challenges,
+    void run(const char* label, double buffer_mib, double weights_mib, uint32_t samples, uint32_t lanes, uint32_t challenges,
              uint32_t warmup, bool locked, const char* gen, double gen_s, double upload_s) {
         Event(f_, "run")
             .str("label", label)
-            .num("mb", mib, "%.6g")
-            .num("weights_mb", weights_mib, "%.6g")
+            .num("buffer_mib", buffer_mib, "%.6g")
+            .num("filler_mib", buffer_mib - weights_mib, "%.6g")
+            .num("weights_mib", weights_mib, "%.6g")
             .uint("samples", samples)
             .uint("lanes", lanes)
             .uint("challenges", challenges)

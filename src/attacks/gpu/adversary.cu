@@ -167,7 +167,7 @@ bool to_device(T** dst, const std::vector<T>& src, const char* what, char* err, 
 // Compresses the weight part of a push, and copies the result to the card once
 // the last weight word has arrived.
 bool push_weights(Adversary& a, const unsigned char* src, size_t bytes, char* err, size_t errlen) {
-    CompressState& c = *a.cw;
+    CompressState& c = a.cw;
     c.writer.append((const uint64_t*)src, bytes / 8);
     if (c.writer.words() < c.weight_words) return true;
     c.writer.finish();
@@ -195,12 +195,9 @@ void destroy(Adversary& a) {
     if (r.d_done)       cudaFree(r.d_done);
     if (r.h_need)       cudaFreeHost(r.h_need);
     if (r.h_rebuilt)    cudaFreeHost(r.h_rebuilt);
-    if (a.cw) {
-        if (a.cw->d_head)  cudaFree(a.cw->d_head);
-        if (a.cw->d_bytes) cudaFree(a.cw->d_bytes);
-        if (a.cw->d_exps)  cudaFree(a.cw->d_exps);
-        delete a.cw;
-    }
+    if (a.cw.d_head)    cudaFree(a.cw.d_head);
+    if (a.cw.d_bytes)   cudaFree(a.cw.d_bytes);
+    if (a.cw.d_exps)    cudaFree(a.cw.d_exps);
     if (a.d_buf)  cudaFree(a.d_buf);
     if (a.h_host) cudaFreeHost(a.h_host);
     lanes_destroy(a.lanes);
@@ -252,9 +249,8 @@ bool create_compressed(Adversary& a, uint64_t num_words, uint64_t weight_words, 
     destroy(a);
     a.cheat = Cheat::Compress;
     a.num_words = num_words;
-    a.cw = new CompressState;
-    a.cw->weight_words = weight_words;
-    a.cw->writer.reserve(weight_words);
+    a.cw.weight_words = weight_words;
+    a.cw.writer.reserve(weight_words);
     cudaError_t e = cudaMalloc((void**)&a.d_buf, words_bytes(num_words - weight_words));
     if (e != cudaSuccess) return failed(a, err, errlen, "cudaMalloc(filler)", e);
     return finish_create(a, lane_cap, err, errlen);
@@ -292,7 +288,7 @@ bool push(Adversary& a, size_t bytes, char* err, size_t errlen) {
     if (at + bytes > end) { failmsg(err, errlen, "push past the end of the buffer"); return false; }
 
     if (a.cheat == Cheat::Compress) {
-        const size_t weights_end = a.cw->weight_words * 8;
+        const size_t weights_end = a.cw.weight_words * 8;
         const size_t w = at < weights_end ? std::min(bytes, weights_end - at) : 0;
         if (w && !push_weights(a, a.stage.h, w, err, errlen)) return false;
         if (bytes > w) {
@@ -332,7 +328,7 @@ bool answer(Adversary& a, uint64_t nonce, uint32_t samples, uint32_t lanes, bool
             return answer_with(a.lanes, LoadPartial{a.d_buf, a.d_host, a.dev_words}, a.num_words,
                                nonce, samples, lanes, chained, tree, out_hash, t, err, errlen);
         case Cheat::Compress: {
-            const CompressState& c = *a.cw;
+            const CompressState& c = a.cw;
             return answer_with(a.lanes, LoadCompressed{CodecView{c.d_head, c.d_bytes, c.d_exps},
                                                        c.weight_words, a.d_buf},
                                a.num_words, nonce, samples, lanes, chained, tree, out_hash, t,

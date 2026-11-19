@@ -15,7 +15,7 @@ keep results trustworthy. For what memchal is, start with the
 | `src/record/` | The events that the provers and the verifier print into a session file |
 | `src/bench/` | A benchmark for the cost of building the buffer |
 | `tests/` | The tests, in folders that mirror `src/`, and `run_tests.sh` |
-| `scripts/` | The trial harness and its plots, the GPU session recorder, and the weights manifest and model download |
+| `scripts/` | The trial harness and its plots, the GPU session recorder, and the model weights tool, which downloads a model and writes its manifest |
 | `runpod/` | Renting a RunPod GPU, preparing it, recording a session there, and releasing it |
 | `docker/` | The toolchain image, and `run.sh`, which runs a command in it |
 | `docs/decisions/` | The decision records behind the design and its claims |

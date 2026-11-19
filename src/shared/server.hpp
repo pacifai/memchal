@@ -4,7 +4,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <sys/time.h>
-#include <vector>
 #include "shared/protocol.hpp"
 #include "shared/socket.hpp"
 #include "shared/weights.hpp"
@@ -165,13 +164,13 @@ static inline bool src_read(Source& s, void* dst, size_t n) {
 }
 
 static inline bool src_skip(Source& s, size_t n) {
-    std::vector<char> chunk(1 << 16);
-    while (n && (s.weights.left() || !s.built)) {
-        const size_t take = std::min(n, chunk.size());
-        if (!src_read(s, chunk.data(), take)) return false;
+    if (s.built) { s.offset += n; return true; }
+    char chunk[1 << 16];
+    while (n) {
+        size_t take = n < sizeof chunk ? n : sizeof chunk;
+        if (!recv_all(s.fd, chunk, take)) return false;
         n -= take;
     }
-    s.offset += n;
     return true;
 }
 
