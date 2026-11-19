@@ -92,7 +92,8 @@ static inline bool write_json(const char* path, const Args& a, const Profile& pr
         .str("clock", "steady_clock")
         .end_object();
     j.begin_object("params")
-        .num("mb", a.mib, "%.6g")
+        .num("buffer_mib", bytes / 1048576.0, "%.6g")
+        .num("filler_mib", a.mib, "%.6g")
         .uint("weight_bytes", weight_bytes)
         .uint("samples", a.samples)
         .uint("lanes", a.lanes)
