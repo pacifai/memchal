@@ -4,7 +4,10 @@
 The session file holds, for each run, a meta line with the run's settings, then every event the
 prover and the verifier printed. The demo site replays it.
 
-Usage: python3 scripts/gpu_record.py --out results/sessions/NAME.jsonl
+With --model, the buffer starts with that model's weights, which every prover holds, and the
+session records WEIGHTS_RUNS instead of RUNS.
+
+Usage: python3 scripts/gpu_record.py --out results/sessions/NAME.jsonl [--model REPO]
 Exit: 0 every run was recorded, 1 a run failed and was left out.
 """
 import argparse
@@ -38,11 +41,23 @@ RUNS = [
     {"mode": "partial", "offload": 1.0},
     {"mode": "uvm", "free": 2400, "challenges": 20, "warmup": 2},
 ]
+WEIGHTS_RUNS = [
+    {"mode": "honest"},
+    {"mode": "fake", "frac": 0.5},
+    {"mode": "partial", "offload": 0.05},
+    {"mode": "partial", "offload": 0.1},
+    {"mode": "compress"},
+]
 ATTACK_FLAGS = {"frac": "--frac", "offload": "--offload", "free": "--leave-free"}
+MODELS = Path.home() / "models"
+
+
+def weights_flag(cfg):
+    return ["--weights", cfg["weights"]] if "weights" in cfg else []
 
 
 def prover_cmd(cfg):
-    common = ["--port", str(PROVER_PORT), "--trace", "1", "--lane-cap", str(cfg["lanes"])]
+    common = ["--port", str(PROVER_PORT), "--trace", "1", "--lane-cap", str(cfg["lanes"]), *weights_flag(cfg)]
     if cfg["mode"] == "honest":
         return [str(HONEST_PROVER), *common]
     attack = [arg for key, flag in ATTACK_FLAGS.items() if key in cfg for arg in (flag, str(cfg[key]))]
@@ -57,7 +72,7 @@ def verifier_cmd(cfg):
             "--build-parallelism", str(cfg["build_parallelism"]),
             "--chain", cfg["chain"], "--nonce", cfg["nonce"], "--fold", cfg["fold"],
             "--verify-every", str(cfg["verify"]), "--label", f"gpu-{cfg['mode']}",
-            "--csv", "/dev/null", "--stream", "-", "--probe-map", "0"]
+            "--csv", "/dev/null", "--stream", "-", "--probe-map", "0", *weights_flag(cfg)]
 
 
 def collect(stream, src, events, lock):
@@ -123,19 +138,31 @@ def label(run):
     return " ".join([run["mode"], *(f"{key}={run[key]}" for key in ATTACK_FLAGS if key in run)])
 
 
+def fetch(repo):
+    """Downloads the model and returns its weights manifest."""
+    folder = MODELS / repo.replace("/", "--")
+    subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "fetch_model.py"), repo, str(folder)],
+                   check=True)
+    return str(folder / "model.weights")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--out", type=Path, required=True, help="the session file to write")
+    p.add_argument("--model", help="a Hugging Face model whose weights start the buffer")
     args = p.parse_args()
     for binary in (VERIFIER, HONEST_PROVER, CHEATING_PROVER):
         if not binary.exists():
             sys.exit(f"{binary} is not built. Run `make all gpu` first.")
 
+    settings, runs = SETTINGS, RUNS
+    if args.model:
+        settings, runs = {**SETTINGS, "model": args.model, "weights": fetch(args.model)}, WEIGHTS_RUNS
     args.out.parent.mkdir(parents=True, exist_ok=True)
     failed = False
     with args.out.open("w") as out:
-        for run in RUNS:
-            events, why = record_run({**SETTINGS, **run})
+        for run in runs:
+            events, why = record_run({**settings, **run})
             if why:
                 failed = True
                 print(f"{label(run)}: FAILED, {why}", flush=True)

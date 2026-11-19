@@ -63,5 +63,8 @@ bool answer(Prover& p, uint64_t nonce, uint32_t samples, uint32_t lanes, bool ch
 // The memory backing the buffer, as CUDA reports it.
 Residency residency(const Prover& p);
 
+// Device memory held, as a fraction of the buffer's size.
+static inline double resident_fraction(const Prover&) { return 1.0; }
+
 } // namespace gpu
 } // namespace mc

@@ -4,15 +4,28 @@ Open work, most important first. Each item says what is open and why it
 matters. When an item is done, delete it here and record the result in the
 README or a decision record.
 
+- [ ] **Catch the `compress` attack.** Weights compress, so a prover that stores
+  them compressed holds less memory than it claims. In one H100 session,
+  `compress` kept Qwen2.5-7B-Instruct's weights at 76.4% of their size and
+  answered 1.26x slower than the honest prover, which the honest run's spread
+  hides. Open questions: whether a rule that compares the fastest answers, or a
+  quieter honest baseline, catches it; how small a better compressor gets while
+  answering in time; and so how much the weights should count for.
+
 - [ ] **Find out why small amounts of off-chip data go unnoticed.** A GPU prover
-  that keeps about 5% of the buffer in the server's main memory answers about
-  as fast as an honest one, so the timing check passes it. That 5% is on-chip
-  memory a cheater gets to use for something else. Open questions: how much of
-  this gap comes from noise in the measurement setup and how much from the
-  method itself, why filling a whole card is hard to account for, how much data
-  a cheater could realistically keep elsewhere for a given card, buffer size,
-  and number of reads, and what the freed memory is worth to it. A first step
-  could be to measure the gap while changing one variable at a time.
+  that keeps a small part of the buffer in the server's main memory answers
+  about as fast as an honest one, so the timing check passes it. That part is
+  on-chip memory a cheater gets to use for something else. On three H100
+  servers, what set the cost was the amount of data in main memory, not the
+  fraction of the buffer. Up to about 512 MiB, each read from main memory cost
+  2 to 5 ns more than a read from the card. Between 512 MiB and 2 GiB the cost
+  rose steeply, then leveled off near 28 ns. The CPU's cache played no part
+  (investigation `partial-offload-cost`). So a cheater can keep about 512 MiB
+  per card in main memory almost for free, and a threshold set on one buffer
+  size doesn't carry over to another. Open questions: whether the limit is a
+  cache of address translations on the card or in the server, whether it moves
+  on other GPUs and servers, and whether a challenge can make those 512 MiB
+  cost more.
 
 - [ ] **Make combining the answer cheaper.** A challenge splits its reads into
   parallel chains, and the GPU combines the chains' results into one answer in
@@ -41,12 +54,6 @@ README or a decision record.
   the buffer at random. A real cheater could work out which pieces are cheapest
   to rebuild and discard those. The open question is whether it still fails.
 
-- [ ] **Measure a cheater that stores the buffer compressed.** The buffer is
-  random today, so it can't be compressed. Model weights often can. If the
-  buffer is ever derived from weights, a prover could keep it compressed and
-  decompress only what each challenge reads. Measure how much memory that saves
-  and whether the timing check notices.
-
 - [ ] **Decide how to handle a neighboring GPU.** On a server with several
   GPUs, a prover could keep part of the buffer in another GPU's memory, which
   it reaches over a direct GPU-to-GPU link. That is much closer to on-chip
@@ -63,10 +70,12 @@ README or a decision record.
   could check only those. Checking would be cheaper and the answer harder to
   guess.
 
-- [ ] **Tie the buffer to the model weights.** Today the prover shows that it
-  holds random data from the verifier. The goal is to show that it holds data
-  tied to the workload it declared, while model providers keep working as they
-  do today.
+- [ ] **Challenge the weights where vLLM holds them.** Today each prover reads
+  the weights into its own buffer. Inside an inference engine, each tensor is a
+  separate allocation, and a copy would cost the model's size again. Open
+  questions: whether vLLM keeps each bf16 tensor's checkpoint bytes, and
+  whether answering from a thread in the engine's process slows inference or
+  the answers.
 
 - [ ] **Run the CPU version on a real machine with a buffer larger than RAM.**
   The CPU numbers come from Docker on a Mac, where storage is virtualized. This

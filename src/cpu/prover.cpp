@@ -12,17 +12,48 @@ static const char kUsage[] =
     "usage: prover [--flag value]...\n"
     "  --port N           listen port (default %u)\n"
     "  --trace N          print a residency event every N challenges\n"
+    "  --weights PATH     hold the model weights this manifest lists\n"
     "  --allow-unlocked   run even if the buffer cannot be locked in RAM\n";
 
-static bool     g_allow_unlocked = false;
-static uint32_t g_trace_every    = 0;
+static bool            g_allow_unlocked = false;
+static uint32_t        g_trace_every    = 0;
+static const Manifest* g_weights        = nullptr;
+
+// Reads the weights into the start of the buffer, then builds or receives the
+// filler after them.
+static bool fill(int cfd, const Setup& s, uint64_t* words) {
+    char err[512] = "short read";
+    WeightsReader weights;
+    if (s.weights && (!weights.open(*s.weights, err, sizeof err) || !weights.read(words, s.weight_bytes))) {
+        fprintf(stderr, "[prover] cannot read the weights: %s\n", err);
+        return false;
+    }
+    uint64_t* filler = words + s.weight_bytes / 8;
+    if (!s.build) {
+        if (recv_all(cfd, filler, s.filler_bytes())) return true;
+        fprintf(stderr, "[prover] short data\n");
+        return false;
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    if (!build_buffer(filler, s.filler_words(), s.recipe)) {
+        fprintf(stderr, "[prover] build failed\n");
+        return false;
+    }
+    printf("[prover] built in %.3f s\n",
+           std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+    return true;
+}
 
 static void serve(int cfd) {
     Setup s;
-    char err[256];
-    if (!read_setup(cfd, s, err, sizeof err)) { fprintf(stderr, "[prover] refusing: %s\n", err); return; }
-    printf("[prover] %s %.2f MiB (%llu words)\n", s.build ? "building" : "receiving",
-           s.bytes / 1048576.0, (unsigned long long)s.num_words);
+    char err[512];
+    if (!read_setup(cfd, g_weights, s, err, sizeof err)) {
+        fprintf(stderr, "[prover] refusing: %s\n", err);
+        return;
+    }
+    printf("[prover] %.2f MiB (%llu words): %.2f MiB of weights, then %s the filler\n",
+           s.bytes / 1048576.0, (unsigned long long)s.num_words, s.weight_bytes / 1048576.0,
+           s.build ? "building" : "receiving");
 
     Pinned buf;
     if (!pin(buf, s.bytes)) return;
@@ -36,18 +67,7 @@ static void serve(int cfd) {
         }
         fprintf(stderr, "[prover] WARNING: running unlocked; reporting locked=false\n");
     }
-
-    if (s.build) {
-        const auto t0 = std::chrono::steady_clock::now();
-        if (!build_buffer(buf.words, s.num_words, s.recipe)) {
-            fprintf(stderr, "[prover] build failed\n");
-            unpin(buf); return;
-        }
-        printf("[prover] built in %.3f s\n",
-               std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
-    } else if (!recv_all(cfd, buf.words, s.bytes)) {
-        fprintf(stderr, "[prover] short data\n"); unpin(buf); return;
-    }
+    if (!fill(cfd, s, buf.words)) { unpin(buf); return; }
     printf("[prover] buffer resident; memory %s\n", buf.locked ? "locked" : "NOT locked");
     if (!send_ready(cfd, buf.locked)) { unpin(buf); return; }
 
@@ -72,8 +92,9 @@ int main(int argc, char** argv) {
         const char* a = argv[i];
         if      (!strcmp(a, "--help") || !strcmp(a, "-h")) cli.help();
         else if (!strcmp(a, "--allow-unlocked")) g_allow_unlocked = true;
-        else if (!strcmp(a, "--port"))  port = cli.port(a, cli.value(argc, argv, &i));
-        else if (!strcmp(a, "--trace")) g_trace_every = cli.u32(a, cli.value(argc, argv, &i));
+        else if (!strcmp(a, "--port"))    port = cli.port(a, cli.value(argc, argv, &i));
+        else if (!strcmp(a, "--trace"))   g_trace_every = cli.u32(a, cli.value(argc, argv, &i));
+        else if (!strcmp(a, "--weights")) g_weights = held_weights(cli.value(argc, argv, &i), "prover");
         else cli.error("unknown flag: %s", a);
     }
     return serve_forever("prover", port, serve);

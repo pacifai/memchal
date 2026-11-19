@@ -8,13 +8,14 @@
 
 using namespace mc;
 
-enum Mode { FAKE, UVM, PARTIAL, RECOMPUTE };
-static const char* const kModeNames[] = { "fake", "uvm", "partial", "recompute", nullptr };
+enum Mode { FAKE, UVM, PARTIAL, RECOMPUTE, COMPRESS };
+static const char* const kModeNames[] = { "fake", "uvm", "partial", "recompute", "compress", nullptr };
 
 static const char kUsage[] =
     "usage: attacks/gpu/cheating_prover [--flag value]...\n"
     "  --port N              listen port (default %u)\n"
-    "  --mode MODE           fake, uvm, partial, or recompute (default uvm)\n"
+    "  --mode MODE           fake, uvm, partial, recompute, or compress (default uvm)\n"
+    "  --weights PATH        hold the model weights this manifest lists\n"
     "  --frac F              fake: fraction held (default 0.5)\n"
     "  --offload F           partial: fraction kept in host memory (default 0.1)\n"
     "  --leave-free MIB      reserve device memory until this much is free\n"
@@ -32,6 +33,7 @@ static int              g_device         = 0;
 static uint32_t         g_lane_cap       = 1u << 17;
 static uint32_t         g_trace_every    = 0;
 static RecomputeOptions g_recompute;
+static const Manifest*  g_weights        = nullptr;
 
 // Answers challenges with the recompute cheat.
 static void answer_recompute(int cfd, gpu::Adversary& p, RecomputeHost& h) {
@@ -83,30 +85,32 @@ static void serve_recompute(int cfd, const Setup& s) {
     gpu::destroy(p);
 }
 
-static bool create_for_mode(gpu::Adversary& p, uint64_t num_words, char* err, size_t errlen) {
+static bool create_for_mode(gpu::Adversary& p, const Setup& s, char* err, size_t errlen) {
     switch (g_mode) {
-        case FAKE:      return gpu::create_fake(p, num_words, g_frac, g_lane_cap, err, errlen);
-        case UVM:       return gpu::create_managed(p, num_words, g_lane_cap, err, errlen);
-        case PARTIAL:   return gpu::create_partial(p, num_words, g_offload, g_lane_cap, err, errlen);
+        case FAKE:      return gpu::create_fake(p, s.num_words, g_frac, g_lane_cap, err, errlen);
+        case UVM:       return gpu::create_managed(p, s.num_words, g_lane_cap, err, errlen);
+        case PARTIAL:   return gpu::create_partial(p, s.num_words, g_offload, g_lane_cap, err, errlen);
+        case COMPRESS:  return gpu::create_compressed(p, s.num_words, s.weight_bytes / 8, g_lane_cap,
+                                                      err, errlen);
         case RECOMPUTE: break;
     }
     snprintf(err, errlen, "recompute has its own setup");
     return false;
 }
 
-// Serves fake, uvm, and partial, which receive the buffer the way the honest
+// Serves fake, uvm, partial, and compress, which receive the buffer the way the honest
 // prover does and claim it is locked in device memory.
 static void serve_upload(int cfd, const Setup& s) {
     char err[512] = {0};
     gpu::Adversary p;
-    if (!create_for_mode(p, s.num_words, err, sizeof err)) {
+    if (!create_for_mode(p, s, err, sizeof err)) {
         fprintf(stderr, "[cheat] FATAL: %s\n", err);
         return;
     }
     const gpu::Residency where = gpu::residency(p);
     printf("[cheat] backing = %s (claiming locked=true regardless)\n", where.backing);
     gpu::serve_buffer(cfd, s, p, "cheat",
-                      {"cheatinfo", kModeNames[g_mode], where, gpu::resident_fraction(p), true},
+                      {"cheatinfo", kModeNames[g_mode], where, true},
                       g_trace_every);
     gpu::destroy(p);
 }
@@ -129,9 +133,13 @@ static bool leave_free() {
 static void serve(int cfd) {
     Setup s;
     char err[512] = {0};
-    if (!read_setup(cfd, s, err, sizeof err)) { fprintf(stderr, "[cheat] refusing: %s\n", err); return; }
-    if (g_mode == RECOMPUTE && !s.build) {
-        fprintf(stderr, "[cheat] recompute needs a build-mode verifier (--gen argon2d)\n");
+    if (!read_setup(cfd, g_weights, s, err, sizeof err)) { fprintf(stderr, "[cheat] refusing: %s\n", err); return; }
+    if (g_mode == RECOMPUTE && (!s.build || s.weights)) {
+        fprintf(stderr, "[cheat] recompute needs a build-mode verifier (--gen argon2d) and no weights\n");
+        return;
+    }
+    if (g_mode == COMPRESS && !s.weights) {
+        fprintf(stderr, "[cheat] compress needs a verifier that names weights (--weights)\n");
         return;
     }
     printf("[cheat] mode=%s %s %.2f MiB (%llu words)\n", kModeNames[g_mode],
@@ -158,6 +166,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--device"))          g_device = (int)cli.u32(a, v);
         else if (!strcmp(a, "--lane-cap"))        g_lane_cap = cli.u32(a, v);
         else if (!strcmp(a, "--trace"))           g_trace_every = cli.u32(a, v);
+        else if (!strcmp(a, "--weights"))         g_weights = held_weights(v, "cheat");
         else if (!strcmp(a, "--keep"))            g_recompute.keep = cli.number(a, v, 0.0, 1.0);
         else if (!strcmp(a, "--rebuild-budget"))  g_recompute.budget = cli.uint(a, v);
         else if (!strcmp(a, "--rebuild-threads")) g_recompute.threads = cli.u32(a, v);

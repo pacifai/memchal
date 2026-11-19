@@ -17,6 +17,7 @@ constexpr uint32_t kChallengeTerminate = 1u;
 constexpr uint32_t kChallengeChained   = 2u;
 constexpr uint32_t kChallengeTreeFold  = 4u;
 constexpr uint32_t kHelloBuild         = 4u;
+constexpr uint32_t kHelloWeights       = 8u;
 
 constexpr uint64_t kMaxBufferBytes = 1ULL << 40;
 constexpr uint32_t kMaxLanes       = 1u << 24;
@@ -40,8 +41,15 @@ struct RecipeMsg {
     uint32_t parallelism;
     uint8_t  workload_tag[32];
 };
+// Sent after a hello flagged kHelloWeights: the buffer starts with the model
+// weights that the manifest with this digest lists.
+struct WeightsMsg {
+    uint8_t  digest[32];
+    uint64_t bytes;
+};
 #pragma pack(pop)
 static_assert(sizeof(RecipeMsg) == 92, "RecipeMsg is a fixed 92-byte wire layout");
+static_assert(sizeof(WeightsMsg) == 40, "WeightsMsg is a fixed 40-byte wire layout");
 
 static inline Recipe recipe_from_msg(const RecipeMsg& m) {
     Recipe r;
@@ -72,7 +80,7 @@ static inline bool hello_ok(const Hello& h, char* err, size_t n) {
                  (unsigned long long)h.buffer_bytes, (unsigned long long)(kMaxBufferBytes >> 30));
         return false;
     }
-    if (h.flags & ~kHelloBuild) { snprintf(err, n, "unknown hello flags 0x%x", h.flags); return false; }
+    if (h.flags & ~(kHelloBuild | kHelloWeights)) { snprintf(err, n, "unknown hello flags 0x%x", h.flags); return false; }
     return true;
 }
 

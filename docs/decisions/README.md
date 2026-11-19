@@ -16,3 +16,4 @@ it, and the old one says so at the top.
 | [0005](0005-per-lane-chaining-vs-gpu-parallelism.md) | Each challenge is many short chains of dependent reads | It balances a cheat's prefetching against a GPU's parallelism |
 | [0006](0006-chacha20-vendored-vs-dependency.md) | ChaCha20 is a small file in the repo, not a library | It keeps the core free of dependencies |
 | [0007](0007-buffer-generator-memory-hard-function.md) | A buffer built from a recipe uses Argon2d (proposed) | Rebuilding part of the buffer has to be slower than keeping it |
+| [0008](0008-buffer-starts-with-model-weights.md) | The buffer can start with the model's weights (proposed) | The weights count toward the memory a prover accounts for, but they compress and are public |

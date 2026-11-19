@@ -13,7 +13,6 @@ struct Claim {
     const char* event;
     const char* mode;
     Residency   where;
-    double      resident_frac;
     bool        locked;
 };
 
@@ -35,16 +34,17 @@ static inline void serve_buffer(int cfd, const Setup& s, P& p, const char* tag, 
                                 uint32_t trace_every) {
     char err[512] = {0};
     Source src{cfd};
-    bool ok = !s.build || build_on_host(src, s, err, sizeof err);
+    bool ok = open_source(src, s, err, sizeof err);
     if (ok && s.build) printf("[%s] built on the host in %.3f s; copying to the card\n", tag, src.build_s);
     ok = ok && upload(p, src, s.bytes, err, sizeof err);
     free_built(src);
     if (!ok) { fprintf(stderr, "[%s] FATAL: %s\n", tag, err); return; }
 
-    printf("[%s] buffer %s; backing = %s\n", tag, s.build ? "built and copied" : "uploaded",
-           c.where.backing);
+    printf("[%s] buffer on the card: %.2f MiB of weights, filler %s; backing = %s\n", tag,
+           s.weight_bytes / 1048576.0, s.build ? "built and copied" : "uploaded", c.where.backing);
     report_hbm(tag, "after upload");
-    record::print_buffer_info(c.event, c.mode, c.where.backing, c.where.on_device, c.resident_frac,
+    const double held = resident_fraction(p);
+    record::print_buffer_info(c.event, c.mode, c.where.backing, c.where.on_device, held,
                             s.build, src.build_s);
     if (!send_ready(cfd, c.locked)) return;
 
@@ -59,7 +59,7 @@ static inline void serve_buffer(int cfd, const Setup& s, P& p, const char* tag, 
         },
         [&](const Challenge& ch, uint64_t n) {
             if (trace_every && n % trace_every == 0)
-                record::print_timing(c.mode, ch, n, t, c.resident_frac, c.where.on_device);
+                record::print_timing(c.mode, ch, n, t, held, c.where.on_device);
             return true;
         });
     printf("[%s] served %llu challenges\n", tag, (unsigned long long)served);
