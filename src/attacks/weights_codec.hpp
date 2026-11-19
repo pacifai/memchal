@@ -66,7 +66,7 @@ public:
         exps_.push_back(0);
     }
 
-    uint64_t words() const { return bytes_.size(); }
+    uint64_t words() const { return bytes_.size() + pending_.size(); }
     uint64_t compressed_bytes() const { return head_.size() * 8 + bytes_.size() * 4 + exps_.size() * 8; }
     const std::vector<uint64_t>& head() const { return head_; }
     const std::vector<uint32_t>& bytes() const { return bytes_; }

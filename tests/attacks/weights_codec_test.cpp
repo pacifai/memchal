@@ -36,6 +36,11 @@ static bool round_trip(const char* name, const std::vector<uint64_t>& in, double
     w.reserve(in.size());
     for (uint64_t at = 0, step = 1; at < in.size(); at += step, step = step * 3 % 1000 + 1)
         w.append(in.data() + at, std::min<uint64_t>(step, in.size() - at));
+    if (w.words() != in.size()) {
+        printf("FAIL %s: words() is %llu before finish(), want %llu\n", name, (unsigned long long)w.words(),
+               (unsigned long long)in.size());
+        return false;
+    }
     w.finish();
     const CodecView v = w.view();
     for (uint64_t i = 0; i < in.size(); ++i) {

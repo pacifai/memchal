@@ -58,6 +58,7 @@ VERIFIER_ARGS="--mb 8 --samples 2048 --lanes 16 --challenges 100 --warmup 20 --c
 #           "refused" (the prover turns the verifier away).
 #   VERIFIER_EXTRA: verifier flags for this case only.
 #   LOG_DONE: the prover's last log line for a session (default "served").
+#   REFUSAL: the start of the reason a "refused" prover logs.
 run_invariant() {
     local name="$1" port="$2" expect="$3"
     shift 3
@@ -84,7 +85,11 @@ run_invariant() {
     wait "$srv_pid" 2>/dev/null || true
 
     if [ "$expect" = "refused" ]; then
-        if [ "$verifier_ok" -eq 0 ]; then pass "INVARIANT $name (refused)"; else fail "INVARIANT $name (not refused)"; fi
+        if [ "$verifier_ok" -eq 0 ] && grep -q "refusing: ${REFUSAL:-}" "/tmp/inv_server_${name}.log"; then
+            pass "INVARIANT $name (refused)"
+        else
+            fail "INVARIANT $name (not refused)"
+        fi
         return
     fi
     if [ "$verifier_ok" -ne 1 ]; then
@@ -197,7 +202,7 @@ VERIFIER_EXTRA="$MODEL" run_invariant weights_honest 9401 correct $PROVER --port
 VERIFIER_EXTRA="$MODEL --mb 0" run_invariant weights_only 9402 correct $PROVER --port 9402 $MODEL
 VERIFIER_EXTRA="$MODEL --gen argon2d" run_invariant weights_build 9403 correct $PROVER --port 9403 $MODEL
 VERIFIER_EXTRA="$MODEL" run_invariant weights_other_model 9404 all_wrong $PROVER --port 9404 $OTHER
-VERIFIER_EXTRA="$MODEL" run_invariant weights_none_held 9405 refused $PROVER --port 9405
+REFUSAL="the verifier named model weights" VERIFIER_EXTRA="$MODEL" run_invariant weights_none_held 9405 refused $PROVER --port 9405
 VERIFIER_EXTRA="$MODEL" run_invariant weights_disk 9406 correct \
     $CHEAT --port 9406 --mode disk --datafile /tmp/memchal_test_weights_disk.bin $MODEL
 rm -rf "$WDIR"

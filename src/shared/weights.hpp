@@ -142,9 +142,10 @@ public:
             if (piece_ >= m_->pieces.size()) return false;
             const Piece& p = m_->pieces[piece_];
             const size_t take = (size_t)std::min<uint64_t>(bytes, p.bytes - in_piece_);
-            if (pread(fds_[p.file], out, take, (off_t)(p.offset + in_piece_)) != (ssize_t)take)
-                return false;
-            out += take; bytes -= take; read_ += take; in_piece_ += take;
+            const ssize_t got = pread(fds_[p.file], out, take, (off_t)(p.offset + in_piece_));
+            if (got < 0 && errno == EINTR) continue;
+            if (got <= 0) return false;
+            out += got; bytes -= got; read_ += got; in_piece_ += got;
             if (in_piece_ == p.bytes) { ++piece_; in_piece_ = 0; }
         }
         return true;

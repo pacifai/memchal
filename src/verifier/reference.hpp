@@ -91,8 +91,8 @@ static inline bool make_reference(const Args& a, Reference& ref, char* err, size
 
     const auto t0 = std::chrono::steady_clock::now();
     WeightsReader reader;
-    if (ref.has_weights() && (!reader.open(ref.weights, err, errlen) ||
-                              !reader.read(ref.words, ref.weight_bytes))) {
+    if (ref.has_weights() && !reader.open(ref.weights, err, errlen)) return false;
+    if (ref.has_weights() && !reader.read(ref.words, ref.weight_bytes)) {
         snprintf(err, errlen, "cannot read the weights %s lists", a.weights);
         return false;
     }
