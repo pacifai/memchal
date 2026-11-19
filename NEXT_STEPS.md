@@ -13,16 +13,19 @@ README or a decision record.
   answering in time; and so how much the weights should count for.
 
 - [ ] **Find out why small amounts of off-chip data go unnoticed.** A GPU prover
-  that keeps about 5% of the buffer in the server's main memory answers about
-  as fast as an honest one, so the timing check passes it. That 5% is on-chip
-  memory a cheater gets to use for something else. Open questions: how much of
-  this gap comes from noise in the measurement setup and how much from the
-  method itself, why filling a whole card is hard to account for, how much data
-  a cheater could realistically keep elsewhere for a given card, buffer size,
-  and number of reads, and what the freed memory is worth to it. In one session
-  with an 18.2 GiB buffer of weights and filler, 5% in main memory made the
-  median answer 2.4x slower, so the buffer's size may matter. A first step
-  could be to measure the gap while changing one variable at a time.
+  that keeps a small part of the buffer in the server's main memory answers
+  about as fast as an honest one, so the timing check passes it. That part is
+  on-chip memory a cheater gets to use for something else. On three H100
+  servers, what set the cost was the amount of data in main memory, not the
+  fraction of the buffer. Up to about 512 MiB, each read from main memory cost
+  2 to 5 ns more than a read from the card. Between 512 MiB and 2 GiB the cost
+  rose steeply, then leveled off near 28 ns. The CPU's cache played no part
+  (investigation `partial-offload-cost`). So a cheater can keep about 512 MiB
+  per card in main memory almost for free, and a threshold set on one buffer
+  size doesn't carry over to another. Open questions: whether the limit is a
+  cache of address translations on the card or in the server, whether it moves
+  on other GPUs and servers, and whether a challenge can make those 512 MiB
+  cost more.
 
 - [ ] **Make combining the answer cheaper.** A challenge splits its reads into
   parallel chains, and the GPU combines the chains' results into one answer in
